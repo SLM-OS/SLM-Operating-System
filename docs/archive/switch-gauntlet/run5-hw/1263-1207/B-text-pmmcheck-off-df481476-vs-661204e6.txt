@@ -1,0 +1,167 @@
+# PMM_CHECK off: production kernels at df481476 against 661204e6.
+# Built by B-prodbuild.sh.txt (make kernel PLATFORM=..., PMM_CHECK not set), worktree .wt/b-base at each commit in turn.
+
+== 661204e6 JETSON_ORIN_NANO (make kernel, PMM_CHECK not set) rc=0
+.text             2479384   2147483648
+.rodata           6160546   2149963264
+.data              148480   2156134400
+.bss             37495152   2156331008
+.text sha256: ddac2e32f04977c80f411acf125f0efe8f8a4a8023d7b6ebedc6fb3646e5aee6 bytes 2479384
+pmm.c.obj .text sha256: ace58880a924a924729ecefc2055bffc59b72023e50baab1fb3c544bd00869e4 bytes 6188
+pmm-check strings in the image: 0
+elf sha256: 626c099a2edee73319727f359e2bafe2167ea517c351065cc865791749f8a72d
+== 661204e6 RASPI5 (make kernel, PMM_CHECK not set) rc=0
+.text             2237304     524288
+.rodata           5292202    2761600
+.data              148048    8060928
+.bss             36217456    8257536
+.text sha256: 1e3d3221177c96d9ca696e5c21f5e0e26b71ff970d5df67671b338dec741ee12 bytes 2237304
+pmm.c.obj .text sha256: 6e12c4827a52a92266cc8776c398aa30cfaaa54c4782fb6fa96504129db474b4 bytes 6060
+pmm-check strings in the image: 0
+elf sha256: d55d44f806abb83284d962e7253ba7645d966906fd99335dec8cd93540e490c3
+== 661204e6 QEMU_VIRT (make kernel, PMM_CHECK not set) rc=0
+.text             2227160   1073741824
+.rodata           4202106   1075969024
+.data              147456   1080229888
+.bss             26503568   1080426496
+.text sha256: 21998f5407948b5f6d5bde3ef14e3918539b6799d17f2d97cd8e85d984ee7469 bytes 2227160
+pmm.c.obj .text sha256: 144ca338496edd5be7707c5e6d76f4f7f1097123f86a4c8cf1227d174eb910a1 bytes 6060
+pmm-check strings in the image: 0
+elf sha256: 275daf80261686d5e346cfb4efa02776bd9eadd645ab8d2804de5e2ebb07ce05
+
+== df481476 JETSON_ORIN_NANO (make kernel, PMM_CHECK not set) rc=0
+.text             2479384   2147483648
+.rodata           6160546   2149963264
+.data              148480   2156134400
+.bss             37495152   2156331008
+.text sha256: e0759c4718223c5942d607f21ce0115dbd0da3de5c382d21429425bf6c8953a1 bytes 2479384
+pmm.c.obj .text sha256: 762863701e1b44e23e08ca37eaa6d9e1f649d292b800df058d702d3bc43fe798 bytes 6188
+pmm-check strings in the image: 0
+elf sha256: 184bac69c1f2ec47c528fa4b9b0a691fc6f839834f95fbd075bf307ebdcd5153
+== df481476 RASPI5 (make kernel, PMM_CHECK not set) rc=0
+.text             2237304     524288
+.rodata           5292202    2761600
+.data              148048    8060928
+.bss             36217456    8257536
+.text sha256: 8f9c9abeaa01073079538f4bb3631646e0cf5cb4c7eb1b0eeea8756f844ac7c8 bytes 2237304
+pmm.c.obj .text sha256: 6424cfc8f3fd3c8275a37fa4e37a8ed3752ad6b363316777abd7ab104dfcb71d bytes 6060
+pmm-check strings in the image: 0
+elf sha256: e6580fb96393ff21beceee79c42930ff7f720278f3fdbae150e9d01930d8faf6
+== df481476 QEMU_VIRT (make kernel, PMM_CHECK not set) rc=0
+.text             2227160   1073741824
+.rodata           4202106   1075969024
+.data              147456   1080229888
+.bss             26503568   1080426496
+.text sha256: 3b17f78c6191a8f861857f600992c226d9c56b608b4ca814af38399f4bbe02a3 bytes 2227160
+pmm.c.obj .text sha256: ec8363302f5cf6b4b02d08654a76e2faaaf364e1bcdf7abfb4cfb4bac53745a1 bytes 6060
+pmm-check strings in the image: 0
+elf sha256: 32d36b83ea8a82abd4aebf271b84daa4d6a0100152fe931cea28ac69fb453d48
+
+== JETSON_ORIN_NANO: bytes that differ between the two images' .text (cmp -l | wc -l): 16
+== JETSON_ORIN_NANO: bytes that differ between the two pmm.c.obj .text (cmp -l | wc -l): 16
+== JETSON_ORIN_NANO: pmm.c.obj disassembly diff, addresses stripped (< 661204e6, > df481476):
+107c107
+< 528083e2 	mov	w2, #0x41f                 	// #1055
+---
+> 5280b802 	mov	w2, #0x5c0                 	// #1472
+200c200
+< 52808182 	mov	w2, #0x40c                 	// #1036
+---
+> 5280b5a2 	mov	w2, #0x5ad                 	// #1453
+206c206
+< 52808222 	mov	w2, #0x411                 	// #1041
+---
+> 5280b642 	mov	w2, #0x5b2                 	// #1458
+257c257
+< 52808322 	mov	w2, #0x419                 	// #1049
+---
+> 5280b742 	mov	w2, #0x5ba                 	// #1466
+954c954
+< 52807142 	mov	w2, #0x38a                 	// #906
+---
+> 5280a4e2 	mov	w2, #0x527                 	// #1319
+1129c1129
+< 52807662 	mov	w2, #0x3b3                 	// #947
+---
+> 5280aa42 	mov	w2, #0x552                 	// #1362
+1149c1149
+< 52808002 	mov	w2, #0x400                 	// #1024
+---
+> 5280b422 	mov	w2, #0x5a1                 	// #1441
+1168c1168
+< 52808002 	mov	w2, #0x400                 	// #1024
+---
+> 5280b422 	mov	w2, #0x5a1                 	// #1441
+
+== RASPI5: bytes that differ between the two images' .text (cmp -l | wc -l): 16
+== RASPI5: bytes that differ between the two pmm.c.obj .text (cmp -l | wc -l): 16
+== RASPI5: pmm.c.obj disassembly diff, addresses stripped (< 661204e6, > df481476):
+107c107
+< 528083e2 	mov	w2, #0x41f                 	// #1055
+---
+> 5280b802 	mov	w2, #0x5c0                 	// #1472
+200c200
+< 52808182 	mov	w2, #0x40c                 	// #1036
+---
+> 5280b5a2 	mov	w2, #0x5ad                 	// #1453
+206c206
+< 52808222 	mov	w2, #0x411                 	// #1041
+---
+> 5280b642 	mov	w2, #0x5b2                 	// #1458
+257c257
+< 52808322 	mov	w2, #0x419                 	// #1049
+---
+> 5280b742 	mov	w2, #0x5ba                 	// #1466
+920c920
+< 52807142 	mov	w2, #0x38a                 	// #906
+---
+> 5280a4e2 	mov	w2, #0x527                 	// #1319
+1095c1095
+< 52807662 	mov	w2, #0x3b3                 	// #947
+---
+> 5280aa42 	mov	w2, #0x552                 	// #1362
+1115c1115
+< 52808002 	mov	w2, #0x400                 	// #1024
+---
+> 5280b422 	mov	w2, #0x5a1                 	// #1441
+1134c1134
+< 52808002 	mov	w2, #0x400                 	// #1024
+---
+> 5280b422 	mov	w2, #0x5a1                 	// #1441
+
+== QEMU_VIRT: bytes that differ between the two images' .text (cmp -l | wc -l): 16
+== QEMU_VIRT: bytes that differ between the two pmm.c.obj .text (cmp -l | wc -l): 16
+== QEMU_VIRT: pmm.c.obj disassembly diff, addresses stripped (< 661204e6, > df481476):
+107c107
+< 528083e2 	mov	w2, #0x41f                 	// #1055
+---
+> 5280b802 	mov	w2, #0x5c0                 	// #1472
+200c200
+< 52808182 	mov	w2, #0x40c                 	// #1036
+---
+> 5280b5a2 	mov	w2, #0x5ad                 	// #1453
+206c206
+< 52808222 	mov	w2, #0x411                 	// #1041
+---
+> 5280b642 	mov	w2, #0x5b2                 	// #1458
+257c257
+< 52808322 	mov	w2, #0x419                 	// #1049
+---
+> 5280b742 	mov	w2, #0x5ba                 	// #1466
+920c920
+< 52807142 	mov	w2, #0x38a                 	// #906
+---
+> 5280a4e2 	mov	w2, #0x527                 	// #1319
+1095c1095
+< 52807662 	mov	w2, #0x3b3                 	// #947
+---
+> 5280aa42 	mov	w2, #0x552                 	// #1362
+1115c1115
+< 52808002 	mov	w2, #0x400                 	// #1024
+---
+> 5280b422 	mov	w2, #0x5a1                 	// #1441
+1134c1134
+< 52808002 	mov	w2, #0x400                 	// #1024
+---
+> 5280b422 	mov	w2, #0x5a1                 	// #1441
+

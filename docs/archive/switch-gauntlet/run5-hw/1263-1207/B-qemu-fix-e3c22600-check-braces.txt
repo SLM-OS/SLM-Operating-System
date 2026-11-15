@@ -1,0 +1,11 @@
+check-braces: could not parse kernel/tests/test_pmm.c (JETSON_ORIN_NANO-wide: kernel/tests/test_pmm.c:1149: use of undeclared identifier 'pmm_free_block_order' [clang-diagnostic-error])
+check-braces: could not parse kernel/tests/test_pmm.c (JETSON_ORIN_NANO: kernel/tests/test_pmm.c:1149: use of undeclared identifier 'pmm_free_block_order' [clang-diagnostic-error])
+check-braces: could not parse kernel/tests/test_pmm.c (QEMU_VIRT-wide: kernel/tests/test_pmm.c:1149: use of undeclared identifier 'pmm_free_block_order' [clang-diagnostic-error])
+check-braces: could not parse kernel/tests/test_pmm.c (QEMU_VIRT: kernel/tests/test_pmm.c:1149: use of undeclared identifier 'pmm_free_block_order' [clang-diagnostic-error])
+check-braces: could not parse kernel/tests/test_pmm.c (RASPI5-wide: kernel/tests/test_pmm.c:1149: use of undeclared identifier 'pmm_free_block_order' [clang-diagnostic-error])
+check-braces: could not parse kernel/tests/test_pmm.c (RASPI5: kernel/tests/test_pmm.c:1149: use of undeclared identifier 'pmm_free_block_order' [clang-diagnostic-error])
+check-braces: could not parse kernel/tests/test_pmm.c (X86_64-wide: kernel/tests/test_pmm.c:1149: use of undeclared identifier 'pmm_free_block_order' [clang-diagnostic-error])
+check-braces: could not parse kernel/tests/test_pmm.c (X86_64: kernel/tests/test_pmm.c:1149: use of undeclared identifier 'pmm_free_block_order' [clang-diagnostic-error])
+check-braces: 0 violation(s), 1 file(s) unparsed; parses: JETSON_ORIN_NANO 294, JETSON_ORIN_NANO-test 296, JETSON_ORIN_NANO-wide 304, QEMU_VIRT 262, QEMU_VIRT-test 264, QEMU_VIRT-wide 283, RASPI5 270, RASPI5-test 272, RASPI5-wide 280, X86_64 210, X86_64-test 212, X86_64-wide 221
+make: *** [Makefile:1693: check-braces] Error 2
+check-braces rc=2

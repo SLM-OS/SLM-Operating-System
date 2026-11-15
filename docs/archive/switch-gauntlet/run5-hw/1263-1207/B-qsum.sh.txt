@@ -1,0 +1,11 @@
+#!/bin/bash
+# qsum.sh <files...> : one line per QEMU run file: make exit code, PMM suite line, failing tests, faults.
+for f in "$@"; do
+  rc=$(grep -a -m1 -o 'make exit code: [0-9]*' "$f" | grep -o '[0-9]*$')
+  pmm=$(grep -a -A80 'PMM Buddy Allocator Tests' "$f" | grep -a -m1 'Tests: ' | tr -d '\r')
+  fails=$(grep -a '^  \[FAIL\] test_' "$f" | sort -u | tr -d '\r' | sed 's/^  \[FAIL\] //' | tr '\n' ',')
+  filt=$(grep -a '^\[FILTER\] \[' "$f" | tr -d '\r' | sed 's/ us min.*//; s/^\[FILTER\] //' | tr '\n' ';')
+  fault=$(grep -a -c 'PAGE FAULT\|KERNEL PANIC' "$f")
+  last=$(grep -a -m1 -E 'All test suites passed|total failure|TIMEOUT - ' "$f" | tr -d '\r')
+  echo "$(basename "$f") | rc=$rc | pmm: ${pmm:-n/a} | fails: ${fails:-none} | faults: $fault | $filt $last"
+done

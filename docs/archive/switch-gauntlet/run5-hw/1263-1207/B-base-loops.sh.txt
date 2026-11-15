@@ -1,0 +1,7 @@
+#!/bin/bash
+# Step-1 baseline on the unmodified base (661204e6), QEMU ARM64.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+B=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base
+L=661204e6
+$S/b/qrun.sh $B $L $S/b/B-qemu-base-661204e6-coalesce-x50.txt TEST_TIMEOUT=600 TEST_FILTER=test_coalesce_enables_larger_allocation,test_recursive_coalescing TEST_REPEAT=50
+$S/b/qrun.sh $B $L $S/b/B-qemu-base-661204e6-checker-exhaust-x50.txt TEST_TIMEOUT=600 TEST_FILTER=test_checkerboard_fragmentation,test_exhaustion_recovery TEST_REPEAT=50

@@ -1,0 +1,9 @@
+#!/bin/bash
+# suite-loop.sh <worktree> <head-label> <out-prefix> <count> [make args...]
+# Full `make test` <count> times, one flock per run (build first, outside the lock).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+wt=$1; label=$2; pfx=$3; n=$4; shift 4
+( cd "$wt" && make kernel-test "$@" > "$pfx-build.log" 2>&1 ) || { echo "BUILD FAILED, see $pfx-build.log"; exit 1; }
+for i in $(seq -w 1 "$n"); do
+  $S/b/qrun.sh "$wt" "$label" "$pfx-run$i.txt" "$@"
+done

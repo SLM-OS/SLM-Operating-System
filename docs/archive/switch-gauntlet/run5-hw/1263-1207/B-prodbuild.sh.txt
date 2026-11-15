@@ -1,0 +1,28 @@
+#!/bin/bash
+# prodbuild.sh <worktree> <label>
+# Production kernels (PMM_CHECK not set) for Jetson, Pi 5 and QEMU; records
+# section sizes, the .text sha256 and pmm.c.obj's .text sha256 for the
+# "no code when the option is off" comparison.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+wt=$1; label=$2
+out=$S/b/img/$label; mkdir -p $out
+cd $wt || exit 1
+for plat in JETSON_ORIN_NANO RASPI5 QEMU_VIRT; do
+  if [ $plat = QEMU_VIRT ]; then make kernel > $out/build-$plat.log 2>&1; else make kernel PLATFORM=$plat > $out/build-$plat.log 2>&1; fi
+  rc=$?
+  elf=build/kernel/slmos.elf
+  obj=$(find build/kernel -name pmm.c.obj | head -1)
+  aarch64-none-elf-objcopy -O binary --only-section=.text $elf $out/text-$plat.bin
+  aarch64-none-elf-objcopy -O binary --only-section=.text $obj $out/pmm-text-$plat.bin
+  {
+    echo "== $label $plat (make kernel, PMM_CHECK not set) rc=$rc"
+    aarch64-none-elf-size -A $elf | grep -E '^\.(text|rodata|data|bss) '
+    echo ".text sha256: $(sha256sum < $out/text-$plat.bin | cut -c1-64) bytes $(stat -c %s $out/text-$plat.bin)"
+    echo "pmm.c.obj .text sha256: $(sha256sum < $out/pmm-text-$plat.bin | cut -c1-64) bytes $(stat -c %s $out/pmm-text-$plat.bin)"
+    echo "pmm-check strings in the image: $(strings -a $elf | grep -c 'pmm-check')"
+    echo "elf sha256: $(sha256sum < $elf | cut -c1-64)"
+  } >> $out/sizes.txt
+  cp $elf $out/slmos-$plat.elf
+  aarch64-none-elf-objdump -d $obj > $out/pmm-$plat.dis
+done
+cat $out/sizes.txt

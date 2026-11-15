@@ -1,0 +1,8 @@
+# QEMU test kernel (make kernel-test, no filter, PMM_CHECK off), built in the same worktree (.wt/b-base) at e3c22600 and at f650b695.
+# The .text sections are byte-identical, so the QEMU test-kernel rows run at e3c22600 hold for f650b695's test kernel.
+# (f650b695 only removes the ENABLE_BOOT_TESTS guard around two test hooks; a test kernel always had them.)
+e3c22600 .text sha256 a4bc7e039058192332ac5ef691984006bb38c572493d70940739348abadb3902 bytes 2282296
+f650b695 .text sha256 a4bc7e039058192332ac5ef691984006bb38c572493d70940739348abadb3902 bytes 2282296
+differing bytes (cmp -l | wc -l): 0
+# Built in two different worktrees the same commit's .text differs (136225 bytes between .wt/b and .wt/b-base at these
+# two commits): __FILE__ path lengths move .rodata addresses. Compare within one worktree.

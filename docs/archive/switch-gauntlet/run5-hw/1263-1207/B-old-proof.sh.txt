@@ -1,0 +1,14 @@
+#!/bin/bash
+# Tests-fail-on-old-code runs, at 7b0af7d0 (allocator of 661204e6 + PMM_CHECK option + the new tests).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+B=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b
+L=$1
+NEW=test_coalesce_with_lone_free_pages,test_recursive_coalescing_with_lone_free_pages,test_add_region_leaves_out_partial_last_page,test_free_does_not_merge_with_split_buddy,test_free_rejects_range_holding_a_free_page
+SIG=test_fragmentation_recovery_large,test_free_does_not_merge_with_split_buddy
+cd $B || exit 1
+make kernel-test TEST_FILTER=$NEW > $S/b/old-proof-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-old-$L-newtests.txt TEST_FILTER=$NEW
+make kernel-test TEST_FILTER=$SIG TEST_REPEAT=2 >> $S/b/old-proof-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-old-$L-halt-signature.txt TEST_FILTER=$SIG TEST_REPEAT=2
+make kernel-test PMM_CHECK=ON TEST_FILTER=$SIG TEST_REPEAT=2 >> $S/b/old-proof-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-old-$L-pmmcheck-on.txt PMM_CHECK=ON TEST_FILTER=$SIG TEST_REPEAT=2

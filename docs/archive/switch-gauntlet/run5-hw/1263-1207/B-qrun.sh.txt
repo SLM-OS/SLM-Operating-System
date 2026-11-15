@@ -1,0 +1,27 @@
+#!/bin/bash
+# qrun.sh <worktree> <head-label> <out-log> <make args...>
+# One `make test` under the session QEMU lock; saves the tail of make's
+# stdout and the whole QEMU serial log (build/test-output.log) into <out-log>.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+wt=$1; label=$2; out=$3; shift 3
+cd "$wt" || exit 2
+rc=99
+for try in 1 2 3 4 5 6 7 8; do
+  rm -f "$out.make"
+  flock -w 540 $S/qemu.lock bash -c 'echo "LOCKED $(date -u +%T)"; exec make test "$@"' _ "$@" > "$out.make" 2>&1
+  rc=$?
+  grep -q '^LOCKED' "$out.make" && break
+  sleep 20
+done
+{
+  echo "# worktree: $wt  head: $label"
+  echo "# command: make test $*   (under flock $S/qemu.lock)"
+  echo "# date: $(date -u +%FT%TZ)  make exit code: $rc"
+  echo "# ---- make output (tail 40) ----"
+  tail -40 "$out.make"
+  echo "# ---- QEMU serial (build/test-output.log) ----"
+  cat build/test-output.log 2>/dev/null
+} > "$out"
+rm -f "$out.make"
+echo "$(basename $out) rc=$rc iters=$(grep -a -c '\[ITER' "$out"); $(grep -a '^\[FILTER\] \[' "$out" | tr -d '\r' | tr '\n' ';' | cut -c1-400) suites=$(grep -a -c -E 'Tests: [0-9]+  Passed' "$out"); $(grep -a -m1 -E 'All test suites passed|total failure|suite\(s\) failed' "$out" | tr -d '\r')"
+exit $rc

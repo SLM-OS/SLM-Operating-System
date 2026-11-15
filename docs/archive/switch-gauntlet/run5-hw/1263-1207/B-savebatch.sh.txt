@@ -1,0 +1,15 @@
+#!/bin/bash
+# savebatch.sh <evj|evp> <labctl output dir (absolute)> <dest prefix> <first boot number> <n> <trigger log name or -> <title...>
+# Saves run_01..run_n of one boot_test call as <prefix>-bootNN.txt in this
+# session's evidence directory (Part B), plus the trigger log, with
+# save.sh's both-ends check on every file.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263
+ev=$1; dir=$2; prefix=$3; first=$4; n=$5; trig=$6; shift 6
+E=$W/.wt/b-$ev/docs/archive/switch-gauntlet/run5-hw/1263-1207
+mkdir -p "$E"
+for i in $(seq 1 $n); do
+  b=$(printf %02d $((first + i - 1)))
+  bash $S/b/save.sh "$dir/run_$(printf %02d $i).txt" "$E/$prefix-boot$b.txt" "$*, boot $b"
+done
+if [ "$trig" != - ] && [ -f "$S/b/$trig" ]; then cp "$S/b/$trig" "$E/B-$trig.txt"; cat "$S/b/$trig"; fi

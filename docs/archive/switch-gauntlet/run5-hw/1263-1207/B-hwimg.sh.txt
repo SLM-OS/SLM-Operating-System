@@ -1,0 +1,30 @@
+#!/bin/bash
+# hwimg.sh <worktree> <label> <name> <platform> [make args...]
+# Builds a hardware TEST kernel (kernel-test) and stores it under
+# $S/b/img/<name>.elf (+ .bin for Pi 5 as .img), appending sha256, banner
+# build id, PMM_CHECK state and operator-library size to $S/b/images.txt.
+# The Jetson production kernel must have been built in this worktree first
+# (#1264: the test kernel embeds the operator library only then).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+wt=$1; label=$2; name=$3; plat=$4; shift 4
+mkdir -p $S/b/img
+cd $wt || exit 1
+make kernel-test PLATFORM=$plat "$@" > $S/b/img/build-$name.log 2>&1
+rc=$?
+elf=build/kernel-test/slmos.elf
+[ $rc -eq 0 ] || { echo "BUILD FAILED $name rc=$rc"; tail -5 $S/b/img/build-$name.log; exit 1; }
+cp $elf $S/b/img/$name.elf
+ext=elf
+if [ $plat = RASPI5 ]; then cp build/kernel-test/slmos.bin $S/b/img/$name.img; ext=img; fi
+{
+  echo "== $name  ($plat test kernel, head $label, make kernel-test PLATFORM=$plat $*)"
+  echo "   built: $(date -u +%FT%TZ) in $wt"
+  echo "   sha256 elf: $(sha256sum < $S/b/img/$name.elf | cut -c1-64)"
+  [ $ext = img ] && echo "   sha256 img: $(sha256sum < $S/b/img/$name.img | cut -c1-64)"
+  echo "   banner: $(strings -a $elf | grep -m1 -E 'build [0-9]{14} \(' )"
+  echo "   version strings: $(strings -a $elf | grep -E '^[0-9]{14}$|^[0-9a-f]{8}(-dirty)?$' | head -4 | tr '\n' ' ')"
+  echo "   PMM_CHECK: $(if strings -a $elf | grep -q 'pmm-check'; then echo ON; else echo off; fi) (pmm-check strings: $(strings -a $elf | grep -c 'pmm-check'))"
+  echo "   sections: $(aarch64-none-elf-size -A $elf | grep -E '^\.(text|rodata|bss) ' | awk '{printf "%s=%s ", $1, $2}')"
+  echo "   CMake cache: $(grep -E '^(PMM_CHECK|PLATFORM|ENABLE_BOOT_TESTS|TEST_FILTER|OPLIB_BLOB)[:=]' build/kernel-test/CMakeCache.txt | tr '\n' ' ')"
+} >> $S/b/images.txt
+tail -9 $S/b/images.txt

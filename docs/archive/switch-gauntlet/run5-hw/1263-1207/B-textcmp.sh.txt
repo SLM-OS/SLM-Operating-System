@@ -1,0 +1,18 @@
+#!/bin/bash
+# textcmp.sh <base label> <new label> : option-off .text comparison from prodbuild.sh's outputs.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+a=$1; b=$2
+echo "# PMM_CHECK off: production kernels at $b against $a."
+echo "# Built by B-prodbuild.sh.txt (make kernel PLATFORM=..., PMM_CHECK not set), worktree .wt/b-base at each commit in turn."
+echo
+for l in $a $b; do cat $S/b/img/$l/sizes.txt; echo; done
+for p in JETSON_ORIN_NANO RASPI5 QEMU_VIRT; do
+  echo "== $p: bytes that differ between the two images' .text (cmp -l | wc -l): $(cmp -l $S/b/img/$a/text-$p.bin $S/b/img/$b/text-$p.bin | wc -l)"
+  echo "== $p: bytes that differ between the two pmm.c.obj .text (cmp -l | wc -l): $(cmp -l $S/b/img/$a/pmm-text-$p.bin $S/b/img/$b/pmm-text-$p.bin | wc -l)"
+  echo "== $p: pmm.c.obj disassembly diff, addresses stripped (< $a, > $b):"
+  sed 's/^ *[0-9a-f]*:\t//' $S/b/img/$a/pmm-$p.dis > $S/b/img/a.tmp
+  sed 's/^ *[0-9a-f]*:\t//' $S/b/img/$b/pmm-$p.dis > $S/b/img/b.tmp
+  diff $S/b/img/a.tmp $S/b/img/b.tmp
+  echo
+done
+rm -f $S/b/img/a.tmp $S/b/img/b.tmp

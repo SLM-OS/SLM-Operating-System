@@ -1,0 +1,21 @@
+#!/bin/bash
+# QEMU rows at the fix head. fix-rows.sh <head label>
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+B=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b
+L=$1
+C=test_coalesce_enables_larger_allocation,test_recursive_coalescing
+X=test_checkerboard_fragmentation,test_exhaustion_recovery
+NEW=test_coalesce_with_lone_free_pages,test_recursive_coalescing_with_lone_free_pages,test_add_region_leaves_out_partial_last_page,test_free_does_not_merge_with_split_buddy,test_free_rejects_range_holding_a_free_page
+cd $B || exit 1
+make kernel-test TEST_FILTER=$C TEST_REPEAT=50 > $S/b/fix-rows-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-fix-$L-coalesce-x50.txt TEST_TIMEOUT=600 TEST_FILTER=$C TEST_REPEAT=50
+make kernel-test TEST_FILTER=$X TEST_REPEAT=50 >> $S/b/fix-rows-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-fix-$L-checker-exhaust-x50.txt TEST_TIMEOUT=600 TEST_FILTER=$X TEST_REPEAT=50
+make kernel-test TEST_FILTER=$NEW TEST_REPEAT=50 >> $S/b/fix-rows-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-fix-$L-newtests-x50.txt TEST_TIMEOUT=600 TEST_FILTER=$NEW TEST_REPEAT=50
+make kernel-test PMM_CHECK=ON >> $S/b/fix-rows-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-fix-$L-pmmcheck-on-fullsuite.txt PMM_CHECK=ON
+$S/b/suite-loop.sh $B $L $S/b/B-qemu-fix-$L-fullsuite ${2:-20}
+make kernel-test PLATFORM=X86_64 >> $S/b/fix-rows-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-fix-$L-x86_64-fullsuite.txt PLATFORM=X86_64
+make check-braces > $S/b/B-qemu-fix-$L-check-braces.txt 2>&1; echo "check-braces rc=$?" | tee -a $S/b/B-qemu-fix-$L-check-braces.txt

@@ -1,0 +1,510 @@
+# worktree: /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b  head: f650b695
+# command: make test TEST_TIMEOUT=600 TEST_FILTER=test_coalesce_with_lone_free_pages,test_recursive_coalescing_with_lone_free_pages,test_add_region_leaves_out_partial_last_page,test_free_does_not_merge_with_split_buddy,test_free_rejects_range_holding_a_free_page TEST_REPEAT=50   (under flock /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad/qemu.lock)
+# date: 2026-11-15T07:04:23Z  make exit code: 0
+# ---- make output (tail 40) ----
+All 24 build-signature options change their variants' signatures; AI scheduler defaults match
+check-cpu-cache-maint: OK (38 files)
+Building runtime... (cargo features: ai_eviction)
+cd runtime && SLM_DEFAULT_EVICTION_POLICY=lru  cargo build  --release --features ai_eviction
+    Finished `release` profile [optimized] target(s) in 0.01s
+Building test kernel...
+cmake --build build/kernel-test
+[  0%] Built target kprintf_float
+[  0%] Generating build_info.h
+[  0%] Built target generate_build_info
+[  0%] Built target slm_kernels_header
+[  1%] Building C object CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/src/lua_slm.c:910:66: warning: "/*" within comment [-Wcomment]
+  910 |     uint8_t wildcard;                   /* 1 if pattern ends in '/*' */
+      |                                                                   
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/src/lua_slm.c:985:44: warning: "/*" within comment [-Wcomment]
+  985 |  * Exact match OR (for patterns ending in "/*") prefix match up to the '*'. */
+      |                                             
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/src/lua_slm.c:1081:32: warning: "/*" within comment [-Wcomment]
+ 1081 |  * messages. Topics ending in "/*" match any topic with that prefix.
+      |                                 
+[  2%] Linking C static library liblua.a
+[ 10%] Built target lua
+[ 10%] Built target slm_shell
+[ 11%] Built target slm_runner
+[ 12%] Built target nanopb
+[ 12%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+[ 12%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+[ 13%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+[ 14%] Linking C executable slmos.elf
+Creating slmos.bin
+[100%] Built target slmos.elf
+flock: getting lock took 0.000002 seconds
+flock: executing make
+Creating sparse build/kernel-test/sdhci-test.img (4G, SDHC-sized)
+Running kernel tests...
+
+Test Results:
+=============
+PASSED - All tests passed (exit code 0)
+# ---- QEMU serial (build/test-output.log) ----
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261115070417 (f650b695)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022d438
+  .data:   0x40710000 - 0x40734000
+  .bss:    0x40740000 - 0x4208aee0
+  End:     0x42090000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x4079c000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x4079a003 (covers VA 0x0)
+  L1[1]: 0x4079b003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x42090000 - 0x80000000
+  Total pages:     253808 (1015232 KB)
+  Free pages:      253808 (1015232 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8336 pages (kernel)
+
+  Free list distribution:
+    Order  4 (   64 KB): 1 blocks
+    Order  5 (  128 KB): 1 blocks
+    Order  6 (  256 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_coalesce_with_lone_free_pages,test_recursive_coalescing_with_lone_free_pages,test_add_region_leaves_out_partial_last_page,test_free_does_not_merge_with_split_buddy,test_free_rejects_range_holding_a_free_page repeat=50 source=build index=2904
+  [ITER 1/50]  [PASS] test_coalesce_with_lone_free_pages (1336 us)
+  [ITER 1/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (383 us)
+  [ITER 1/50]  [PASS] test_add_region_leaves_out_partial_last_page (516 us)
+  [ITER 1/50]  [PASS] test_free_does_not_merge_with_split_buddy (295 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 1/50]  [PASS] test_free_rejects_range_holding_a_free_page (780 us)
+  [ITER 2/50]  [PASS] test_coalesce_with_lone_free_pages (208 us)
+  [ITER 2/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (182 us)
+  [ITER 2/50]  [PASS] test_add_region_leaves_out_partial_last_page (165 us)
+  [ITER 2/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 2/50]  [PASS] test_free_rejects_range_holding_a_free_page (871 us)
+  [ITER 3/50]  [PASS] test_coalesce_with_lone_free_pages (209 us)
+  [ITER 3/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 3/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 3/50]  [PASS] test_free_does_not_merge_with_split_buddy (165 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 3/50]  [PASS] test_free_rejects_range_holding_a_free_page (590 us)
+  [ITER 4/50]  [PASS] test_coalesce_with_lone_free_pages (207 us)
+  [ITER 4/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (182 us)
+  [ITER 4/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 4/50]  [PASS] test_free_does_not_merge_with_split_buddy (164 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 4/50]  [PASS] test_free_rejects_range_holding_a_free_page (589 us)
+  [ITER 5/50]  [PASS] test_coalesce_with_lone_free_pages (334 us)
+  [ITER 5/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (324 us)
+  [ITER 5/50]  [PASS] test_add_region_leaves_out_partial_last_page (291 us)
+  [ITER 5/50]  [PASS] test_free_does_not_merge_with_split_buddy (232 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 5/50]  [PASS] test_free_rejects_range_holding_a_free_page (683 us)
+  [ITER 6/50]  [PASS] test_coalesce_with_lone_free_pages (517 us)
+  [ITER 6/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (333 us)
+  [ITER 6/50]  [PASS] test_add_region_leaves_out_partial_last_page (223 us)
+  [ITER 6/50]  [PASS] test_free_does_not_merge_with_split_buddy (288 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 6/50]  [PASS] test_free_rejects_range_holding_a_free_page (882 us)
+  [ITER 7/50]  [PASS] test_coalesce_with_lone_free_pages (313 us)
+  [ITER 7/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (307 us)
+  [ITER 7/50]  [PASS] test_add_region_leaves_out_partial_last_page (274 us)
+  [ITER 7/50]  [PASS] test_free_does_not_merge_with_split_buddy (302 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 7/50]  [PASS] test_free_rejects_range_holding_a_free_page (1027 us)
+  [ITER 8/50]  [PASS] test_coalesce_with_lone_free_pages (207 us)
+  [ITER 8/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (181 us)
+  [ITER 8/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 8/50]  [PASS] test_free_does_not_merge_with_split_buddy (160 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 8/50]  [PASS] test_free_rejects_range_holding_a_free_page (590 us)
+  [ITER 9/50]  [PASS] test_coalesce_with_lone_free_pages (210 us)
+  [ITER 9/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (179 us)
+  [ITER 9/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 9/50]  [PASS] test_free_does_not_merge_with_split_buddy (165 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 9/50]  [PASS] test_free_rejects_range_holding_a_free_page (588 us)
+  [ITER 10/50]  [PASS] test_coalesce_with_lone_free_pages (298 us)
+  [ITER 10/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (262 us)
+  [ITER 10/50]  [PASS] test_add_region_leaves_out_partial_last_page (167 us)
+  [ITER 10/50]  [PASS] test_free_does_not_merge_with_split_buddy (268 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 10/50]  [PASS] test_free_rejects_range_holding_a_free_page (809 us)
+  [ITER 11/50]  [PASS] test_coalesce_with_lone_free_pages (204 us)
+  [ITER 11/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 11/50]  [PASS] test_add_region_leaves_out_partial_last_page (174 us)
+  [ITER 11/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 11/50]  [PASS] test_free_rejects_range_holding_a_free_page (594 us)
+  [ITER 12/50]  [PASS] test_coalesce_with_lone_free_pages (363 us)
+  [ITER 12/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (324 us)
+  [ITER 12/50]  [PASS] test_add_region_leaves_out_partial_last_page (276 us)
+  [ITER 12/50]  [PASS] test_free_does_not_merge_with_split_buddy (162 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 12/50]  [PASS] test_free_rejects_range_holding_a_free_page (621 us)
+  [ITER 13/50]  [PASS] test_coalesce_with_lone_free_pages (541 us)
+  [ITER 13/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (333 us)
+  [ITER 13/50]  [PASS] test_add_region_leaves_out_partial_last_page (304 us)
+  [ITER 13/50]  [PASS] test_free_does_not_merge_with_split_buddy (296 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 13/50]  [PASS] test_free_rejects_range_holding_a_free_page (969 us)
+  [ITER 14/50]  [PASS] test_coalesce_with_lone_free_pages (214 us)
+  [ITER 14/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (181 us)
+  [ITER 14/50]  [PASS] test_add_region_leaves_out_partial_last_page (247 us)
+  [ITER 14/50]  [PASS] test_free_does_not_merge_with_split_buddy (165 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 14/50]  [PASS] test_free_rejects_range_holding_a_free_page (618 us)
+  [ITER 15/50]  [PASS] test_coalesce_with_lone_free_pages (204 us)
+  [ITER 15/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (187 us)
+  [ITER 15/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 15/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 15/50]  [PASS] test_free_rejects_range_holding_a_free_page (584 us)
+  [ITER 16/50]  [PASS] test_coalesce_with_lone_free_pages (341 us)
+  [ITER 16/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (277 us)
+  [ITER 16/50]  [PASS] test_add_region_leaves_out_partial_last_page (245 us)
+  [ITER 16/50]  [PASS] test_free_does_not_merge_with_split_buddy (234 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 16/50]  [PASS] test_free_rejects_range_holding_a_free_page (783 us)
+  [ITER 17/50]  [PASS] test_coalesce_with_lone_free_pages (372 us)
+  [ITER 17/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (334 us)
+  [ITER 17/50]  [PASS] test_add_region_leaves_out_partial_last_page (375 us)
+  [ITER 17/50]  [PASS] test_free_does_not_merge_with_split_buddy (305 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 17/50]  [PASS] test_free_rejects_range_holding_a_free_page (1112 us)
+  [ITER 18/50]  [PASS] test_coalesce_with_lone_free_pages (234 us)
+  [ITER 18/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (175 us)
+  [ITER 18/50]  [PASS] test_add_region_leaves_out_partial_last_page (203 us)
+  [ITER 18/50]  [PASS] test_free_does_not_merge_with_split_buddy (172 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 18/50]  [PASS] test_free_rejects_range_holding_a_free_page (573 us)
+  [ITER 19/50]  [PASS] test_coalesce_with_lone_free_pages (202 us)
+  [ITER 19/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (177 us)
+  [ITER 19/50]  [PASS] test_add_region_leaves_out_partial_last_page (159 us)
+  [ITER 19/50]  [PASS] test_free_does_not_merge_with_split_buddy (344 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 19/50]  [PASS] test_free_rejects_range_holding_a_free_page (630 us)
+  [ITER 20/50]  [PASS] test_coalesce_with_lone_free_pages (232 us)
+  [ITER 20/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (182 us)
+  [ITER 20/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 20/50]  [PASS] test_free_does_not_merge_with_split_buddy (170 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 20/50]  [PASS] test_free_rejects_range_holding_a_free_page (589 us)
+  [ITER 21/50]  [PASS] test_coalesce_with_lone_free_pages (330 us)
+  [ITER 21/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (316 us)
+  [ITER 21/50]  [PASS] test_add_region_leaves_out_partial_last_page (296 us)
+  [ITER 21/50]  [PASS] test_free_does_not_merge_with_split_buddy (291 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 21/50]  [PASS] test_free_rejects_range_holding_a_free_page (930 us)
+  [ITER 22/50]  [PASS] test_coalesce_with_lone_free_pages (208 us)
+  [ITER 22/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (181 us)
+  [ITER 22/50]  [PASS] test_add_region_leaves_out_partial_last_page (171 us)
+  [ITER 22/50]  [PASS] test_free_does_not_merge_with_split_buddy (160 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 22/50]  [PASS] test_free_rejects_range_holding_a_free_page (597 us)
+  [ITER 23/50]  [PASS] test_coalesce_with_lone_free_pages (207 us)
+  [ITER 23/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (181 us)
+  [ITER 23/50]  [PASS] test_add_region_leaves_out_partial_last_page (166 us)
+  [ITER 23/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 23/50]  [PASS] test_free_rejects_range_holding_a_free_page (605 us)
+  [ITER 24/50]  [PASS] test_coalesce_with_lone_free_pages (206 us)
+  [ITER 24/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 24/50]  [PASS] test_add_region_leaves_out_partial_last_page (167 us)
+  [ITER 24/50]  [PASS] test_free_does_not_merge_with_split_buddy (162 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 24/50]  [PASS] test_free_rejects_range_holding_a_free_page (599 us)
+  [ITER 25/50]  [PASS] test_coalesce_with_lone_free_pages (209 us)
+  [ITER 25/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (181 us)
+  [ITER 25/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 25/50]  [PASS] test_free_does_not_merge_with_split_buddy (160 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 25/50]  [PASS] test_free_rejects_range_holding_a_free_page (607 us)
+  [ITER 26/50]  [PASS] test_coalesce_with_lone_free_pages (363 us)
+  [ITER 26/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (311 us)
+  [ITER 26/50]  [PASS] test_add_region_leaves_out_partial_last_page (377 us)
+  [ITER 26/50]  [PASS] test_free_does_not_merge_with_split_buddy (306 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 26/50]  [PASS] test_free_rejects_range_holding_a_free_page (970 us)
+  [ITER 27/50]  [PASS] test_coalesce_with_lone_free_pages (210 us)
+  [ITER 27/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (194 us)
+  [ITER 27/50]  [PASS] test_add_region_leaves_out_partial_last_page (167 us)
+  [ITER 27/50]  [PASS] test_free_does_not_merge_with_split_buddy (165 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 27/50]  [PASS] test_free_rejects_range_holding_a_free_page (849 us)
+  [ITER 28/50]  [PASS] test_coalesce_with_lone_free_pages (398 us)
+  [ITER 28/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (265 us)
+  [ITER 28/50]  [PASS] test_add_region_leaves_out_partial_last_page (169 us)
+  [ITER 28/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 28/50]  [PASS] test_free_rejects_range_holding_a_free_page (602 us)
+  [ITER 29/50]  [PASS] test_coalesce_with_lone_free_pages (217 us)
+  [ITER 29/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 29/50]  [PASS] test_add_region_leaves_out_partial_last_page (163 us)
+  [ITER 29/50]  [PASS] test_free_does_not_merge_with_split_buddy (179 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 29/50]  [PASS] test_free_rejects_range_holding_a_free_page (587 us)
+  [ITER 30/50]  [PASS] test_coalesce_with_lone_free_pages (207 us)
+  [ITER 30/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (184 us)
+  [ITER 30/50]  [PASS] test_add_region_leaves_out_partial_last_page (168 us)
+  [ITER 30/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 30/50]  [PASS] test_free_rejects_range_holding_a_free_page (596 us)
+  [ITER 31/50]  [PASS] test_coalesce_with_lone_free_pages (332 us)
+  [ITER 31/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (359 us)
+  [ITER 31/50]  [PASS] test_add_region_leaves_out_partial_last_page (317 us)
+  [ITER 31/50]  [PASS] test_free_does_not_merge_with_split_buddy (343 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 31/50]  [PASS] test_free_rejects_range_holding_a_free_page (973 us)
+  [ITER 32/50]  [PASS] test_coalesce_with_lone_free_pages (203 us)
+  [ITER 32/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (265 us)
+  [ITER 32/50]  [PASS] test_add_region_leaves_out_partial_last_page (199 us)
+  [ITER 32/50]  [PASS] test_free_does_not_merge_with_split_buddy (158 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 32/50]  [PASS] test_free_rejects_range_holding_a_free_page (623 us)
+  [ITER 33/50]  [PASS] test_coalesce_with_lone_free_pages (223 us)
+  [ITER 33/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 33/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 33/50]  [PASS] test_free_does_not_merge_with_split_buddy (170 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 33/50]  [PASS] test_free_rejects_range_holding_a_free_page (597 us)
+  [ITER 34/50]  [PASS] test_coalesce_with_lone_free_pages (203 us)
+  [ITER 34/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 34/50]  [PASS] test_add_region_leaves_out_partial_last_page (169 us)
+  [ITER 34/50]  [PASS] test_free_does_not_merge_with_split_buddy (160 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 34/50]  [PASS] test_free_rejects_range_holding_a_free_page (588 us)
+  [ITER 35/50]  [PASS] test_coalesce_with_lone_free_pages (211 us)
+  [ITER 35/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (228 us)
+  [ITER 35/50]  [PASS] test_add_region_leaves_out_partial_last_page (165 us)
+  [ITER 35/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 35/50]  [PASS] test_free_rejects_range_holding_a_free_page (586 us)
+  [ITER 36/50]  [PASS] test_coalesce_with_lone_free_pages (243 us)
+  [ITER 36/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (215 us)
+  [ITER 36/50]  [PASS] test_add_region_leaves_out_partial_last_page (166 us)
+  [ITER 36/50]  [PASS] test_free_does_not_merge_with_split_buddy (159 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 36/50]  [PASS] test_free_rejects_range_holding_a_free_page (620 us)
+  [ITER 37/50]  [PASS] test_coalesce_with_lone_free_pages (285 us)
+  [ITER 37/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (229 us)
+  [ITER 37/50]  [PASS] test_add_region_leaves_out_partial_last_page (185 us)
+  [ITER 37/50]  [PASS] test_free_does_not_merge_with_split_buddy (162 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 37/50]  [PASS] test_free_rejects_range_holding_a_free_page (911 us)
+  [ITER 38/50]  [PASS] test_coalesce_with_lone_free_pages (206 us)
+  [ITER 38/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 38/50]  [PASS] test_add_region_leaves_out_partial_last_page (171 us)
+  [ITER 38/50]  [PASS] test_free_does_not_merge_with_split_buddy (160 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 38/50]  [PASS] test_free_rejects_range_holding_a_free_page (592 us)
+  [ITER 39/50]  [PASS] test_coalesce_with_lone_free_pages (208 us)
+  [ITER 39/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 39/50]  [PASS] test_add_region_leaves_out_partial_last_page (166 us)
+  [ITER 39/50]  [PASS] test_free_does_not_merge_with_split_buddy (160 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 39/50]  [PASS] test_free_rejects_range_holding_a_free_page (728 us)
+  [ITER 40/50]  [PASS] test_coalesce_with_lone_free_pages (205 us)
+  [ITER 40/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 40/50]  [PASS] test_add_region_leaves_out_partial_last_page (172 us)
+  [ITER 40/50]  [PASS] test_free_does_not_merge_with_split_buddy (160 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 40/50]  [PASS] test_free_rejects_range_holding_a_free_page (662 us)
+  [ITER 41/50]  [PASS] test_coalesce_with_lone_free_pages (209 us)
+  [ITER 41/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (179 us)
+  [ITER 41/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 41/50]  [PASS] test_free_does_not_merge_with_split_buddy (162 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 41/50]  [PASS] test_free_rejects_range_holding_a_free_page (592 us)
+  [ITER 42/50]  [PASS] test_coalesce_with_lone_free_pages (386 us)
+  [ITER 42/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (343 us)
+  [ITER 42/50]  [PASS] test_add_region_leaves_out_partial_last_page (320 us)
+  [ITER 42/50]  [PASS] test_free_does_not_merge_with_split_buddy (291 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 42/50]  [PASS] test_free_rejects_range_holding_a_free_page (957 us)
+  [ITER 43/50]  [PASS] test_coalesce_with_lone_free_pages (301 us)
+  [ITER 43/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (198 us)
+  [ITER 43/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 43/50]  [PASS] test_free_does_not_merge_with_split_buddy (160 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 43/50]  [PASS] test_free_rejects_range_holding_a_free_page (840 us)
+  [ITER 44/50]  [PASS] test_coalesce_with_lone_free_pages (222 us)
+  [ITER 44/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (181 us)
+  [ITER 44/50]  [PASS] test_add_region_leaves_out_partial_last_page (164 us)
+  [ITER 44/50]  [PASS] test_free_does_not_merge_with_split_buddy (188 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 44/50]  [PASS] test_free_rejects_range_holding_a_free_page (588 us)
+  [ITER 45/50]  [PASS] test_coalesce_with_lone_free_pages (205 us)
+  [ITER 45/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 45/50]  [PASS] test_add_region_leaves_out_partial_last_page (183 us)
+  [ITER 45/50]  [PASS] test_free_does_not_merge_with_split_buddy (162 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 45/50]  [PASS] test_free_rejects_range_holding_a_free_page (610 us)
+  [ITER 46/50]  [PASS] test_coalesce_with_lone_free_pages (283 us)
+  [ITER 46/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (262 us)
+  [ITER 46/50]  [PASS] test_add_region_leaves_out_partial_last_page (231 us)
+  [ITER 46/50]  [PASS] test_free_does_not_merge_with_split_buddy (228 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 46/50]  [PASS] test_free_rejects_range_holding_a_free_page (598 us)
+  [ITER 47/50]  [PASS] test_coalesce_with_lone_free_pages (208 us)
+  [ITER 47/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (182 us)
+  [ITER 47/50]  [PASS] test_add_region_leaves_out_partial_last_page (167 us)
+  [ITER 47/50]  [PASS] test_free_does_not_merge_with_split_buddy (216 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 47/50]  [PASS] test_free_rejects_range_holding_a_free_page (652 us)
+  [ITER 48/50]  [PASS] test_coalesce_with_lone_free_pages (316 us)
+  [ITER 48/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (184 us)
+  [ITER 48/50]  [PASS] test_add_region_leaves_out_partial_last_page (165 us)
+  [ITER 48/50]  [PASS] test_free_does_not_merge_with_split_buddy (222 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 48/50]  [PASS] test_free_rejects_range_holding_a_free_page (936 us)
+  [ITER 49/50]  [PASS] test_coalesce_with_lone_free_pages (205 us)
+  [ITER 49/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (180 us)
+  [ITER 49/50]  [PASS] test_add_region_leaves_out_partial_last_page (185 us)
+  [ITER 49/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 49/50]  [PASS] test_free_rejects_range_holding_a_free_page (596 us)
+  [ITER 50/50]  [PASS] test_coalesce_with_lone_free_pages (208 us)
+  [ITER 50/50]  [PASS] test_recursive_coalescing_with_lone_free_pages (181 us)
+  [ITER 50/50]  [PASS] test_add_region_leaves_out_partial_last_page (165 us)
+  [ITER 50/50]  [PASS] test_free_does_not_merge_with_split_buddy (161 us)
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/mm/pmm.c:1593: PMM: free of 4 pages at 0x42094000 rejected: page 0x42096000 is not allocated
+  [ITER 50/50]  [PASS] test_free_rejects_range_holding_a_free_page (593 us)
+
+[FILTER] Summary
+[FILTER] [PASS] test_coalesce_with_lone_free_pages: runs=50 passed=50 failed=0 ignored=0 us min=202 avg=283 max=1336
+[FILTER] [PASS] test_recursive_coalescing_with_lone_free_pages: runs=50 passed=50 failed=0 ignored=0 us min=175 avg=226 max=383
+[FILTER] [PASS] test_add_region_leaves_out_partial_last_page: runs=50 passed=50 failed=0 ignored=0 us min=159 avg=208 max=516
+[FILTER] [PASS] test_free_does_not_merge_with_split_buddy: runs=50 passed=50 failed=0 ignored=0 us min=158 avg=200 max=344
+[FILTER] [PASS] test_free_rejects_range_holding_a_free_page: runs=50 passed=50 failed=0 ignored=0 us min=573 avg=705 max=1112
+
+========================================
+Test Suite Summary
+========================================
+[PASS] All test suites passed!
+[INFO] Exiting via semihosting...
