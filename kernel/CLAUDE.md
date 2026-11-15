@@ -836,16 +836,19 @@ lists, zero-size entries, reservations entirely outside the target
 region, and reservations that fully swallow the region.
 
 **The DTB blob is reserved too (#1244).** The blob's reserve map never
-covers the blob itself, and kexec-tools places it in the first free pages
-after the image, which is where the heap starts (Pi 5 firmware puts it in
-low RAM, also inside the heap). `pmm_collect_reserves` appends the blob's
-page-aligned range (`dtb_get_blob_range()`: address and `totalsize`) to
-the carve list on every boot path, and `pmm_init` ends with a free-list
-walk that prints `PMM: DTB at ... is clear of every free block` or a
-`[WARN]` with the first overlapping block. A new boot path that hands
-over a DTB needs nothing more than `dtb_parse` before `pmm_init`. The
-arm64 header's `image_size` is `__kernel_end - _start` (`.bss` and boot
-stack included); UEFI does not read it.
+covers the blob itself, and kexec-tools places it in the first free
+pages after the image, which is where the heap starts (Pi 5 firmware
+puts it in low RAM, also inside the heap). `pmm_collect_reserves`
+appends the blob's page-aligned range (`dtb_get_blob_range()`: address
+and `totalsize`, rejected above `DTB_MAX_BLOB_SIZE`, 2 MB) to the carve
+list on every boot path, and `pmm_init` ends with a free-list walk that
+prints `PMM: DTB at ... is clear of every free block` or a `[WARN]` with
+the first overlapping block (or, for a rejected header, `PMM: DTB at ...
+has no usable totalsize`). `test_suite_dtb` re-parses the boot blob
+after its own test blobs, so later suites see the real one. A new boot
+path that hands over a DTB needs nothing more than `dtb_parse` before
+`pmm_init`. The arm64 header's `image_size` is `__kernel_end - _start`
+(`.bss` and boot stack included); UEFI does not read it.
 
 **Re-entry guard (PR #598):** `pmm_add_region_split` uses file-scope
 scratch arrays (`pmm_split_*`) shared across calls. The "single-

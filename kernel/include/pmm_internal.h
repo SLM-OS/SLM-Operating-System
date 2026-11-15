@@ -17,6 +17,13 @@
 #include <stdbool.h>
 
 /*
+ * Capacity of the user-reserve table (pmm_user_reserve_add). Sized for the
+ * GA10B weights-pool extents list; see the comment above the table in
+ * pmm.c before changing it. Here so tests can size reserve lists from it.
+ */
+#define PMM_MAX_USER_RESERVES 2048
+
+/*
  * Pure carve helper: given a region [start, end) and a list of
  * memory reservations, write the carved subranges (regions minus the
  * reserved sub-intervals) into out_starts/out_ends.
@@ -43,7 +50,8 @@ int pmm_carve_reserves(uintptr_t start, uintptr_t end,
 
 /*
  * Page-aligned range holding a DTB blob of blob_size bytes at blob_addr
- * (#1244). Pure. False for a zero-size or wrapping range.
+ * (#1244). Pure. False for a zero-size range, or one whose page-rounded
+ * end would wrap past the top of the address space.
  */
 bool pmm_dtb_reserve_range(uint64_t blob_addr, uint64_t blob_size,
                            dtb_memreserve_t *out);

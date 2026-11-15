@@ -233,7 +233,10 @@ address and the header's `totalsize` (`dtb_get_blob_range()`), to the
 carve list (`pmm_collect_reserves`), on every boot path. After the
 regions are added, `pmm_init` walks the free lists and prints one line:
 `PMM: DTB at ... is clear of every free block`, or a `[WARN]` naming the
-first overlapping block. The arm64 image header's `image_size` covers the
+first overlapping block. A `totalsize` above `DTB_MAX_BLOB_SIZE` (2 MB,
+the most `vmm_map_firmware_dtb` maps) is treated as a corrupt header:
+`dtb_get_blob_range()` rejects it, nothing is reserved, and `pmm_init`
+warns `PMM: DTB at ... has no usable totalsize`. The arm64 image header's `image_size` covers the
 image through `__kernel_end` (`.bss` and the boot stack included), as the
 boot protocol asks, so a loader does not place anything inside the
 kernel's own footprint; it cannot keep the blob out of the heap, which

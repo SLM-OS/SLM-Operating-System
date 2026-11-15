@@ -496,8 +496,8 @@ int pmm_carve_reserves(uintptr_t start, uintptr_t end,
  * A page mapped but not reserved is at risk if PMM also allocates
  * from it; in practice the helper's IOVMM phys range and SLM-OS
  * PMM's allocations rarely overlap, so the partial protection is
- * sufficient until a future bump. */
-#define PMM_MAX_USER_RESERVES 2048
+ * sufficient until a future bump. The define lives in pmm_internal.h
+ * so tests can size reserve lists from it. */
 static dtb_memreserve_t pmm_user_reserves[PMM_MAX_USER_RESERVES];
 static size_t           pmm_n_user_reserves = 0;
 
@@ -568,7 +568,11 @@ void pmm_user_reserve_reset(void)
 bool pmm_dtb_reserve_range(uint64_t blob_addr, uint64_t blob_size,
                            dtb_memreserve_t *out)
 {
-    if (!out || blob_size == 0 || blob_addr + blob_size < blob_addr) {
+    /* The end is rounded up to a page, so reject any range whose last
+     * byte is in the top page of the address space: the round-up would
+     * wrap there even when addr + size does not. */
+    if (!out || blob_size == 0 || blob_size > UINT64_MAX - (PAGE_SIZE - 1) ||
+        blob_addr > UINT64_MAX - (PAGE_SIZE - 1) - blob_size) {
         return false;
     }
     uint64_t first = blob_addr & ~(uint64_t)(PAGE_SIZE - 1);
@@ -873,6 +877,12 @@ void pmm_init(void)
                      (unsigned)blob_size,
                      (unsigned long)buddy_state.heap_start);
             }
+        } else if (dtb_get_blob() != NULL) {
+            /* A blob was parsed but its header gives no usable range
+             * (bad magic, or totalsize 0 or above DTB_MAX_BLOB_SIZE):
+             * nothing was reserved for it. */
+            WARN("PMM: DTB at 0x%lx has no usable totalsize; not reserved "
+                 "(#1244)", (unsigned long)(uintptr_t)dtb_get_blob());
         }
     }
 

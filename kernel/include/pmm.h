@@ -94,9 +94,8 @@ void pmm_init(void);
  * so partial-page reservations protect the containing 4 KB page.
  *
  * Returns 0 on success, -1 if the user-reserve table is full
- * (PMM_MAX_USER_RESERVES, file-static in pmm.c) or `size == 0`. The
- * cap is currently 16 — generous for the kexec-handoff use case
- * which adds a handful of regions per boot.
+ * (PMM_MAX_USER_RESERVES in pmm_internal.h, currently 2048, sized for
+ * the GA10B weights-pool extents list) or `size == 0`.
  *
  * Thread-safety: file-static array, no locking. PMM init runs early
  * in single-CPU context before scheduler bring-up, so callers don't
