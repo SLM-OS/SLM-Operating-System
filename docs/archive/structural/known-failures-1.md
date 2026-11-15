@@ -339,4 +339,47 @@ platform once the test (or, for rows 2 and 3, the kernel) is corrected.
 
 ## 9. Blind critic
 
-Pending at the time of writing; see section 10.
+A second Fable session classified 10 tests drawn at random (`shuf -n 10`) from
+the 38. It was given the repository, the 15 close-out captures and the class
+definitions, and was told not to read issues, `docs/archive` or the
+known-failures files. It did not see this session's classifications.
+
+Sample: rows 10, 30, 16, 28, 36, 22, 9, 17, 31, 7.
+
+| Measure | Result |
+|---|---|
+| Paths and rates | 10 of 10 agree |
+| Mechanism (cause, with file:line) | 10 of 10 agree |
+| Class label | 8 of 10 agree |
+
+The two label differences are rows 16 and 17 (oplib "unstaged" tests after a
+UEFI-direct boot). The critic called them test defects "on the boundary with
+platform limitation" and gave the same remedy this log proposes: skip when the
+pool is already staged. Its reason for "test defect" is new information: on
+kexec the two tests pass only because their suite runs (capture line 2181)
+before `test_oplib_gpu_as` stages a pool (line 2725), so the tests are
+order-dependent on kexec as well. The table keeps "platform limitation",
+because the proposed change is a skip, and records the order dependence here.
+
+The critic found no kernel defect in the sample, which matches (rows 2 and 3
+were not drawn).
+
+Corrections and additions taken from the critic, checked against the captures:
+
+1. Row 10: the actual CPU is 4 in seven boots and 5 in three, never an
+   isolated core. #1272's body says 4.
+2. Rows 24 to 37: a write to the card **is** visible in the capture: `Set
+   eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob`
+   (Pi 5 boot01:3754), printed by `test_blob_autoload_shell_commands` with no
+   RAM disk installed. Section 5's "no write was observed directly" is
+   therefore too weak; #1274 is corrected in a comment.
+3. Row 22: after the leaked session, the next test's `slm_prog_backend_set`
+   zeroes the session and mapping tables (`kernel/gpu/slm_prog.c:538-551`), so
+   the real mappings are orphaned, not just left open.
+4. Outside the sample: `test_pool_stage_with_as_scratch_base` calls
+   `oplib_pool_unstage()` on the real staging after a UEFI-direct boot
+   (`kernel/tests/test_oplib_gpu_as.c:244`, `270`). It passes, so it is not on
+   any list. Not examined further.
+5. Pi 5 boot 04: 149 mailbox errors after the first timeout. The critic also
+   reads this as a real kernel or firmware-interaction problem. It has no
+   issue yet.
