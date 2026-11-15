@@ -62,9 +62,10 @@ size_t pmm_free_overlap_count_locked(uintptr_t start, uintptr_t end);
  */
 int pmm_collect_reserves(dtb_memreserve_t *out, int max);
 
-#if defined(ENABLE_BOOT_TESTS)
+
 /*
- * Test hooks, built into test kernels only (#1207).
+ * Test hooks for kernel/tests (#1207). The test sources are part of every
+ * image (CMake TEST_SOURCES), so these are too.
  *
  * pmm_test_add_region() adds [start, end) to the allocator the way
  * pmm_init adds a carved subrange. The caller must own every page the
@@ -77,6 +78,5 @@ int pmm_collect_reserves(dtb_memreserve_t *out, int max);
  */
 void pmm_test_add_region(uintptr_t start, uintptr_t end);
 int pmm_free_block_order(uintptr_t addr);
-#endif
 
 #endif /* PMM_INTERNAL_H */

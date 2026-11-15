@@ -863,7 +863,7 @@ ESR 0x96000044, FAR `&block_state[...]` computed from `PMM_ALLOC_FAIL`).
 
 **Test API:**
 - `pmm_get_buddy_stats()` exposes internal buddy state for testing
-- `pmm_test_add_region()` and `pmm_free_block_order()` (`pmm_internal.h`, test kernels only) add a region the way `pmm_init` does and report the order of the listed block at an address
+- `pmm_test_add_region()` and `pmm_free_block_order()` (`pmm_internal.h`, for `kernel/tests` only) add a region the way `pmm_init` does and report the order of the listed block at an address
 - Tests verify actual behavior (coalescing enables larger allocations), not just page counts
 
 ### LittleFS Tests (`kernel/tests/test_littlefs.c`)

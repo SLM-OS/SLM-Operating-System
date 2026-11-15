@@ -1194,9 +1194,9 @@ static void pmm_add_region(uintptr_t start, uintptr_t end)
     }
 }
 
-#if defined(ENABLE_BOOT_TESTS)
+/* Built into every image, like the tests that call them (TEST_SOURCES). */
 /*
- * Test hooks (kernel/include/pmm_internal.h); test kernels only.
+ * Test hooks (kernel/include/pmm_internal.h); for kernel/tests only.
  *
  * pmm_test_add_region() hands [start, end) to pmm_add_region() under
  * pmm_lock, as pmm_init does for a carved subrange. The caller must own
@@ -1226,7 +1226,7 @@ int pmm_free_block_order(uintptr_t addr)
     spin_unlock_irqrestore(&pmm_lock, flags);
     return found;
 }
-#endif /* ENABLE_BOOT_TESTS */
+
 
 void pmm_init(void)
 {
