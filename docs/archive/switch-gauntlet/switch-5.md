@@ -1469,3 +1469,7 @@ builder at a time by message; a builder ends its turn at the end of each
 phase. Lab order: A1 (Jetson padded and unpadded rows), B1 (Jetson suite),
 A2 (Pi 5 and regression rows), B2 (Pi 5 suite). One QEMU at a time on the
 host through a shared `flock`. Builders do not write this log.
+
+Addendum to Entry 42 (04:57 UTC, from date): the one-shot scheduled prompt
+set for 20:57 PST arrived at 20:57:05 PST (04:57 UTC), while the session
+was idle between turns. Both stand-ins for `send_later` work.
