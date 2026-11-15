@@ -89,4 +89,11 @@ int pmm_free_block_order(uintptr_t addr);
 int pmm_test_verify_cleared_link(unsigned int *first, unsigned int *second,
                                  unsigned int *restored);
 
+/*
+ * Test hook: whether the verifier's dump would read the 64 bytes at addr
+ * (only a free page inside the heap is read; the heap range has unmapped
+ * holes on Jetson).
+ */
+bool pmm_test_dump_readable(uintptr_t addr);
+
 #endif /* PMM_INTERNAL_H */

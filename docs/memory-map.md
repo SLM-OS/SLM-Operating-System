@@ -331,7 +331,9 @@ a block on a free list carries `BLOCK_FREE_HEAD | order`, written only by
   underflow at zero) and left the rest of the range listed inside the
   merged block. A later allocation then found a non-zero count over an
   empty list, split from the failure sentinel and wrote `block_state[]`
-  far outside the array: the data abort of #1207.
+  far outside the array. This sequence produces #1207's signature in QEMU.
+  It is not shown to occur on jetson-nano-2, and the halt persists with it
+  fixed (3 of 20 kexec suite boots).
 - **A free must cover allocated pages only.** `pmm_free_pages` rejects a
   range whose first page is free (double free, WARN) and a range that
   holds a free page further in (ERROR): an over-sized count, or a free
@@ -342,8 +344,10 @@ a block on a free list carries `BLOCK_FREE_HEAD | order`, written only by
   listed.
 - **A count without a list stops the kernel by name.** `buddy_alloc`
   panics with `PMM: order N free list is empty but its count is M` instead
-  of splitting from the sentinel, and `free_list_remove` panics on a zero
-  count.
+  of splitting from the sentinel, `free_list_remove` panics on a zero
+  count, and `free_list_pop` panics, after printing the block, when the
+  head's next link is NULL with blocks still counted or is not a block
+  address.
 
 `pmm_verify_free_lists()` walks the lists in any build and prints a
 `[pmm-verify] FINDING` block with the damaged block's contents
@@ -351,12 +355,15 @@ a block on a free list carries `BLOCK_FREE_HEAD | order`, written only by
 every suite boundary and once a second. The `PMM_CHECK=ON` build option
 adds per-operation assertions (`docs/testing.md`, "PMM_CHECK").
 
-**Open on hardware (#1207).** On jetson-nano-2 after kexec, about one
-suite boot in five still ends with a count without a list: a listed free
-block near the head of a list has a NULL next link although `pmm_init`
-left consistent lists. The merge rule above does not prevent it, so the
-link is cleared by something other than the free-list code; the verifier
-exists to capture that block.
+**Open on hardware (#1207).** On jetson-nano-2 after kexec, 1 to 2 suite
+boots in 10 still end with a count without a list (3 of 20 with the merge
+rule above in place, so that rule does not prevent it). In the one boot
+captured with the verifier, a listed order-4 block read all zero across
+its start (both links, its first 64 bytes and the 64 bytes before it)
+after `test_suite_gpu`, having read intact after the suite before, and
+`block_state[]` still marked it as a listed head. When the bytes changed
+in DRAM, and whether anything wrote them at all (a header write lost from
+the cache would look the same), is not known.
 
 ### Interface
 

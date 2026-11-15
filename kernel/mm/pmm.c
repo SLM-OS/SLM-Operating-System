@@ -635,13 +635,16 @@ unsigned pmm_check_walk(const char *where)
 /* ==========================================================================
  * Free-list verification and evidence dumps (#1207), in every build
  *
- * On jetson-nano-2 after kexec a listed free block has been found with a
- * cleared `next` link (the list then ends early and a later allocation
- * meets a count without a list). The allocator's own operations cannot do
- * that any more, so the writer is somewhere else; this code exists to
- * catch the damaged block with its contents. It keeps no table: about 200
- * bytes of .bss (the per-order "last reported" addresses and three
- * counters).
+ * On jetson-nano-2 after kexec, 1 to 2 suite boots in 10 end with a count
+ * without a list (#1207, open). In the one boot captured with this code,
+ * a listed order-4 block read all zero across its start (both links, its
+ * first 64 bytes and the 64 bytes before it) while block_state[] still
+ * marked it as a listed head, so no list operation had taken it. What
+ * makes the bytes read zero is not known: a write by something other than
+ * this file, or a header write of this file that was lost from the cache
+ * (DC IVAC discards dirty lines). This code exists to catch such a block
+ * with its contents. It keeps no table: about 200 bytes of data (the
+ * per-order "last reported" addresses, a counter and a label pointer).
  *
  * pmm_verify_free_lists(where) walks every list: each element inside the
  * heap, aligned for its order, marked as the head of a listed block of
@@ -679,12 +682,35 @@ static bool pmm_block_ptr_ok(uintptr_t a, unsigned int order)
            is_aligned_to_order(a, order);
 }
 
-/* Eight 64-bit words starting at `a`, when the range is inside the heap. */
+/*
+ * True when the 64 bytes at `a` may be read for a dump: they lie in one
+ * page, inside the heap range, and that page is free according to
+ * block_state[]. Only pages added by pmm_add_region are ever free, and
+ * those are mapped RAM. The heap range itself is not enough: it spans
+ * holes that are not mapped (on Jetson the OP-TEE carve-out
+ * 0xBE000000-0xC2000000 and everything from 0x240000000 to heap_end), and
+ * a read there faults inside the dump. An allocated page is not read
+ * either: it may be one of those holes, which are marked allocated.
+ */
+static bool pmm_dump_readable(uintptr_t a)
+{
+    if (a < buddy_state.heap_start || a + 64 > buddy_state.heap_end ||
+        a + 64 < a) {
+        return false;
+    }
+    if ((a >> PAGE_SHIFT) != ((a + 63) >> PAGE_SHIFT)) {
+        return false;
+    }
+    return block_state[addr_to_block_index(a & ~(uintptr_t)(PAGE_SIZE - 1))] !=
+           BLOCK_ALLOCATED;
+}
+
+/* Eight 64-bit words starting at `a`, when they may be read. */
 static void pmm_dump_words(const char *label, uintptr_t a)
 {
-    if (a < buddy_state.heap_start || a + 64 > buddy_state.heap_end) {
-        uart_printf("  %s 0x%lx: outside the heap, not read\n", label,
-                    (unsigned long)a);
+    if (!pmm_dump_readable(a)) {
+        uart_printf("  %s 0x%lx: not in a free page of the heap, not read\n",
+                    label, (unsigned long)a);
         return;
     }
     const volatile uint64_t *w = (const volatile uint64_t *)a;
@@ -922,27 +948,31 @@ static uintptr_t free_list_pop(unsigned int order)
     }
 
     /* The head's next link must be another listed block, or NULL on the
-     * last one. Anything else was not written by this file (#1207): report
-     * the block as it is now, before its header is cleared below. A NULL
-     * link with blocks still counted loses the rest of the list; the
-     * allocation that later finds the count without a list panics. A link
-     * that is not a block address cannot be followed at all. */
+     * last one. Anything else is not what this file last wrote there
+     * (#1207): report the block as it is now, before its header is cleared
+     * below, and stop. A link that is not a block address cannot be
+     * followed. A NULL link with blocks still counted could be: the pop
+     * would succeed, but the rest of the list is lost, and the blocks left
+     * behind still point at this one, which is about to be handed out (a
+     * later merge that unlinks one of them would write a link into the
+     * caller's page). */
     uintptr_t next = (uintptr_t)block->next;
-    if (next ? !pmm_block_ptr_ok(next, order)
+    if (next ? !(pmm_block_ptr_ok(next, order) &&
+                 block_state[addr_to_block_index(next)] ==
+                     (uint8_t)(BLOCK_FREE_HEAD | order))
              : buddy_state.free_counts[order] > 1) {
         struct pmm_finding f = {
-            .what = next ? "head's next link is not a block address"
+            .what = next ? "head's next link is not a listed block of this order"
                          : "head's next link is NULL with blocks still counted",
             .order = order, .walked = 0,
             .holder = (uintptr_t)block, .link = next,
         };
         pmm_verify_reported[order] = (uintptr_t)block;
         pmm_report_finding("free_list_pop", &f);
-        if (next) {
-            panic("PMM: order %u free list head 0x%lx has next link 0x%lx, "
-                  "not a block address (free-list corruption, #1207)", order,
-                  (unsigned long)(uintptr_t)block, (unsigned long)next);
-        }
+        panic("PMM: order %u free list head 0x%lx has next link 0x%lx with "
+              "%lu blocks counted (free-list corruption, #1207)", order,
+              (unsigned long)(uintptr_t)block, (unsigned long)next,
+              (unsigned long)buddy_state.free_counts[order]);
     }
 
     buddy_state.free_lists[order] = block->next;
@@ -1000,9 +1030,11 @@ static uint8_t get_block_state(uintptr_t addr)
  * went down for a block that list never held (an underflow at zero), the
  * other blocks of the range stayed listed inside the merged block, and a
  * later allocation found a non-zero count over an empty list and split
- * from PMM_ALLOC_FAIL, writing block_state[] far outside the array
- * (#1207). The head value is written only by free_list_add, so this is
- * exact, and O(1).
+ * from PMM_ALLOC_FAIL, writing block_state[] far outside the array. This
+ * sequence produces #1207's signature in QEMU. It is not shown to occur on
+ * jetson-nano-2, and the halt persists with it fixed (3 of 20 kexec suite
+ * boots). The head value is written only by free_list_add, so this test
+ * is exact, and O(1).
  */
 static bool is_buddy_free(uintptr_t buddy_addr, unsigned int order)
 {
@@ -1523,6 +1555,14 @@ int pmm_test_verify_cleared_link(unsigned int *first, unsigned int *second,
     }
     spin_unlock_irqrestore(&pmm_lock, flags);
     return order;
+}
+
+bool pmm_test_dump_readable(uintptr_t addr)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    bool ok = pmm_dump_readable(addr);
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return ok;
 }
 
 int pmm_free_block_order(uintptr_t addr)

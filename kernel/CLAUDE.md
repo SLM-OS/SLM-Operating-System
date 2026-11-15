@@ -811,7 +811,9 @@ is not the merge test. Two smaller free blocks side by side satisfy it,
 and merging with them unlinks a block from a list it is not on: the
 count of that order goes down (underflows at zero), and a later
 allocation finds a count without a list and splits from `PMM_ALLOC_FAIL`
-(the #1207 data abort, FAR = `&block_state[huge]`, x0 = -1). The head byte
+(data abort, FAR = `&block_state[huge]`, x0 = -1). This sequence produces
+#1207's signature in QEMU; it is not shown to occur on jetson-nano-2, and
+the halt persists with it fixed (3 of 20 kexec suite boots). The head byte
 is written only by `free_list_add` and cleared by `free_list_remove` /
 `free_list_pop`; keep it that way in new list code. `pmm_add_region` adds
 whole pages only (start up, end down). A count without a list now panics
@@ -820,9 +822,11 @@ this per operation and walks the lists after every test suite.
 `pmm_verify_free_lists()` (every build, no table) walks the lists and
 prints a `[pmm-verify] FINDING` with the damaged block's bytes; test
 kernels call it at each suite boundary and once a second from CPU 0's
-tick. **#1207 is still open on Jetson kexec:** a listed free block's
-next link is found NULL about one suite boot in five, cleared by
-something other than this file.
+tick. **#1207 is still open on Jetson kexec:** 1 to 2 suite boots in 10
+end with a count without a list. In the one boot captured, a listed
+order-4 block read all zero across its start (both links, 64 bytes each
+side of the block boundary) after `test_suite_gpu`; whether something
+wrote those bytes or a header write was lost from the cache is not known.
 
 **Statistics API:**
 ```c

@@ -377,12 +377,16 @@ It runs at the end of `pmm_init`; in a test kernel also before the first
 suite, after every suite, and once a second from CPU 0's timer tick on
 ARM64 (`timer_handler`, try-lock only, silent unless it finds something).
 `free_list_pop` makes the same report when it takes a head whose `next`
-is NULL while more blocks are counted, before it clears the block's
-header, and the "count without a list" panic prints every order's count
-against its walked length first. `test_verify_reports_a_cleared_link`
-clears a link under the lock, checks that it is reported exactly once,
-and restores it; the `FINDING` block labelled `verifier self-test` in
-every suite log is that test's.
+is NULL while more blocks are counted, or is not a block address, before
+it clears the block's header, and then panics (the blocks left behind
+would still point at a block that is about to be handed out). The "count
+without a list" panic prints every order's count against its walked
+length first. The dump reads only free pages inside the heap: the heap
+range has unmapped holes on Jetson, which are marked allocated like pages
+in use (`test_verify_dump_reads_only_free_heap_pages`).
+`test_verify_reports_a_cleared_link` clears a link under the lock, checks
+that it is reported exactly once, and restores it; the `FINDING` block
+labelled `verifier self-test` in every suite log is that test's.
 
 ### PMM_CHECK (Free-List Assertions)
 
@@ -782,7 +786,7 @@ Validates the GPU platform abstraction layer. Since QEMU has no GPU hardware, th
 
 ### PMM Tests (`kernel/tests/test_pmm.c`)
 
-Comprehensive validation of the buddy allocator physical memory manager. Tests run via Unity framework (59 tests in the suite on Pi 5 and Jetson, 54 in QEMU, which has no NC allocator; the count includes the reserve-carving, DTB-reservation, NC-allocator and user-reserve tests that are not listed below).
+Comprehensive validation of the buddy allocator physical memory manager. Tests run via Unity framework (60 tests in the suite on Pi 5 and Jetson, 55 in QEMU, which has no NC allocator; the count includes the reserve-carving, DTB-reservation, NC-allocator and user-reserve tests that are not listed below).
 
 These tests verify actual buddy allocator behavior, not just page counts. Key tests prove coalescing works by allocating larger blocks after freeing smaller ones.
 
@@ -891,6 +895,7 @@ Pi 5 and after a Jetson UEFI-direct boot until #1207. The
 | test_free_does_not_merge_with_split_buddy | A free does not merge with a buddy range that is free page by page but is two smaller blocks |
 | test_free_rejects_range_holding_a_free_page | A free whose range holds an already-free page is rejected |
 | test_verify_reports_a_cleared_link | The free-list verifier reports a cleared next link once, and nothing once it is restored |
+| test_verify_dump_reads_only_free_heap_pages | The verifier's dump reads only free pages inside the heap |
 
 On the allocator before #1207's fix, the second test followed by a run of
 single-page allocations reproduces the #1207 halt in QEMU (data abort,

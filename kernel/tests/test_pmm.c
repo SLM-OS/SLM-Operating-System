@@ -1194,6 +1194,50 @@ static void test_verify_reports_a_cleared_link(void)
     TEST_ASSERT_EQUAL_UINT(0, pmm_verify_free_lists("verifier self-test, after"));
 }
 
+/*
+ * Test: the verifier's dump reads only free pages inside the heap. The
+ * heap range spans holes that are not mapped on Jetson (the OP-TEE
+ * carve-out, everything above the last RAM region); they are marked
+ * allocated, like pages in use, and a dump that read "the 64 bytes before"
+ * a block at the start of a region, or the target of a bad link, would
+ * fault there.
+ */
+static void test_verify_dump_reads_only_free_heap_pages(void)
+{
+    struct pmm_stats stats;
+    pmm_get_stats(&stats);
+
+    void *pages = pmm_alloc_pages(2);
+    TEST_ASSERT_NOT_NULL(pages);
+    uintptr_t base = (uintptr_t)pages;
+
+    /* Allocated pages are not read (an unmapped hole looks the same). */
+    bool alloc_first = pmm_test_dump_readable(base);
+    bool alloc_before_second = pmm_test_dump_readable(base + PAGE_SIZE - 64);
+
+    /* Free the second page only: it is read; the 64 bytes before it are in
+     * the first page, still allocated, and are not. */
+    pmm_free_page((void *)(base + PAGE_SIZE));
+    bool free_second = pmm_test_dump_readable(base + PAGE_SIZE);
+    bool before_free_second = pmm_test_dump_readable(base + PAGE_SIZE - 64);
+    /* A range that crosses a page boundary is never read. */
+    bool straddle = pmm_test_dump_readable(base + PAGE_SIZE - 32);
+
+    pmm_free_page(pages);
+
+    TEST_ASSERT_FALSE(alloc_first);
+    TEST_ASSERT_FALSE(alloc_before_second);
+    TEST_ASSERT_TRUE(free_second);
+    TEST_ASSERT_FALSE(before_free_second);
+    TEST_ASSERT_FALSE(straddle);
+    /* Outside the heap range, at either end, and a wrapping address. */
+    TEST_ASSERT_FALSE(pmm_test_dump_readable(stats.heap_start - 64));
+    TEST_ASSERT_FALSE(pmm_test_dump_readable(stats.heap_end));
+    TEST_ASSERT_FALSE(pmm_test_dump_readable(stats.heap_end - 32));
+    TEST_ASSERT_FALSE(pmm_test_dump_readable((uintptr_t)-32));
+    TEST_ASSERT_FALSE(pmm_test_dump_readable(0));
+}
+
 /* ============================================================================
  * NC Memory Allocator Tests (Pi 5 / Jetson only)
  * ============================================================================ */
@@ -1648,6 +1692,7 @@ int test_suite_pmm(void)
     RUN_TEST(test_free_does_not_merge_with_split_buddy);
     RUN_TEST(test_free_rejects_range_holding_a_free_page);
     RUN_TEST(test_verify_reports_a_cleared_link);
+    RUN_TEST(test_verify_dump_reads_only_free_heap_pages);
 
     /* /memreserve/ carve helper */
     RUN_TEST(test_carve_no_reserves_returns_full_region);
