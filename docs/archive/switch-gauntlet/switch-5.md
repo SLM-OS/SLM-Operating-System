@@ -1837,3 +1837,126 @@ not touched.
 
 11:36 UTC: lab to builder A for A2 (Pi 5 `bench context`, then the
 regression rows on both boards).
+
+## Entry 46 (written 14:20 UTC, from date): builder A phase A2 (#1263: Pi 5 bench, regression rows at the head); builder B diagnostic build; lab to builder B
+
+Sources: builder A's final A2 report and builder B's second interim
+report, as received; not yet checked by a critic. Part A: branch
+`fix/percpu-cacheline` d70f93f0 = c0612fa7 (the change) + the ledger row
+(document only); every image and capture carries banner c0612fa7. Evidence
+`gauntlet-5-hw-jetson` 8e81fee7 and `gauntlet-5-hw-pi5` ad1a2cb1,
+`run5-hw/1263-1207/`, files `A-*`.
+
+### Part A: `bench context` on Pi 5
+
+Production, order U1, P1, U2, P2, U3, P3, one SD round trip per swap, 2
+runs per boot, 99 round trips per run (`A-bench-context-pi5-base-U{1,2,3}-runs1-2.txt`,
+`A-bench-context-pi5-head-P{1,2,3}-runs1-2.txt`, summary
+`A-bench-context-summary-pi5.txt`): unpadded run means 108, 107, 108, 106,
+110, 107 (107.67 ns, sd 1.37); padded 108, 107, 107, 106, 108, 108 (107.33
+ns, sd 0.82). Delta -0.33 ns (-0.3%), ranges overlap.
+
+Line size on Pi 5 (`A-pi5-coherency-regs-c0612fa7.txt`): 4 of 4 CPUs
+(MIDR 0x414fd0b1) read CTR_EL0 0x9444c004, 64-byte lines at L1D, L2, L3.
+
+### Part A: regression rows at c0612fa7
+
+| Row | Files | Result |
+|---|---|---|
+| Jetson kexec production, `boot_test` x10 (3+3+3+1 per call) | `A-kexec-prod-c0612fa7-boot01..10.txt` | 10 of 10 |
+| Jetson UEFI-direct production, x10 (1+3+3+3) | `A-uefi-prod-c0612fa7-boot01..10.txt` | 10 of 10, `Boot source: UEFI` in all |
+| Pi 5 production, x10 | `A-pi5-prod-c0612fa7-boot01..10.txt` | 10 of 10 |
+| `--assert-shares` x20, Jetson kexec | `A-assert-shares-kexec-c0612fa7-x20.txt` | 20 PASS, 0 FAIL (the command of Entry 39's `assert-shares-kexec-6a4cfa93-x20.txt`) |
+| Suite, Jetson kexec, 3 boots | `A-kexec-suite-c0612fa7-boot01..03.txt`, `A-kexec-suite-classify.txt` | 3 complete, 14 failures each, all on the known list, 0 halts |
+| Suite, Jetson UEFI-direct, 3 boots | `A-uefi-suite-c0612fa7-boot01..03.txt`, `A-uefi-suite-classify.txt` | 3 complete; 21, 21, 22 failures; all known **except one in boot 03** (below); 0 halts |
+| Suite, Pi 5, 3 boots | `A-pi5-suite-c0612fa7-boot01..03.txt`, `A-pi5-suite-classify.txt` | 3 complete, 18 failures each, all known, 0 halts |
+| `/ci` | `A-ci-c0612fa7-step01..12-*.txt` | every step passes (Entry 45) |
+
+**One failure outside the known list, 1 of 9 suite boots:**
+`test_preempt_flag_follows_migrated_task` in `A-uefi-suite-c0612fa7-boot03.txt`:
+`pdm: migrations=0 moved=0 runs=100/100 bad=0 (first on cpu 0)`, then
+`FAILED at .../test_scheduler.c:2369 - pdm_moved > 0`. Neither task changed
+CPU in the test's window, so its coverage condition failed; the flag check
+found no error (`bad=0`); no halt. The other 8 boots pass it. Entry 39 has
+it passing in 15 of 15 suite boots at 6a4cfa93, so it is not a known
+flake. Cause not established. The builder's inference, not checked: the
+test migrates only when the task's assigned CPU is below 4, so a task
+stolen to CPU 4 or 5 before its first run is never migrated, and the
+padded kernel changes steal timing. Decision: the deciding experiment
+(this test x200 on UEFI-direct, unpadded against padded, 3 boots per side)
+runs in a short slot after builder B's phase.
+
+The regression rows were run at the padded head only.
+
+### Part A: ledger row (`docs/perf/context-switch.md`, d70f93f0)
+
+"#1263 (awaits acceptance) | One cache line per per-CPU lock and scheduler
+word (placement only) | Jetson 96.83 to 98.50 ns, +1.67 ns / +1.7% (6 runs
+per side, sd 3.19 / 2.81, ranges overlap) | Pi 5 107.67 to 107.33 ns,
+-0.33 ns / -0.3% (6 runs per side, sd 1.37 / 0.82, ranges overlap) | Awaits
+acceptance by the user. No difference is shown on either board at this
+sample size." Running total as the previous total plus this row: Jetson
+88.0 to 99.0 ns (+12.5%), Pi 5 100.7 to 108.7 ns (+7.9%).
+
+### Part A: incidents and board state
+
+- pi-5-1 prints no firmware line on this UART, so the Pi 5 start check
+  accepts the kernel banner block at the top of the capture.
+- The Pi 5 restore took two `sdwire_update` calls (delete the test image,
+  then rename the original back). Card as found and as left:
+  `A-pi5-card-state.txt`.
+- The ESP was backed up before the first staging (`A-jetson-pre-state-A2.txt`).
+- Lab time 11:36 to about 14:08 UTC (the boards were free from 13:30).
+  No boot failed, no capture cut.
+- jetson-nano-2 as left (`A-jetson-post-state-A2.txt`): SD Linux, no
+  BootNext, ESP 789cba62 (fresh read-only mount, 6 files, 2196/130892
+  clusters), `/root/slmos.elf` 098f3163, 14 `*.elf*` files. pi-5-1:
+  original `kernel_2712.img` back, restore-check boot
+  `A-pi5-restore-check-boot01.txt` shows b42b2c1d. The builder's three
+  images are deleted from `/var/lib/labctl/images`.
+
+### Part B: diagnostic build (647c2c33, `gauntlet-5-hw-jetson` 206464d5)
+
+`fix/pmm-coalesce` 647c2c33 = f55c5293 + a free-list verifier in every
+build with no per-page table: `free_list_pop` reports a head whose `next`
+is NULL while more blocks are counted, before the header is cleared; the
+count-without-a-list panic prints every order's count, walked length and
+head; `pmm_verify_free_lists()` runs at the end of `pmm_init`, before the
+first suite, after every suite, and once a second from CPU 0's tick in
+test kernels (try-lock, prints once per finding, keeps running). A finding
+prints the time, place, last suite boundary, order, block address, page
+states, the block's first 64 bytes and the 64 bytes before it.
+
+- Shown in QEMU with an uncommitted demo patch (`B-qemu-verify-demo-647c2c33.txt`,
+  `B-demo-patch.py.txt`): finding from the tick at 2420 ms, from
+  `free_list_pop` at 3961 ms, then the named panic. The committed
+  self-test prints one finding labelled `verifier self-test` in every
+  suite log.
+- Layout (`B-sizes-verifier-647c2c33-vs-f55c5293.txt`): `.data` 148480 and
+  `.bss` 37512944 equal f55c5293's Jetson suite image and `__kernel_end`
+  is the same (0x82d80000), so the heap does not move; `.text` +4352,
+  `.rodata` +5120.
+- `/ci` at 647c2c33 passes every step (`B-ci-647c2c33-step01..11-*.txt`);
+  the x50 loops, the new tests x50, `PMM_CHECK=ON`, x86-64 and 5 full
+  suites pass (`B-qemu-fix-647c2c33-*.txt`).
+- Candidate writers, code reading only, nothing tested
+  (`B-candidates-writers.txt`): (1) the xHCI controller, which
+  `slmos-kexec` keeps running across kexec
+  (`scripts/jetson-kexec-slmos.sh:1038,1091,1151-1178`) and which SLM-OS
+  first halts in `xhci_init` (`main.c:874`) after `pmm_init`
+  (`main.c:418`); its Linux-side DCBAA, contexts, event ring and transfer
+  buffers are not reserved; (2) the GPU and its firmware, also kept
+  running, with buffers outside a channel VM not verified as reserved;
+  (3) a stale pointer in SLM-OS code, not surveyed. 189 against 190
+  reserves: the channel-VM reservation coalesces pages into runs and the
+  run count follows Linux's page placement
+  (`ga10b_handoff_reserve.c:808-837`).
+
+### Decisions
+
+- 13:32 UTC: lab to builder B for the last planned lab phase: 10 kexec
+  suite boots of `slmos-1207-suite-647c2c33.elf`, then the Pi 5 suite, 3
+  boots.
+- The blind critic for Part A starts now on the pushed rows; the deciding
+  experiment for the suite failure is added to its material when it has
+  run.
