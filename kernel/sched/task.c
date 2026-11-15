@@ -704,6 +704,7 @@ void task_exit(void)
      * schedule() to find a terminated task still in the run queue
      * (pick_next_task returns it, next == current → panic). */
     arch_irq_disable();
+    SWO_PHASE(cpu_id(), SWO_PH_EXIT, task->id);
 
 #ifdef CONFIG_AI_SCHEDULER
     {
@@ -722,6 +723,7 @@ void task_exit(void)
      * picking a terminated task and panicking. */
     SLOT_TRACE(ST_EXIT, task, 0, 0, 0);
     scheduler_terminate_task(task);
+    SWO_PHASE(cpu_id(), SWO_PH_EXIT_SCHED, task->id);
 
     /* Context-switch away. schedule() -> spin_lock_irqsave saves our
      * masked DAIF state. The context switch to the next task restores

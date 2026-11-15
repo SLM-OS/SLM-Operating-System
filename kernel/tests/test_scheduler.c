@@ -2630,10 +2630,11 @@ static bool swo_phase(uint32_t mode)
             break;
         }
 #if defined(CONFIG_SWO_DIAG)
-        /* #1262: a finish that takes over 30 ms (it normally takes a few)
-         * is dumped once, at the 30 ms mark, without failing the test: a
-         * shorter form of the stall leaves the same kind of state. */
-        if (!swo_slow_dumped && timer_get_count() - t1 > (f / 1000) * 30) {
+        /* #1262: a finish still incomplete after 10 ms (it normally takes
+         * under 1 ms) is dumped once, at the 10 ms mark, without failing
+         * the test: a shorter form of the stall leaves the same kind of
+         * state. */
+        if (!swo_slow_dumped && timer_get_count() - t1 > (f / 1000) * 10) {
             struct task *slow[SWO_MAX_WORKERS + SWO_MAX_CPUS];
             uint32_t nslow = 0;
             for (uint32_t k = 0; k < nall; k++) {
@@ -2642,12 +2643,15 @@ static bool swo_phase(uint32_t mode)
                 }
             }
             swo_slow_dumped = true;
-            sched_swo_diag_dump("slow-30ms", slow, nslow);
+            sched_swo_diag_dump("slow-10ms", slow, nslow);
         }
 #endif
         yield();
     }
 #if defined(CONFIG_SWO_DIAG)
+    if (swo_slow_dumped) {
+        sched_swo_diag_dump("slow-done", NULL, 0);
+    }
     if (swo_slow_dumped || wm > 15000 || w > 15000) {
         uart_printf("  swo-diag: slow finish, workers %ld us, movers %ld us%s\n",
                     (long)w, (long)wm,

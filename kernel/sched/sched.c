@@ -590,6 +590,32 @@ const struct sched_policy_ops *sched_policy_get(int index)
  */
 static struct task *volatile switch_in_waiting[MAX_CPUS];
 
+#if defined(CONFIG_SWO_DIAG)
+volatile uint32_t swo_diag_phase[MAX_CPUS];
+volatile uint32_t swo_diag_phase_arg[MAX_CPUS];
+volatile uint64_t swo_diag_phase_t[MAX_CPUS];
+/* Zombie reaper timing: longest task_destroy_gen and how many took > 1 ms. */
+static volatile uint32_t swo_diag_reap_max_us[MAX_CPUS];
+static volatile uint32_t swo_diag_reap_max_id[MAX_CPUS];
+static volatile uint32_t swo_diag_reap_slow[MAX_CPUS];
+uint64_t swo_diag_stamp(void)
+{
+    return timer_get_count();
+}
+static bool swo_diag_irqs_masked(void)
+{
+#if defined(PLATFORM_X86_64)
+    unsigned long fl;
+    __asm__ volatile("pushfq; popq %0" : "=r"(fl));
+    return !(fl & 0x200UL);
+#else
+    uint64_t daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    return (daif >> 7) & 1U;
+#endif
+}
+#endif
+
 /* Idle poll bound: about 50 us between schedule() calls while waiting. */
 #define SWITCH_IN_POLL_US   50U
 
@@ -2515,6 +2541,7 @@ void schedule(void)
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
     uint32_t lock_site = 1;            /* SWITCH_CHECK probe site */
     sched_diag_schedule[this_cpu]++;
+    SWO_PHASE(this_cpu, SWO_PH_ENTER, 0);
 
 #if defined(COOP_PREEMPT)
     /* Cooperative preemption: drive scheduler_tick off CNTPCT when the
@@ -2544,6 +2571,7 @@ void schedule(void)
 relock:
     rq_lock_masked(this_cpu);
     SWITCH_CHECK_CPU(this_cpu, lock_site);  /* #1242 probe; empty unless SWITCH_CHECK */
+    SWO_PHASE(this_cpu, SWO_PH_LOCKED, 0);
 
     /*
      * Clean up zombie task from previous schedule cycle.
@@ -2574,7 +2602,35 @@ relock:
          * task mid-construction: its TERMINATED check still saw the old
          * occupant's state, it cleared stack_top, and task_create copied
          * the cleared value into context.sp (SP 0 on the next switch). */
+#if defined(CONFIG_SWO_DIAG)
+        {
+            uint32_t z_id = zombie->id;
+            uint32_t z_on = zombie->on_cpu;
+            uint32_t z_state = (uint32_t)zombie->state;
+            uint32_t r_cpu = cpu_id();
+            SWO_PHASE(r_cpu, SWO_PH_REAP, z_id);
+            uint64_t r0 = timer_get_count();
+            (void)task_destroy_gen(zombie, zombie_gen);
+            uint64_t us = (timer_get_count() - r0) /
+                          (timer_get_frequency() / 1000000U);
+            if (us > swo_diag_reap_max_us[r_cpu]) {
+                swo_diag_reap_max_us[r_cpu] = (uint32_t)us;
+                swo_diag_reap_max_id[r_cpu] = z_id;
+            }
+            if (us > 1000) {
+                swo_diag_reap_slow[r_cpu]++;
+            }
+            if (us > 5000) {
+                WARN("swo-diag: zombie reap took %lu us on cpu %u (now %u): "
+                     "zombie id=%u state=%u on_cpu=%u at start, irqs %s",
+                     (unsigned long)us, r_cpu, cpu_id(), z_id, z_state, z_on,
+                     swo_diag_irqs_masked() ? "masked" : "open");
+            }
+            SWO_PHASE(cpu_id(), SWO_PH_ENTER, 0);
+        }
+#else
         (void)task_destroy_gen(zombie, zombie_gen);
+#endif
 
         /* Unpinned during the destroy: mask again and re-read the id
          * before touching anything per-CPU (#1242). */
@@ -2644,6 +2700,7 @@ relock:
         if (current) {
             current->state = TASK_RUNNING;
         }
+        SWO_PHASE(this_cpu, SWO_PH_NONE, 0);
         rq_unlock_irqrestore(this_cpu, flags);
 
         /* NOTE: before #1047, tasks on Pi 5 and Jetson ran with DAIF.I=1
@@ -2705,6 +2762,7 @@ relock:
     preempt_disabled[this_cpu] = 1;
     SLOT_TRACE(ST_PD_SET, next, this_cpu, cpu_id(), 0);
     steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
+    SWO_PHASE(this_cpu, SWO_PH_WINDOW, next->id);
 
     rq_unlock_irqrestore(this_cpu, flags);
 
@@ -2796,6 +2854,7 @@ relock:
     uint32_t now_cpu = cpu_id();
     SLOT_TRACE(ST_PD_CLEAR, task_current(), now_cpu, now_cpu, this_cpu);
     preempt_disabled[now_cpu] = 0;
+    SWO_PHASE(now_cpu, SWO_PH_NONE, 0);
     steal_pdwin_clear(now_cpu);                     /* #1216 trace */
 #if defined(SECONDARY_PREEMPT)
     /* Clear any pending reschedule flag set by scheduler_tick while
@@ -3229,6 +3288,8 @@ struct swo_diag_cpu {
     int      pd;
     uint32_t tick, sched, idle, picked, defer;
     uint32_t lock_word;
+    uint32_t phase, phase_arg, phase_age_us;
+    uint32_t reap_max_us, reap_max_id, reap_slow;
 };
 
 struct swo_diag_where {
@@ -3301,6 +3362,13 @@ void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
         d->picked = sched_diag_picked[c];
         d->defer = sched_diag_switch_defer[c];
         d->lock_word = *(volatile uint32_t *)&rq_lock[c];
+        d->phase = swo_diag_phase[c];
+        d->phase_arg = swo_diag_phase_arg[c];
+        d->phase_age_us = (uint32_t)((t_snap - swo_diag_phase_t[c]) /
+                                     (timer_get_frequency() / 1000000U));
+        d->reap_max_us = swo_diag_reap_max_us[c];
+        d->reap_max_id = swo_diag_reap_max_id[c];
+        d->reap_slow = swo_diag_reap_slow[c];
         d->qlen = 0;
         uint32_t steps = 0;
         for (struct task *t = rq->head; t && steps < 2 * MAX_TASKS;
@@ -3336,7 +3404,9 @@ void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
 
     uint64_t f = timer_get_frequency();
     uart_printf("  swo-diag %s: t=%lu us by_cpu=%u migrate_running_total=%u "
-                "(255 = none)\n", tag,
+                "(255 = none; phase 0 out of schedule, 1 entered, 2 reaping "
+                "zombie arg, 3 rq locked, 4 switch window to arg, 5 task_exit "
+                "arg, 6 task_exit arg into schedule)\n", tag,
                 (unsigned long)(t_snap / (f / 1000000U)), cpu_id(),
                 swo_diag_mig_total);
     for (uint32_t i = 0; i < n; i++) {
@@ -3363,7 +3433,11 @@ void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
         for (uint32_t k = 0; k < d->qlen && k < SWO_DIAG_QIDS; k++) {
             uart_printf("%s%u", k ? "," : "", d->qids[k]);
         }
-        uart_printf("] | tick=%u sched=%u idle=%u picked=%u defer=%u",
+        uart_printf("] | phase=%u arg=%u age=%u us | reap max=%u us (id %u) "
+                    "over1ms=%u",
+                    d->phase, d->phase_arg, d->phase_age_us, d->reap_max_us,
+                    d->reap_max_id, d->reap_slow);
+        uart_printf(" | tick=%u sched=%u idle=%u picked=%u defer=%u",
                     d->tick, d->sched, d->idle, d->picked, d->defer);
         if (swo_diag_have_prev) {
             uart_printf(" | delta tick=%u sched=%u idle=%u picked=%u defer=%u",
