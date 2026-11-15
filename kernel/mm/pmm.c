@@ -393,6 +393,40 @@ static void pmm_chk_alloced(uintptr_t addr, unsigned int order)
     }
 }
 
+/* The list pmm_add_region_split carves out of a region (firmware
+ * /memreserve/ entries first, then user reserves, then the DTB blob).
+ * Printed once, on the first region: the totals, every firmware entry, and
+ * the first 16 entries whose start or size is not page-aligned. */
+static void pmm_chk_reserves(const dtb_memreserve_t *rsv, int n_rsv)
+{
+    static bool printed;
+    static dtb_memreserve_t fw[DTB_MAX_MEMRESERVES];
+    int n_fw, unaligned = 0;
+
+    if (printed) {
+        return;
+    }
+    printed = true;
+    n_fw = dtb_get_memreserves(fw, DTB_MAX_MEMRESERVES);
+    for (int i = 0; i < n_rsv; i++) {
+        if ((rsv[i].addr | rsv[i].size) & (PAGE_SIZE - 1)) {
+            if (unaligned++ < 16) {
+                uart_printf("[pmm-check] reserve %d of %d is not page-aligned: "
+                            "0x%lx + 0x%lx\n", i, n_rsv,
+                            (unsigned long)rsv[i].addr,
+                            (unsigned long)rsv[i].size);
+            }
+        }
+    }
+    for (int i = 0; i < n_fw; i++) {
+        uart_printf("[pmm-check] firmware /memreserve/ %d: 0x%lx + 0x%lx\n", i,
+                    (unsigned long)fw[i].addr, (unsigned long)fw[i].size);
+    }
+    uart_printf("[pmm-check] reserves: %d in all (%d firmware /memreserve/, the "
+                "rest user reserves and the DTB blob), %d not page-aligned\n",
+                n_rsv, n_fw, unaligned);
+}
+
 /* pmm_add_region is about to list [start, end): report a boundary that is
  * not page-aligned (pmm_init then lists, or drops, part of a page that a
  * reservation shares). Printed for the first few, counted for all. */
@@ -567,6 +601,7 @@ unsigned pmm_check_walk(const char *where)
         } \
     } while (0)
 #define PMM_CHK_REGION(s, e)     pmm_chk_region((s), (e))
+#define PMM_CHK_RESERVES(r, n)   pmm_chk_reserves((r), (n))
 #define PMM_CHK_WALK_INIT()      pmm_chk_init_report()
 
 #else  /* !CONFIG_PMM_CHECK */
@@ -580,6 +615,7 @@ unsigned pmm_check_walk(const char *where)
 #define PMM_CHK_FREE(a, o)       ((void)0)
 #define PMM_CHK_INIT()           ((void)0)
 #define PMM_CHK_REGION(s, e)     ((void)0)
+#define PMM_CHK_RESERVES(r, n)   ((void)0)
 #define PMM_CHK_WALK_INIT()      ((void)0)
 
 #endif /* CONFIG_PMM_CHECK */
@@ -1088,6 +1124,7 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
      * PMM_SPLIT_RSV_MAX so the writes can never overrun
      * `pmm_split_rsv[]`. */
     int n_rsv = pmm_collect_reserves(pmm_split_rsv, PMM_SPLIT_RSV_MAX);
+    PMM_CHK_RESERVES(pmm_split_rsv, n_rsv);
     int n_out = pmm_carve_reserves(start, end, pmm_split_rsv, n_rsv,
                                    pmm_split_starts, pmm_split_ends,
                                    PMM_SPLIT_RSV_MAX + 1);
