@@ -30,6 +30,9 @@ size_t sched_percpu_layout(const struct percpu_layout_ent **tab);      /* sched.
 #if !defined(PLATFORM_X86_64)
 size_t pmu_percpu_layout(const struct percpu_layout_ent **tab);        /* arch/arm64/pmu.c */
 #endif
+#if defined(CONFIG_SLOT_TRACE)
+size_t slot_trace_percpu_layout(const struct percpu_layout_ent **tab); /* sched/slot_trace.c */
+#endif
 #endif
 
 #endif /* PERCPU_LAYOUT_H */

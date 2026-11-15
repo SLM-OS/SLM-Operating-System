@@ -14,6 +14,10 @@
  * that puts SPINLOCK_ARRAY or a per-CPU cell back to a packed element
  * fails here (and at the static asserts next to the types).
  *
+ * Limit: only listed arrays are checked. A NEW per-CPU array declared
+ * packed is not caught by anything here; whoever adds one adds it to a
+ * layout table (PERCPU_LAYOUT_ENT) or to test_global_arrays_one_line_per_cpu.
+ *
  * resched_trampoline (vectors.S) indexes preempt_disabled[], orig_elr[]
  * and orig_spsr[] by `cpu << CACHE_LINE_SHIFT` and stores at offset 0; the
  * asserts below pin the C layout to that.
@@ -61,38 +65,63 @@ CACHE_LINE_ASSERT_PADDED(struct cpu_runqueue);
 CACHE_LINE_ASSERT_PADDED(struct sched_diag_cpu);
 CACHE_LINE_ASSERT_PADDED(steal_deque_t);
 
-static void check_ent(const struct percpu_layout_ent *e)
+/* The one rule every entry is held to: elements 0 and 1 both start on a
+ * line, are exactly one element apart, the element is whole lines, and
+ * there is one element per possible CPU. */
+static bool layout_ok(const struct percpu_layout_ent *e)
 {
     uintptr_t a0 = (uintptr_t)e->e0;
     uintptr_t a1 = (uintptr_t)e->e1;
 
-    uart_printf("  [percpu] %-32s base %p stride %u size %u count %u\n",
-                e->name, (void *)a0, (unsigned)(a1 - a0),
-                (unsigned)e->elem_size, (unsigned)e->count);
-
-    TEST_ASSERT_TRUE_MESSAGE((a0 % CACHE_LINE_SIZE) == (0), e->name);
-    TEST_ASSERT_TRUE_MESSAGE((a1 % CACHE_LINE_SIZE) == (0), e->name);
-    TEST_ASSERT_TRUE_MESSAGE(a1 - a0 >= CACHE_LINE_SIZE, e->name);
-    TEST_ASSERT_TRUE_MESSAGE((a1 - a0) == (e->elem_size), e->name);
-    TEST_ASSERT_TRUE_MESSAGE((e->elem_size % CACHE_LINE_SIZE) == (0), e->name);
-    TEST_ASSERT_TRUE_MESSAGE((e->count) == (MAX_CPUS), e->name);
+    return (a0 % CACHE_LINE_SIZE) == 0 &&
+           (a1 % CACHE_LINE_SIZE) == 0 &&
+           a1 - a0 >= CACHE_LINE_SIZE &&
+           a1 - a0 == e->elem_size &&
+           (e->elem_size % CACHE_LINE_SIZE) == 0 &&
+           e->count == MAX_CPUS;
 }
 
-/* A packed array must fail the checker's conditions: the check is not
- * vacuous. Evaluated by hand so the suite itself stays green. */
+static void check_ent(const struct percpu_layout_ent *e)
+{
+    uart_printf("  [percpu] %-32s base %p stride %u size %u count %u\n",
+                e->name, (const void *)e->e0,
+                (unsigned)((uintptr_t)e->e1 - (uintptr_t)e->e0),
+                (unsigned)e->elem_size, (unsigned)e->count);
+    TEST_ASSERT_TRUE_MESSAGE(layout_ok(e), e->name);
+}
+
+/* The checker itself: it must reject the old layouts, or every test below
+ * is vacuous. Each rejected case is one way the padding could regress. */
 static void test_checker_rejects_a_packed_array(void)
 {
+    /* The old SPINLOCK_ARRAY: array aligned, 4-byte elements. */
     static volatile uint32_t packed[MAX_CPUS] __attribute__((aligned(64)));
-    uintptr_t a0 = (uintptr_t)&packed[0];
-    uintptr_t a1 = (uintptr_t)&packed[1];
-
-    /* This is the old SPINLOCK_ARRAY layout: aligned array, 4-byte stride. */
-    TEST_ASSERT_EQUAL_UINT64(0, a0 % CACHE_LINE_SIZE);
-    TEST_ASSERT_TRUE(a1 - a0 < CACHE_LINE_SIZE);
-    TEST_ASSERT_TRUE(a1 % CACHE_LINE_SIZE != 0);
+    const struct percpu_layout_ent e_packed = PERCPU_LAYOUT_ENT(packed);
+    TEST_ASSERT_FALSE(layout_ok(&e_packed));
     /* All eight words sit in the line of element 0. */
-    TEST_ASSERT_EQUAL_UINT64(a0 / CACHE_LINE_SIZE,
-                             (uintptr_t)&packed[MAX_CPUS - 1] / CACHE_LINE_SIZE);
+    TEST_ASSERT_TRUE((uintptr_t)&packed[0] / CACHE_LINE_SIZE ==
+                     (uintptr_t)&packed[MAX_CPUS - 1] / CACHE_LINE_SIZE);
+
+    /* Line-sized elements that do not start on a line. */
+    static struct { uint32_t pad; struct { uint8_t b[64]; } e[MAX_CPUS]; }
+        shifted __attribute__((aligned(64)));
+    const struct percpu_layout_ent e_shifted = PERCPU_LAYOUT_ENT(shifted.e);
+    TEST_ASSERT_FALSE(layout_ok(&e_shifted));
+
+    /* Aligned, but elements of one and a half lines. */
+    static struct { uint8_t b[96]; } odd[MAX_CPUS] __attribute__((aligned(64)));
+    const struct percpu_layout_ent e_odd = PERCPU_LAYOUT_ENT(odd);
+    TEST_ASSERT_FALSE(layout_ok(&e_odd));
+
+    /* Padded elements, but fewer than one per possible CPU. */
+    static percpu_u32_t few[MAX_CPUS - 1];
+    const struct percpu_layout_ent e_few = PERCPU_LAYOUT_ENT(few);
+    TEST_ASSERT_FALSE(layout_ok(&e_few));
+
+    /* And it accepts a padded array. */
+    static percpu_u32_t good[MAX_CPUS];
+    const struct percpu_layout_ent e_good = PERCPU_LAYOUT_ENT(good);
+    TEST_ASSERT_TRUE(layout_ok(&e_good));
 }
 
 static void test_sched_static_arrays_one_line_per_cpu(void)
@@ -217,6 +246,22 @@ static void test_pmu_arrays_one_line_per_cpu(void)
 #endif
 }
 
+static void test_slot_trace_arrays_one_line_per_cpu(void)
+{
+#if defined(ENABLE_BOOT_TESTS) && defined(CONFIG_SLOT_TRACE)
+    const struct percpu_layout_ent *tab = NULL;
+    size_t n = slot_trace_percpu_layout(&tab);
+
+    TEST_ASSERT_NOT_NULL(tab);
+    TEST_ASSERT_TRUE(n == 3);
+    for (size_t i = 0; i < n; i++) {
+        check_ent(&tab[i]);
+    }
+#else
+    TEST_IGNORE_MESSAGE("SLOT_TRACE test kernel only");
+#endif
+}
+
 /* The locks still lock: element i's lock word is the one spin_trylock
  * takes, and taking lock 0 leaves lock 1 free. */
 static void test_spinlock_array_elements_are_independent(void)
@@ -249,6 +294,7 @@ int test_suite_percpu_layout(void)
     RUN_TEST(test_current_task_slots_one_line_per_cpu);
     RUN_TEST(test_preempt_state_one_line_per_cpu);
     RUN_TEST(test_pmu_arrays_one_line_per_cpu);
+    RUN_TEST(test_slot_trace_arrays_one_line_per_cpu);
     RUN_TEST(test_spinlock_array_elements_are_independent);
     return UnityEnd();
 }

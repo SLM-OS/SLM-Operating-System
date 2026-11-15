@@ -16,6 +16,7 @@
 #include "uart.h"
 #include "semihosting.h"
 #include <stddef.h>
+#include "percpu_layout.h"
 
 #define SLOT_TRACE_LEN 512U     /* entries per CPU (power of two) */
 
@@ -300,5 +301,20 @@ void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
     }
     slot_trace_dump("el1_sync_bad_sp", orig_sp, esr, elr);
 }
+
+#if defined(ENABLE_BOOT_TESTS)
+/* Test hook (#1263): this file's padded per-CPU arrays, for
+ * test_percpu_layout.c. */
+size_t slot_trace_percpu_layout(const struct percpu_layout_ent **tab)
+{
+    static const struct percpu_layout_ent ents[] = {
+        PERCPU_LAYOUT_ENT(slot_trace_idx),
+        PERCPU_LAYOUT_ENT(slot_trace_rq_holder),
+        PERCPU_LAYOUT_ENT(slot_trace_pd_ticks),
+    };
+    *tab = ents;
+    return sizeof(ents) / sizeof(ents[0]);
+}
+#endif /* ENABLE_BOOT_TESTS */
 
 #endif /* CONFIG_SLOT_TRACE */
