@@ -1,0 +1,44 @@
+pi-5-1 SD card, 0:/slmstore/ (partition 1, /slmstore), recorded by builder B on 2026-11-15 about 22:24 UTC, board powered off,
+through labctl only (sdwire_ls recursive, sdwire_cat encoding=hex).
+
+THERE IS NO "BEFORE" RECORD. The instruction to record slmstore before the Pi 5 suite boots reached builder B after phase B2
+had already run (three suite boots of kernel_2712-1207-suite-647c2c33.img, 22:10 to 22:19 UTC, and the restore). This file
+is the state AFTER those boots (and after builder A's three suite boots earlier the same day). Nothing in slmstore was
+restored, because there is nothing recorded to restore it to.
+
+sdwire_ls /slmstore recursive (name, size, mtime as labctl prints them):
+  /slmstore/files.lfs.tmp                          0        2026-04-27T09:25:48Z
+  /slmstore/files.lfs                              8388608  2026-04-25T00:00:00Z
+  /slmstore/files.lfs.delta.tmp                    0        2026-04-25T00:00:00Z
+  /slmstore/files.lfs.delta                        6209568  2026-04-25T00:00:00Z
+  /slmstore/autoload/                              (dir)    2026-04-27T09:25:48Z
+  /slmstore/blob_autoload.conf                     382      2026-04-25T00:00:00Z
+  /slmstore/autoload/eviction-xgboost.blob         90       2026-04-25T00:00:00Z
+  /slmstore/autoload/eviction-mlp.blob             17700    2026-04-25T00:00:00Z
+  /slmstore/autoload/eviction-cacheus_config.blob  48       2026-04-25T00:00:00Z
+(/files holds one file, mnist.hef, 240869 bytes, 2026-05-07T06:13:36Z.)
+
+Reading of the mtimes: no file carries today's date. Seven entries carry 2026-04-25T00:00:00Z, a midnight date with no
+time of day, which is what a kernel without a clock would stamp (inference: SLM-OS's default FAT timestamp; not checked
+in the code). Such a stamp says "written by SLM-OS at some boot", not when: a file rewritten today by a suite boot would
+show the same date. files.lfs.tmp and the autoload directory carry the card's 2026-04-27 creation-time stamp.
+The root listing taken before B2's first change (as found) and after the restore both show /slmstore as a directory with
+mtime 2026-04-27T09:25:48Z; a FAT directory's mtime does not change when files inside it are rewritten, so that says nothing.
+
+Content read exactly (sdwire_cat encoding=hex is byte-exact; decoded on the host):
+  blob_autoload.conf  382 bytes  sha256 d37ecf936800ad7759ead7ba13ce8ce676efb7f7638896a4f4844d886dfa7f9c
+    # Runtime blob autoload config
+    # Format: <domain> <kind> <absolute-path> <size-bytes> <checksum-hex>
+    # Entries listed here are staged and activated at boot.
+    eviction xgboost 0:/slmstore/autoload/eviction-xgboost.blob 90 72f6b10e
+    eviction mlp 0:/slmstore/autoload/eviction-mlp.blob 17700 d678b5d0
+    eviction cacheus_config 0:/slmstore/autoload/eviction-cacheus_config.blob 48 e570580f
+  The three sizes in the config equal the three blob files' sizes in the listing.
+
+NOT checksummed: files.lfs (8388608 bytes), files.lfs.delta (6209568 bytes) and the three blobs. sdwire_cat returns a
+file's content inside the tool result, so an 8 MB file cannot be taken through it by this agent, and no other labctl read
+tool was found; the three small blobs could be read the same way as the config and were not, for lack of time. A full
+before/after comparison of slmstore therefore needs either a labctl checksum tool or the card read by the user.
+
+Board after this read: powered on again with boot_test x1, pattern "slmos>", banner build 20261022005058 (b42b2c1d)
+(B-pi5-restore-check-boot02.txt).
