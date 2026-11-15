@@ -2279,6 +2279,11 @@ static volatile uint32_t pdm_bad;
 static volatile uint32_t pdm_moved;
 static volatile uint32_t pdm_runs[2];
 static volatile uint32_t pdm_bad_cpu;
+/* DIAGNOSTIC (#1263, not for merge): CPU of each worker after each wake-up. */
+/* 16 words per row, aligned: each worker's row is its own 64-byte line. */
+static volatile uint32_t pdm_cpu_hist[2][16] __attribute__((aligned(64)));
+_Static_assert(MAX_CPUS <= 16, "pdm_cpu_hist row");
+static uint32_t steal_successes_total(void);
 
 static void pdm_task(void *arg)
 {
@@ -2291,6 +2296,9 @@ static void pdm_task(void *arg)
          * schedule() returns there. */
         task_sleep_ms(1);
         uint32_t c = cpu_id();
+        if (idx < 2 && c < MAX_CPUS) {
+            pdm_cpu_hist[idx][c]++;     /* DIAGNOSTIC: only this task writes its row */
+        }
         if (c != last) {
             __atomic_fetch_add(&pdm_moved, 1, __ATOMIC_RELAXED);
             last = c;
@@ -2322,6 +2330,11 @@ static void test_preempt_flag_follows_migrated_task(void)
     pdm_moved = 0;
     pdm_runs[0] = pdm_runs[1] = 0;
     pdm_bad_cpu = 0;
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        pdm_cpu_hist[0][i] = 0;
+        pdm_cpu_hist[1][i] = 0;
+    }
+    uint32_t pdm_steals0 = steal_successes_total();
 
     struct task *t[2];
     t[0] = task_create("pdm_a", pdm_task, (void *)(uintptr_t)0);
@@ -2356,6 +2369,12 @@ static void test_preempt_flag_follows_migrated_task(void)
     uart_printf("  pdm: migrations=%u moved=%u runs=%u/%u bad=%u (first on cpu %u)\n",
                 migrations, pdm_moved, pdm_runs[0], pdm_runs[1], pdm_bad,
                 pdm_bad_cpu);
+    uart_printf("  pdm-diag: steals=%u a=[%u,%u,%u,%u,%u,%u] b=[%u,%u,%u,%u,%u,%u]\n",
+                steal_successes_total() - pdm_steals0,
+                pdm_cpu_hist[0][0], pdm_cpu_hist[0][1], pdm_cpu_hist[0][2],
+                pdm_cpu_hist[0][3], pdm_cpu_hist[0][4], pdm_cpu_hist[0][5],
+                pdm_cpu_hist[1][0], pdm_cpu_hist[1][1], pdm_cpu_hist[1][2],
+                pdm_cpu_hist[1][3], pdm_cpu_hist[1][4], pdm_cpu_hist[1][5]);
     if (w < 0) {
         for (int i = 0; i < 2; i++) {
             if (t[i]->state != TASK_TERMINATED) {
