@@ -369,7 +369,7 @@ the failing list and every order's count and head:
 | `free_list_pop` | list empty with a non-zero count (the #1207 signature); head not listed at that order; head's links are not list elements |
 | `buddy_free` | buddy range free page by page but not one listed block of that order |
 | `pmm_free_pages` | a page of the range is not allocated; order larger than the block's allocation order |
-| `pmm_init` (one line, not fatal) | free blocks and pages, free pages by page state, unmerged free buddy pairs, regions that were not page-aligned |
+| `pmm_init` (printed, not fatal) | the reserve list (totals, each firmware `/memreserve/` entry, entries that are not page-aligned); free blocks and pages, free pages by page state, unmerged free buddy pairs, regions that were not page-aligned |
 
 A free with a smaller order than the allocation (a partial free) is
 printed once per caller and allowed. The per-operation checks are O(1)
