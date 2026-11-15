@@ -38,6 +38,7 @@
 #endif
 #include "slot_trace.h"
 #include "switch_check.h"
+#include "percpu_layout.h"
 /* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
  * are referenced from schedule() in every configuration (they are
  * empty functions without work stealing). */
@@ -85,20 +86,17 @@ extern void task_destroy(struct task *task);
  *
  * This is the cross-platform equivalent of Linux's preempt_count.
  */
-volatile int preempt_disabled[MAX_CPUS];
-
-/* `SPINLOCK_ARRAY` in spinlock.h hardcodes a 64-byte alignment to
- * avoid pulling cache.h into every TU that uses spinlocks. This TU
- * sees both headers, so pin the assumption with a static_assert: if
- * `CACHE_LINE_SIZE` ever changes (e.g. a new ARM CPU with 128-byte
- * lines), the build fails here instead of letting the macro silently
- * under-align. */
-_Static_assert(CACHE_LINE_SIZE == 64,
-               "SPINLOCK_ARRAY in spinlock.h hardcodes 64-byte alignment");
+/* One cache line per CPU (cacheline.h, #1263): the owner stores its flag
+ * twice per schedule() and idle CPUs poll every victim's flag in
+ * sched_try_steal. resched_trampoline (vectors.S) indexes it with
+ * CACHE_LINE_SHIFT. Declared in sched.h; no local externs. */
+percpu_int_t preempt_disabled[MAX_CPUS];
 
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
- * used by spinlocks needs cacheable memory. */
+ * used by spinlocks needs cacheable memory. One cache line per lock
+ * (SPINLOCK_ARRAY, #1263): a lock that shares its line with another CPU's
+ * lock can starve on a free lock. */
 static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
 
 #if CONFIG_WORK_STEALING
@@ -159,10 +157,10 @@ static volatile uint64_t steal_trace_t0_cnt;
  * << 8), written by the holder right after it takes the lock and cleared
  * right before it releases it; 0 = not held, or held by a site that does
  * not record. Read without the lock by a waiter, as a diagnostic only. */
-static volatile uint32_t swo_rq_owner[MAX_CPUS];
+static percpu_u32_t swo_rq_owner[MAX_CPUS];   /* one line per CPU, like the lock */
 #define SWO_RQ_OWN(c, line) \
-    (swo_rq_owner[(c)] = (cpu_id() + 1U) | ((uint32_t)(line) << 8))
-#define SWO_RQ_DISOWN(c)    (swo_rq_owner[(c)] = 0)
+    (swo_rq_owner[(c)].v = (cpu_id() + 1U) | ((uint32_t)(line) << 8))
+#define SWO_RQ_DISOWN(c)    (swo_rq_owner[(c)].v = 0)
 #else
 #define SWO_RQ_OWN(c, line) ((void)0)
 #define SWO_RQ_DISOWN(c)    ((void)0)
@@ -171,7 +169,7 @@ static volatile uint32_t swo_rq_owner[MAX_CPUS];
 /* Lock helpers that use the correct lock for a given CPU */
 static inline irq_flags_t rq_lock_irqsave_l(uint32_t cpu, uint32_t line)
 {
-    irq_flags_t f = spin_lock_irqsave(&rq_lock[cpu]);
+    irq_flags_t f = spin_lock_irqsave(SPINLOCK_AT(rq_lock, cpu));
     (void)line;
     SWO_RQ_OWN(cpu, line);
     SLOT_TRACE_RQ_LOCKED(cpu);
@@ -182,13 +180,13 @@ static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
 {
     SLOT_TRACE_RQ_UNLOCKING(cpu);
     SWO_RQ_DISOWN(cpu);
-    spin_unlock_irqrestore(&rq_lock[cpu], flags);
+    spin_unlock_irqrestore(SPINLOCK_AT(rq_lock, cpu), flags);
 }
 
 /* For schedule(), which masks first and then reads its CPU id (#1242). */
 static inline void rq_lock_masked_l(uint32_t cpu, uint32_t line)
 {
-    spin_lock(&rq_lock[cpu]);
+    spin_lock(SPINLOCK_AT(rq_lock, cpu));
     (void)line;
     SWO_RQ_OWN(cpu, line);
     SLOT_TRACE_RQ_LOCKED(cpu);
@@ -198,7 +196,7 @@ static inline void rq_unlock_masked(uint32_t cpu)
 {
     SLOT_TRACE_RQ_UNLOCKING(cpu);
     SWO_RQ_DISOWN(cpu);
-    spin_unlock(&rq_lock[cpu]);
+    spin_unlock(SPINLOCK_AT(rq_lock, cpu));
 }
 
 /*
@@ -423,17 +421,8 @@ uint32_t sched_ai_get_top_tasks(struct task **out, uint32_t max)
 #endif /* CONFIG_AI_SCHEDULER */
 
 /* Per-CPU diagnostic counters for cross-CPU dispatch debugging,
- * declared in sched_diag.h. */
-volatile uint32_t sched_diag_tick[MAX_CPUS];
-volatile uint32_t sched_diag_switch_defer[MAX_CPUS];
-volatile uint32_t sched_diag_schedule[MAX_CPUS];
-volatile uint32_t sched_diag_picked[MAX_CPUS];
-volatile uint32_t sched_diag_idle_loops[MAX_CPUS];
-volatile uint32_t sched_diag_steal_attempts[MAX_CPUS];
-volatile uint32_t sched_diag_steal_successes[MAX_CPUS];
-volatile uint32_t sched_diag_steal_stale[MAX_CPUS];
-volatile uint32_t sched_diag_steal_empty_victim[MAX_CPUS];
-volatile uint32_t sched_diag_steal_push_full[MAX_CPUS];
+ * declared in sched_diag.h: one cache line per CPU (#1263). */
+struct sched_diag_cpu sched_diag[MAX_CPUS];
 
 /* cpu_rq() implementation — must be after sched struct definition */
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
@@ -610,33 +599,13 @@ const struct sched_policy_ops *sched_policy_get(int index)
  * static task_table, the poll on w->on_cpu is bounded, and the schedule()
  * that follows decides under the lock.
  */
-static struct task *volatile switch_in_waiting[MAX_CPUS];
+PERCPU_CELL_TYPE(percpu_task_hint_t, struct task *volatile);
+static percpu_task_hint_t switch_in_waiting[MAX_CPUS];   /* one cache line per CPU (#1263) */
 
 #if defined(CONFIG_SWO_DIAG)
-volatile uint32_t swo_diag_phase[MAX_CPUS];
-volatile uint32_t swo_diag_phase_arg[MAX_CPUS];
-volatile uint64_t swo_diag_phase_t[MAX_CPUS];
-/* Zombie reaper timing: longest task_destroy_gen and how many took > 1 ms. */
-static volatile uint32_t swo_diag_reap_max_us[MAX_CPUS];
-static volatile uint32_t swo_diag_reap_max_id[MAX_CPUS];
-static volatile uint32_t swo_diag_reap_slow[MAX_CPUS];
-/* schedule() prelude timing (entry to holding the rq lock, tick masked):
- * longest total, longest steal attempt with its probe count, longest wait
- * for the CPU's own rq lock, and how many preludes took over 1 ms. Reset by
- * sched_swo_diag_prelude_report(). */
-static volatile uint32_t swo_diag_pre_max_us[MAX_CPUS];
-static volatile uint32_t swo_diag_steal_max_us[MAX_CPUS];
-static volatile uint32_t swo_diag_steal_max_probes[MAX_CPUS];
-static volatile uint32_t swo_diag_lockw_max_us[MAX_CPUS];
-/* For the longest wait: failed try-lock spins, the lock word and the
- * recorded owner when the wait began, and the owner 1 ms into it. A long
- * wait with few spins means the waiting CPU was not executing. */
-static volatile uint32_t swo_diag_lockw_spins[MAX_CPUS];
-static volatile uint32_t swo_diag_lockw_word0[MAX_CPUS];
-static volatile uint32_t swo_diag_lockw_own0[MAX_CPUS];
-static volatile uint32_t swo_diag_lockw_own1[MAX_CPUS];
-static volatile uint32_t swo_diag_pre_slow[MAX_CPUS];
-static volatile uint32_t swo_diag_steal_probes[MAX_CPUS];
+/* Per-CPU SWO_DIAG words, one struct (whole cache lines) per CPU (#1263);
+ * the type and its fields are in sched.h. */
+struct swo_diag_percpu swo_pc[MAX_CPUS];
 static inline uint32_t swo_diag_us(uint64_t t0)
 {
     return (uint32_t)((timer_get_count() - t0) /
@@ -680,7 +649,7 @@ static void idle_poll_waiting(struct task *w)
 
 static inline struct task *idle_waiting(uint32_t cpu)
 {
-    return __atomic_load_n(&switch_in_waiting[cpu], __ATOMIC_RELAXED);
+    return __atomic_load_n(&switch_in_waiting[cpu].v, __ATOMIC_RELAXED);
 }
 
 /*
@@ -696,18 +665,18 @@ static inline struct task *idle_waiting(uint32_t cpu)
 static struct task *pick_ready_locked(struct cpu_runqueue *rq, uint32_t cpu,
                                       struct task *next, struct task *current)
 {
-    switch_in_waiting[cpu] = NULL;
+    switch_in_waiting[cpu].v = NULL;
     if (next == rq->idle_task || next == current ||
         !__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE)) {
         return next;
     }
-    sched_diag_switch_defer[cpu]++;
+    sched_diag[cpu].switch_defer++;
     for (struct task *t = next->next; t; t = t->next) {
         if (t == current || !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
             return t;
         }
     }
-    switch_in_waiting[cpu] = next;
+    switch_in_waiting[cpu].v = next;
     return rq->idle_task;
 }
 
@@ -721,7 +690,7 @@ static void idle_task_func(void *arg)
          * idle" (counter==0) from "secondary is idling but SEV is not
          * reaching it" (counter frozen after initial iterations). */
         uint32_t idle_cpu = cpu_id();
-        sched_diag_idle_loops[idle_cpu]++;
+        sched_diag[idle_cpu].idle_loops++;
         struct task *waiting;
 
         /* ADR 0008: while a task waits on this CPU's queue for its previous
@@ -1037,12 +1006,12 @@ void scheduler_init(void)
 
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        spin_init(&rq_lock[i]);
+        spin_init(SPINLOCK_AT(rq_lock, i));
         /* Whole struct, not field by field: the AI tick counters were
          * missed that way and started from leftover data (#1045). */
         sched_runqueue_clear(cpu_rq(i));
 #if CONFIG_WORK_STEALING
-        spin_init(&steal_deque_lock[i]);
+        spin_init(SPINLOCK_AT(steal_deque_lock, i));
         steal_deque_init(&cpu_steal_deques[i]);
 #endif
     }
@@ -1259,7 +1228,7 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
      */
     if (task->cpu_affinity == CPU_AFFINITY_ANY &&
         task != cpu_rq(cpu)->idle_task) {
-        irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
+        irq_flags_t sd_flags = spin_lock_irqsave(SPINLOCK_AT(steal_deque_lock, cpu));
         int rc = steal_deque_push(&cpu_steal_deques[cpu], task);
         if (rc == 0) {
             /* #1203 trace: written under steal_deque_lock[cpu]. */
@@ -1267,9 +1236,9 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
             steal_trace_dq[cpu].last_push = timer_get_count();
             steal_trace_dq[cpu].push_run = steal_trace_run;
         }
-        spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
+        spin_unlock_irqrestore(SPINLOCK_AT(steal_deque_lock, cpu), sd_flags);
         if (rc < 0) {
-            sched_diag_steal_push_full[cpu]++;
+            sched_diag[cpu].steal_push_full++;
         }
     }
 #endif
@@ -1629,9 +1598,9 @@ void scheduler_terminate_task(struct task *task)
      * once stealing started succeeding reliably. Serialized by
      * steal_deque_lock[cpu]. */
     {
-        irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
+        irq_flags_t sd_flags = spin_lock_irqsave(SPINLOCK_AT(steal_deque_lock, cpu));
         steal_deque_remove(&cpu_steal_deques[cpu], task);
-        spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
+        spin_unlock_irqrestore(SPINLOCK_AT(steal_deque_lock, cpu), sd_flags);
     }
 #endif
 }
@@ -1684,11 +1653,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
 
     if (old_cpu < target_cpu) {
         flags = rq_lock_irqsave(old_cpu);
-        spin_lock(&rq_lock[target_cpu]);
+        spin_lock(SPINLOCK_AT(rq_lock, target_cpu));
         SWO_RQ_OWN(target_cpu, __LINE__);
     } else {
         flags = rq_lock_irqsave(target_cpu);
-        spin_lock(&rq_lock[old_cpu]);
+        spin_lock(SPINLOCK_AT(rq_lock, old_cpu));
         SWO_RQ_OWN(old_cpu, __LINE__);
     }
 
@@ -1732,11 +1701,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     /* Unlock in reverse order */
     if (old_cpu < target_cpu) {
         SWO_RQ_DISOWN(target_cpu);
-        spin_unlock(&rq_lock[target_cpu]);
+        spin_unlock(SPINLOCK_AT(rq_lock, target_cpu));
         rq_unlock_irqrestore(old_cpu, flags);
     } else {
         SWO_RQ_DISOWN(old_cpu);
-        spin_unlock(&rq_lock[old_cpu]);
+        spin_unlock(SPINLOCK_AT(rq_lock, old_cpu));
         rq_unlock_irqrestore(target_cpu, flags);
     }
 
@@ -1772,7 +1741,7 @@ static struct task *pick_next_task(uint32_t cpu)
                   "head (CPU %u, task='%s', state=%d)",
                   cpu, rq->head->name, (int)rq->head->state);
         }
-        sched_diag_picked[cpu]++;
+        sched_diag[cpu].picked++;
         return rq->head;
     }
 
@@ -2010,14 +1979,14 @@ static inline void steal_trace_note(struct steal_trace_cpu *tr,
  */
 static struct task *sched_try_steal(uint32_t this_cpu)
 {
-    /* #105: per-CPU observability counters. `sched_diag_steal_*` are
+    /* #105: per-CPU observability counters. `sched_diag[].steal_*` are
      * incremented on the THIEF's CPU (this_cpu) so a `cpu` shell
      * dump reports the per-core balance of attempts/hits/stale
      * discards/empty-victim scans. Count the isolated-CPU early-
      * out below as an attempt so the shell diag reads honestly —
      * an isolated CPU that entered sched_try_steal DID attempt,
      * we just choose not to probe victims. */
-    sched_diag_steal_attempts[this_cpu]++;
+    sched_diag[this_cpu].steal_attempts++;
 
     struct steal_trace_cpu *tr = &steal_trace[this_cpu];
     uint64_t now = timer_get_count();
@@ -2062,7 +2031,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
                 ph_w_bin = steal_bin(steal_ph_bound, STEAL_PH_BINS, now - wt);
                 tr->ph_w[ph_w_bin]++;
             }
-            if (preempt_disabled[wc]) {
+            if (preempt_disabled[wc].v) {
                 if (w->win_open) {
                     uint32_t r = w->cur_reason;
                     if (r < STEAL_WIN_NREASON) {
@@ -2116,7 +2085,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
          * is still the primary mutual-exclusion mechanism that keeps
          * the steal race-free; this is belt-and-suspenders per the
          * cross-plan review (B3 / P2-3). */
-        if (preempt_disabled[victim]) {
+        if (preempt_disabled[victim].v) {
             SLOT_TRACE(ST_STEAL_PD, NULL, victim, 1, 0);
             n_pd++;
             tr->v_pd++;
@@ -2135,11 +2104,11 @@ static struct task *sched_try_steal(uint32_t this_cpu)
         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
             uint32_t captured_gen = 0;
 #if defined(CONFIG_SWO_DIAG)
-            swo_diag_steal_probes[this_cpu]++;
+            swo_pc[this_cpu].steal_probes++;
 #endif
             /* #1203: was the lock held when this thief arrived? Plain
              * load; the acquisition below is unchanged. */
-            if (steal_deque_lock[victim].lock != 0) {
+            if (SPINLOCK_AT(steal_deque_lock, victim)->lock != 0) {
                 tr->v_busy++;
             }
             /* Serialize this steal against owner's pushes / other
@@ -2149,7 +2118,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
              * together so no ordering constraint exists between
              * them. */
             irq_flags_t sd_flags =
-                spin_lock_irqsave(&steal_deque_lock[victim]);
+                spin_lock_irqsave(SPINLOCK_AT(steal_deque_lock, victim));
             int was_nonempty =
                 !steal_deque_is_empty(&cpu_steal_deques[victim]);
             struct task *candidate =
@@ -2162,7 +2131,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
                 steal_trace_dq[victim].drain_ts = now;
                 steal_trace_dq[victim].drain_run = run;
             }
-            spin_unlock_irqrestore(&steal_deque_lock[victim], sd_flags);
+            spin_unlock_irqrestore(SPINLOCK_AT(steal_deque_lock, victim), sd_flags);
             if (!candidate) {
                 break;  /* Empty — try next victim */
             }
@@ -2198,7 +2167,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
                 stealable = 1;
             }
 
-            SLOT_TRACE(ST_STEAL_TRY, candidate, victim, preempt_disabled[victim],
+            SLOT_TRACE(ST_STEAL_TRY, candidate, victim, preempt_disabled[victim].v,
                        (stealable ? 1 :
                         candidate->generation != captured_gen ? 2 :
                         candidate->state != TASK_READY ? 3 :
@@ -2208,18 +2177,18 @@ static struct task *sched_try_steal(uint32_t this_cpu)
             rq_unlock_irqrestore(victim, flags);
 
             if (stealable) {
-                sched_diag_steal_successes[this_cpu]++;
+                sched_diag[this_cpu].steal_successes++;
                 steal_trace_note(tr, now, STEAL_OUT_OK);
                 return candidate;
             }
             /* Otherwise: stale pointer (structural mismatch or
              * generation mismatch), already popped from deque. Loop
              * again to drain another entry on the same victim. */
-            sched_diag_steal_stale[this_cpu]++;
+            sched_diag[this_cpu].steal_stale++;
             n_stale++;
         }
         if (!victim_had_entry) {
-            sched_diag_steal_empty_victim[this_cpu]++;
+            sched_diag[this_cpu].steal_empty_victim++;
             tr->v_empty++;
             n_empty++;
         }
@@ -2256,16 +2225,14 @@ void steal_pdwin_clear_asm(uint32_t cpu) { (void)cpu; }
  * source: the hardware timer ISR (sched_note_hw_tick) or the
  * cooperative tick synthesized in schedule() (coop_preempt_maybe_tick).
  *
- * 64-byte alignment keeps the array off cache lines shared with other
- * data. Each CPU only reads/writes its own index. volatile prevents
- * the compiler from holding stale values across the coop_preempt tick
- * computation.
+ * One cache line per CPU (cacheline.h, #1263): each CPU stores its own
+ * element on every tick. volatile prevents the compiler from holding
+ * stale values across the coop_preempt tick computation.
  *
  * Compiled on every platform so the hardware-tick bookkeeping can be
  * tested on QEMU, where COOP_PREEMPT is never built.
  */
-static volatile uint64_t coop_last_tick_cntpct[MAX_CPUS]
-    __attribute__((aligned(64)));
+static percpu_u64_t coop_last_tick_cntpct[MAX_CPUS];
 
 /*
  * Record that the hardware timer just ticked on `cpu` (#1047).
@@ -2282,14 +2249,14 @@ static volatile uint64_t coop_last_tick_cntpct[MAX_CPUS]
 void sched_note_hw_tick(uint32_t cpu)
 {
     if (cpu < MAX_CPUS) {
-        coop_last_tick_cntpct[cpu] = timer_get_count();
+        coop_last_tick_cntpct[cpu].v = timer_get_count();
     }
     steal_pdwin_tick(cpu);   /* #1216 trace: no-op without work stealing */
 }
 
 uint64_t sched_last_tick_cntpct(uint32_t cpu)
 {
-    return (cpu < MAX_CPUS) ? coop_last_tick_cntpct[cpu] : 0;
+    return (cpu < MAX_CPUS) ? coop_last_tick_cntpct[cpu].v : 0;
 }
 
 #if defined(COOP_PREEMPT)
@@ -2321,9 +2288,9 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
     }
     uint64_t period = freq / TIMER_HZ;       /* cycles per tick */
     uint64_t now = timer_get_count();
-    uint64_t last = coop_last_tick_cntpct[cpu];
+    uint64_t last = coop_last_tick_cntpct[cpu].v;
     if (last == 0) {
-        coop_last_tick_cntpct[cpu] = now;
+        coop_last_tick_cntpct[cpu].v = now;
         /* Publish the initial timestamp so subsequent reads on this
          * CPU — and any observer — see the non-zero marker. */
         __asm__ volatile("dmb ish" ::: "memory");
@@ -2337,7 +2304,7 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
      * long busy-wait), replay one tick and advance our marker by one
      * period. We only do one call per schedule entry to keep this path
      * bounded; the next schedule() call will catch up further. */
-    coop_last_tick_cntpct[cpu] = last + period;
+    coop_last_tick_cntpct[cpu].v = last + period;
 
     /* dmb before bumping the global counters so any observer reading
      * timer_handler_count / pit_ticks sees our timestamp update as
@@ -2361,11 +2328,11 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
      * Save-and-restore preempt_disabled so we don't clobber state the
      * outer schedule() may have set earlier (at boot, scheduler_start
      * pre-sets preempt_disabled=1 before first switch_to). */
-    int prev_preempt_disabled = preempt_disabled[cpu];
-    preempt_disabled[cpu] = 1;
+    int prev_preempt_disabled = preempt_disabled[cpu].v;
+    preempt_disabled[cpu].v = 1;
     steal_pdwin_set(cpu, STEAL_WIN_COOP);           /* #1216 trace */
     scheduler_tick();
-    preempt_disabled[cpu] = prev_preempt_disabled;
+    preempt_disabled[cpu].v = prev_preempt_disabled;
     if (!prev_preempt_disabled) {
         steal_pdwin_clear(cpu);                     /* #1216 trace */
     }
@@ -2407,7 +2374,7 @@ void slm_preempt_check_and_yield(void)
      * CPU — recursing into schedule() through the preempt-point would
      * just re-enter the same code path. NOTE: this does NOT cover
      * spinlock-held callers; see the function header comment. */
-    if (preempt_disabled[cpu]) {
+    if (preempt_disabled[cpu].v) {
         return;
     }
 
@@ -2417,7 +2384,7 @@ void slm_preempt_check_and_yield(void)
     }
     uint64_t period = freq / TIMER_HZ;
     uint64_t now = timer_get_count();
-    uint64_t last = coop_last_tick_cntpct[cpu];
+    uint64_t last = coop_last_tick_cntpct[cpu].v;
 
     /* Fast path: quantum hasn't elapsed. The `last == 0` arm covers
      * the bootstrap case before the first real tick — we want to
@@ -2591,7 +2558,7 @@ void schedule(void)
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
     uint32_t lock_site = 1;            /* SWITCH_CHECK probe site */
-    sched_diag_schedule[this_cpu]++;
+    sched_diag[this_cpu].schedule++;
     SWO_PHASE(this_cpu, SWO_PH_ENTER, 0);
 #if defined(CONFIG_SWO_DIAG)
     uint64_t swo_t0 = timer_get_count();
@@ -2615,16 +2582,16 @@ void schedule(void)
     if (!rq->head) {
 #if defined(CONFIG_SWO_DIAG)
         uint64_t swo_s0 = timer_get_count();
-        uint32_t swo_p0 = swo_diag_steal_probes[this_cpu];
+        uint32_t swo_p0 = swo_pc[this_cpu].steal_probes;
 #endif
         struct task *stolen = sched_try_steal(this_cpu);
 #if defined(CONFIG_SWO_DIAG)
         {
             uint32_t us = swo_diag_us(swo_s0);
-            if (us > swo_diag_steal_max_us[this_cpu]) {
-                swo_diag_steal_max_us[this_cpu] = us;
-                swo_diag_steal_max_probes[this_cpu] =
-                    swo_diag_steal_probes[this_cpu] - swo_p0;
+            if (us > swo_pc[this_cpu].steal_max_us) {
+                swo_pc[this_cpu].steal_max_us = us;
+                swo_pc[this_cpu].steal_max_probes =
+                    swo_pc[this_cpu].steal_probes - swo_p0;
             }
         }
 #endif
@@ -2641,14 +2608,14 @@ relock:
     {
         uint64_t swo_l0 = timer_get_count();
         uint32_t spins = 0;
-        uint32_t word0 = *(volatile uint32_t *)&rq_lock[this_cpu];
-        uint32_t own0 = swo_rq_owner[this_cpu];
+        uint32_t word0 = SPINLOCK_AT(rq_lock, this_cpu)->lock;
+        uint32_t own0 = swo_rq_owner[this_cpu].v;
         uint32_t own1 = 0;
         bool sampled = false;
-        while (!spin_trylock(&rq_lock[this_cpu])) {
+        while (!spin_trylock(SPINLOCK_AT(rq_lock, this_cpu))) {
             spins++;
             if (!sampled && swo_diag_us(swo_l0) > 1000) {
-                own1 = swo_rq_owner[this_cpu];
+                own1 = swo_rq_owner[this_cpu].v;
                 sampled = true;
             }
 #if defined(PLATFORM_X86_64)
@@ -2660,20 +2627,20 @@ relock:
         SWO_RQ_OWN(this_cpu, __LINE__);
         SLOT_TRACE_RQ_LOCKED(this_cpu);
         uint32_t lw = swo_diag_us(swo_l0);
-        if (lw > swo_diag_lockw_max_us[this_cpu]) {
-            swo_diag_lockw_max_us[this_cpu] = lw;
-            swo_diag_lockw_spins[this_cpu] = spins;
-            swo_diag_lockw_word0[this_cpu] = word0;
-            swo_diag_lockw_own0[this_cpu] = own0;
-            swo_diag_lockw_own1[this_cpu] = own1;
+        if (lw > swo_pc[this_cpu].lockw_max_us) {
+            swo_pc[this_cpu].lockw_max_us = lw;
+            swo_pc[this_cpu].lockw_spins = spins;
+            swo_pc[this_cpu].lockw_word0 = word0;
+            swo_pc[this_cpu].lockw_own0 = own0;
+            swo_pc[this_cpu].lockw_own1 = own1;
         }
         if (lock_site == 1) {
             uint32_t pre = swo_diag_us(swo_t0);
-            if (pre > swo_diag_pre_max_us[this_cpu]) {
-                swo_diag_pre_max_us[this_cpu] = pre;
+            if (pre > swo_pc[this_cpu].pre_max_us) {
+                swo_pc[this_cpu].pre_max_us = pre;
             }
             if (pre > 1000) {
-                swo_diag_pre_slow[this_cpu]++;
+                swo_pc[this_cpu].pre_slow++;
             }
         }
     }
@@ -2723,12 +2690,12 @@ relock:
             (void)task_destroy_gen(zombie, zombie_gen);
             uint64_t us = (timer_get_count() - r0) /
                           (timer_get_frequency() / 1000000U);
-            if (us > swo_diag_reap_max_us[r_cpu]) {
-                swo_diag_reap_max_us[r_cpu] = (uint32_t)us;
-                swo_diag_reap_max_id[r_cpu] = z_id;
+            if (us > swo_pc[r_cpu].reap_max_us) {
+                swo_pc[r_cpu].reap_max_us = (uint32_t)us;
+                swo_pc[r_cpu].reap_max_id = z_id;
             }
             if (us > 1000) {
-                swo_diag_reap_slow[r_cpu]++;
+                swo_pc[r_cpu].reap_slow++;
             }
             if (us > 5000) {
                 WARN("swo-diag: zombie reap took %lu us on cpu %u (now %u): "
@@ -2869,7 +2836,7 @@ relock:
      * earlier, but the race it targeted does not exist — rq_lock_irqsave
      * already closes the window.)
      */
-    preempt_disabled[this_cpu] = 1;
+    preempt_disabled[this_cpu].v = 1;
     SLOT_TRACE(ST_PD_SET, next, this_cpu, cpu_id(), 0);
     steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
     SWO_PHASE(this_cpu, SWO_PH_WINDOW, next->id);
@@ -2963,14 +2930,14 @@ relock:
      * stopped preempting and thieves skipped it (#1219 deadlock). */
     uint32_t now_cpu = cpu_id();
     SLOT_TRACE(ST_PD_CLEAR, task_current(), now_cpu, now_cpu, this_cpu);
-    preempt_disabled[now_cpu] = 0;
+    preempt_disabled[now_cpu].v = 0;
     SWO_PHASE(now_cpu, SWO_PH_NONE, 0);
     steal_pdwin_clear(now_cpu);                     /* #1216 trace */
 #if defined(SECONDARY_PREEMPT)
     /* Clear any pending reschedule flag set by scheduler_tick while
      * we were mid-switch — we just scheduled, so an immediate re-arm
      * after eret would be redundant. */
-    reschedule_pending[now_cpu] = 0;
+    reschedule_pending[now_cpu].v = 0;
 #endif
 }
 
@@ -3047,7 +3014,7 @@ void scheduler_start(uint32_t this_cpu)
 
     /* Guard against timer re-entrancy during switch_to.
      * The trampoline clears this after context restore. */
-    preempt_disabled[this_cpu] = 1;
+    preempt_disabled[this_cpu].v = 1;
     steal_pdwin_set(this_cpu, STEAL_WIN_BOOT);      /* #1216 trace */
 
     /* Unmask IRQs. If timer fires, scheduler_tick() sees preempt_disabled=1
@@ -3088,7 +3055,7 @@ void scheduler_start(uint32_t this_cpu)
 #endif
 
     /* Debug: mark that we reached pre-switch point */
-    sched_diag_idle_loops[this_cpu] = 0xAAAA;
+    sched_diag[this_cpu].idle_loops = 0xAAAA;
 
     /* Switch to first task (NULL = no previous context to save).
      * switch_to never returns — it jumps to task_entry_wrapper.
@@ -3119,7 +3086,7 @@ void scheduler_tick(void)
 
     /* Always count ticks (used by sleep_ms, uptime, benchmarks) */
     sched.timer_ticks++;
-    sched_diag_tick[cpu]++;
+    sched_diag[cpu].tick++;
 
 #ifdef CONFIG_AI_SCHEDULER
     /* Per-CPU utilization tracking */
@@ -3164,8 +3131,8 @@ void scheduler_tick(void)
      * completion. Calling schedule() here would corrupt state because
      * task_set_current(next) has already been called but the actual
      * stack switch hasn't happened yet. */
-    slot_trace_pd_tick(cpu, preempt_disabled[cpu]);
-    if (preempt_disabled[cpu]) {
+    slot_trace_pd_tick(cpu, preempt_disabled[cpu].v);
+    if (preempt_disabled[cpu].v) {
         return;
     }
 
@@ -3176,7 +3143,7 @@ void scheduler_tick(void)
      * SPSR_EL1/ELR_EL1 are never `eret`-ed back. The trampoline arms in
      * maybe_arm_resched_trampoline() (called from el1_irq just before
      * restore_regs/eret), and schedule() runs in task context. */
-    reschedule_pending[cpu] = 1;
+    reschedule_pending[cpu].v = 1;
 #else
     /* Preempt current task */
     schedule();
@@ -3453,7 +3420,7 @@ void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
         struct swo_diag_cpu *d = &swo_diag_now[c];
         struct cpu_runqueue *rq = cpu_rq(c);
         struct task *cur = task_current_on_cpu(c);
-        struct task *w = __atomic_load_n(&switch_in_waiting[c], __ATOMIC_RELAXED);
+        struct task *w = __atomic_load_n(&switch_in_waiting[c].v, __ATOMIC_RELAXED);
         struct task *z = rq->zombie;
         d->cur_id = cur ? cur->id : 0;
         d->cur_state = cur ? (uint32_t)cur->state : 0xFF;
@@ -3465,20 +3432,20 @@ void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
         d->has_zombie = z != NULL;
         d->zombie_id = z ? z->id : 0;
         d->ready_count = rq->ready_count;
-        d->pd = preempt_disabled[c];
-        d->tick = sched_diag_tick[c];
-        d->sched = sched_diag_schedule[c];
-        d->idle = sched_diag_idle_loops[c];
-        d->picked = sched_diag_picked[c];
-        d->defer = sched_diag_switch_defer[c];
-        d->lock_word = *(volatile uint32_t *)&rq_lock[c];
-        d->phase = swo_diag_phase[c];
-        d->phase_arg = swo_diag_phase_arg[c];
-        d->phase_age_us = (uint32_t)((t_snap - swo_diag_phase_t[c]) /
+        d->pd = preempt_disabled[c].v;
+        d->tick = sched_diag[c].tick;
+        d->sched = sched_diag[c].schedule;
+        d->idle = sched_diag[c].idle_loops;
+        d->picked = sched_diag[c].picked;
+        d->defer = sched_diag[c].switch_defer;
+        d->lock_word = SPINLOCK_AT(rq_lock, c)->lock;
+        d->phase = swo_pc[c].phase;
+        d->phase_arg = swo_pc[c].phase_arg;
+        d->phase_age_us = (uint32_t)((t_snap - swo_pc[c].phase_t) /
                                      (timer_get_frequency() / 1000000U));
-        d->reap_max_us = swo_diag_reap_max_us[c];
-        d->reap_max_id = swo_diag_reap_max_id[c];
-        d->reap_slow = swo_diag_reap_slow[c];
+        d->reap_max_us = swo_pc[c].reap_max_us;
+        d->reap_max_id = swo_pc[c].reap_max_id;
+        d->reap_slow = swo_pc[c].reap_slow;
         d->qlen = 0;
         uint32_t steps = 0;
         for (struct task *t = rq->head; t && steps < 2 * MAX_TASKS;
@@ -3503,7 +3470,7 @@ void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
                     break;
                 }
             }
-            if (__atomic_load_n(&switch_in_waiting[c], __ATOMIC_RELAXED) == t) {
+            if (__atomic_load_n(&switch_in_waiting[c].v, __ATOMIC_RELAXED) == t) {
                 where[i].waited_by = c;
             }
             if (task_current_on_cpu(c) == t) {
@@ -3568,16 +3535,16 @@ void sched_swo_diag_prelude_report(const char *tag, uint32_t min_us)
     uint32_t pre[MAX_CPUS], st[MAX_CPUS], pr[MAX_CPUS], lw[MAX_CPUS], sl[MAX_CPUS];
     bool any = false;
     for (uint32_t c = 0; c < cpu_count; c++) {
-        pre[c] = swo_diag_pre_max_us[c];
-        st[c] = swo_diag_steal_max_us[c];
-        pr[c] = swo_diag_steal_max_probes[c];
-        lw[c] = swo_diag_lockw_max_us[c];
-        sl[c] = swo_diag_pre_slow[c];
-        swo_diag_pre_max_us[c] = 0;
-        swo_diag_steal_max_us[c] = 0;
-        swo_diag_steal_max_probes[c] = 0;
-        swo_diag_lockw_max_us[c] = 0;
-        swo_diag_pre_slow[c] = 0;
+        pre[c] = swo_pc[c].pre_max_us;
+        st[c] = swo_pc[c].steal_max_us;
+        pr[c] = swo_pc[c].steal_max_probes;
+        lw[c] = swo_pc[c].lockw_max_us;
+        sl[c] = swo_pc[c].pre_slow;
+        swo_pc[c].pre_max_us = 0;
+        swo_pc[c].steal_max_us = 0;
+        swo_pc[c].steal_max_probes = 0;
+        swo_pc[c].lockw_max_us = 0;
+        swo_pc[c].pre_slow = 0;
         if (pre[c] > min_us || lw[c] > min_us) {
             any = true;
         }
@@ -3593,14 +3560,41 @@ void sched_swo_diag_prelude_report(const char *tag, uint32_t min_us)
     uart_printf("\n");
     for (uint32_t c = 0; c < cpu_count; c++) {
         if (lw[c] > min_us) {
-            uint32_t o0 = swo_diag_lockw_own0[c], o1 = swo_diag_lockw_own1[c];
+            uint32_t o0 = swo_pc[c].lockw_own0, o1 = swo_pc[c].lockw_own1;
             uart_printf("  swo-diag lockwait cpu%u: %u us, %u failed try-locks, "
                         "lock word at start %u, owner at start cpu%d line %u, "
                         "owner at 1 ms cpu%d line %u (cpu-1 = none recorded)\n",
-                        c, lw[c], swo_diag_lockw_spins[c],
-                        swo_diag_lockw_word0[c], (int)(o0 & 0xFF) - 1, o0 >> 8,
+                        c, lw[c], swo_pc[c].lockw_spins,
+                        swo_pc[c].lockw_word0, (int)(o0 & 0xFF) - 1, o0 >> 8,
                         (int)(o1 & 0xFF) - 1, o1 >> 8);
         }
     }
 }
 #endif /* CONFIG_SWO_DIAG */
+
+#if defined(ENABLE_BOOT_TESTS)
+/* Test hook (#1263): the padded per-CPU arrays that are static to this
+ * file, for test_percpu_layout.c. */
+size_t sched_percpu_layout(const struct percpu_layout_ent **tab)
+{
+    static const struct percpu_layout_ent ents[] = {
+        PERCPU_LAYOUT_ENT(rq_lock),
+        PERCPU_LAYOUT_ENT(sched.cpu_fallback),
+        PERCPU_LAYOUT_ENT(switch_in_waiting),
+        PERCPU_LAYOUT_ENT(coop_last_tick_cntpct),
+#if CONFIG_WORK_STEALING
+        PERCPU_LAYOUT_ENT(steal_deque_lock),
+        PERCPU_LAYOUT_ENT(cpu_steal_deques),
+        PERCPU_LAYOUT_ENT(steal_trace),
+        PERCPU_LAYOUT_ENT(steal_trace_dq),
+        PERCPU_LAYOUT_ENT(steal_pdwin),
+#endif
+#if defined(CONFIG_SWO_DIAG)
+        PERCPU_LAYOUT_ENT(swo_rq_owner),
+        PERCPU_LAYOUT_ENT(swo_pc),
+#endif
+    };
+    *tab = ents;
+    return sizeof(ents) / sizeof(ents[0]);
+}
+#endif /* ENABLE_BOOT_TESTS */

@@ -26,9 +26,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-
-/* Cortex-A76 cacheline size */
-#define CACHE_LINE_SIZE 64
+#include "cacheline.h"      /* CACHE_LINE_SIZE */
 
 /* Pi 5 and Jetson: real maintenance by VA (see the header comment). */
 #if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)

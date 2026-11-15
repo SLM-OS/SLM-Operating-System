@@ -385,7 +385,7 @@ keep a slot from being freed or reused under a CPU that still uses it:
   moved and continue with another CPU's run queue, idle task and preempt
   flag. A task whose previous CPU never releases it (that CPU powered off
   or wedged) is never switched in; the deferring CPU keeps running its
-  other tasks. Counter: `sched_diag_switch_defer[cpu]`. Tests:
+  other tasks. Counter: `sched_diag[cpu].switch_defer`. Tests:
   `test_migrate_ready_during_switch_out`, `test_wake_during_switch_out`
   (both also check the `SWITCH_CHECK=ON` instrument), and with
   `SWITCH_WINDOW_TEST=ON` `test_switch_window_held` and
@@ -1181,6 +1181,108 @@ Gating:
 
 Test: `test_proactive_load_balance_redirect` in `test_scheduler.c`.
 
+## Per-CPU data layout: one cache line per element (#1263)
+
+A per-CPU array on the scheduler, steal, wake or tick path gives every
+element its own cache line when its elements are written by more than one
+CPU (each CPU writing its own element counts) or written by one CPU and
+polled by others. Aligning the array as a whole is not enough: eight
+4-byte lock words aligned to 64 bytes are still one line.
+
+**Why.** `rq_lock[]` and `steal_deque_lock[]` were declared with a
+`SPINLOCK_ARRAY` that aligned only the array, so every lock word of each
+array sat in one cache line, which is also one exclusives reservation
+granule. On jetson-nano-2 a CPU of the second cluster (CPUs 4 and 5) then
+waited 1.1 to 6.6 ms for its own, free, `rq_lock` in about 1% (kexec) to
+3% (UEFI-direct) of R3 wake iterations, tick masked, with
+`preempt_disabled` set so that thieves skipped its queue (#1262, #1263;
+switch gauntlet run 5, Entry 41). With one line per lock the waits were
+gone in the experiment that led to this rule. That the `STXR` loses its
+reservation to stores to the neighbouring lock words is inferred from the
+lock-word and try-lock counts, not observed directly.
+
+**The line is 64 bytes.** `CACHE_LINE_SIZE` (`kernel/include/cacheline.h`,
+the only definition; `cache.h` and `spinlock.h` take it from there) is 64.
+Cortex-A76 (Pi 5) and Cortex-A78AE (Jetson) both read `CTR_EL0 =
+0x9444c004` on every core: DminLine = 4 (16 words), CWG = 4 and ERG = 4
+(the exclusives reservation granule), all 64 bytes, and `CCSIDR_EL1`
+reports 64-byte lines at each data cache level (shell: `coherency regs`).
+
+**How.**
+
+- `SPINLOCK_ARRAY(name, n)` declares `spinlock_padded_t name[n]`, a struct
+  of one `spinlock_t` aligned and padded to a line. `SPINLOCK_AT(name, i)`
+  yields the `spinlock_t *` the `spin_*` functions take; `&name[i]` passed
+  to them no longer compiles.
+- Single words use the cell types of `cacheline.h` (`percpu_int_t`,
+  `percpu_u8_t`, `percpu_u32_t`, `percpu_u64_t`, or `PERCPU_CELL_TYPE` for
+  another type); the value is the member `v`: `preempt_disabled[cpu].v`.
+- Words that one CPU writes together share a per-CPU struct marked
+  `CACHE_LINE_ALIGNED`: `sched_diag[cpu].tick` and the other nine counters
+  (`struct sched_diag_cpu`, formerly ten `sched_diag_*[]` arrays), and
+  `swo_pc[cpu]` in `SWO_DIAG` builds.
+- `preempt_disabled[]` stays apart from the counters on purpose: idle CPUs
+  read every victim's flag on each steal attempt, and a counter in the same
+  line would make each of the owner's increments take the line back from
+  them.
+- Assembly that indexes a padded array shifts by `CACHE_LINE_SHIFT` and
+  uses offset 0: `resched_trampoline` in `kernel/arch/arm64/vectors.S` for
+  `preempt_disabled[]`, `orig_elr[]` and `orig_spsr[]`.
+- Each padded array is declared in one header only (`preempt_disabled[]`
+  in `sched.h`, `sched_diag[]` in `sched_diag.h`). A local `extern` with
+  the old bare type would compile and index with the wrong stride; the
+  struct element types make that a compile error wherever the header is
+  visible, and the local externs are gone.
+
+**Regression test.** `kernel/tests/test_percpu_layout.c` (every platform)
+takes the addresses of elements 0 and 1 of each padded array in the
+running kernel and fails unless both are line-aligned and at least a line
+apart; static arrays reach it through `sched_percpu_layout()` and
+`pmu_percpu_layout()` (test kernels only). Static asserts sit next to each
+type. The trampoline's indexing runs only on Pi 5 and Jetson
+(`SECONDARY_PREEMPT` is not built for QEMU), where every preemption goes
+through it.
+
+**Audit** (every per-CPU array found on those paths, and the per-CPU
+arrays next to them, at the commit that introduced the rule):
+
+| Array | Declared | Element, before → after | Written by | Read from other CPUs (poll?) | Decision |
+|---|---|---|---|---|---|
+| `rq_lock[]` | `kernel/sched/sched.c:100` | 4 B → 64 B | any CPU (own queue on every `schedule()`; another CPU's on add, wake, steal, migrate) | the lock word is the contended object; waiters spin on it | **Padded** (`SPINLOCK_ARRAY` element is `spinlock_padded_t`) |
+| `steal_deque_lock[]` | `kernel/sched/sched.c:134` | 4 B → 64 B | any CPU (owner on push and remove, thieves on steal) | thieves read the word before taking it (`v_busy`), every probe | **Padded** (same macro) |
+| `preempt_disabled[]` | `kernel/sched/sched.c:93` (declared `kernel/include/sched.h`) | 4 B → 64 B | owner only, twice per `schedule()`, and in `resched_trampoline` (`kernel/arch/arm64/vectors.S:602`, `:627`) | yes, a poll: every idle CPU reads every victim's flag in `sched_try_steal` | **Padded** (`percpu_int_t`); the assembly indexes with `CACHE_LINE_SHIFT` |
+| `sched_diag_*[]`, ten arrays (`tick`, `switch_defer`, `schedule`, `picked`, `idle_loops`, `steal_attempts`, `steal_successes`, `steal_stale`, `steal_empty_victim`, `steal_push_full`) | were `kernel/sched/sched.c:427-436`; now `sched_diag[]` at `kernel/sched/sched.c:425`, type in `kernel/include/sched_diag.h` | 10 × 4 B in ten packed arrays (all CPUs in 4 lines) → one 64 B struct per CPU | owner only, on every tick, `schedule()`, idle pass and steal attempt; `steal_push_full` by the CPU that adds a task to the owner's queue | the CPU supervisor samples `idle_loops` once a second; the shell, telemetry and tests read on demand | **Padded** as one per-CPU struct (`struct sched_diag_cpu`), so a CPU's counters cost it one line instead of ten |
+| `switch_in_waiting[]` | `kernel/sched/sched.c:603` | 8 B → 64 B | owner only, under its `rq_lock`, on every `schedule()` | no (owner's idle loop; the `SWO_DIAG` dump) | **Padded** (`percpu_task_hint_t`): written by every CPU on every `schedule()` |
+| `current_task[]` | `kernel/sched/task.c:45` | 8 B → 64 B | owner only, on every context switch (`task_set_current`) | `task_current_on_cpu()` from dumps, `top`, the steal trace; the owner reads it on every `task_current()` | **Padded** (`percpu_task_slot_t`): a switch on one CPU invalidated the line every other CPU's `task_current()` reads |
+| `coop_last_tick_cntpct[]` | `kernel/sched/sched.c:2235` | 8 B, array aligned → 64 B | owner only, every tick | no (`sched_last_tick_cntpct()` in tests) | **Padded** (`percpu_u64_t`): written by every CPU at tick rate; the array-only alignment was the same mistake as the locks |
+| `reschedule_pending_wb[]`, `orig_elr_wb[]`, `orig_spsr_wb[]` | `kernel/sched/preempt.c:58-60` | 4 / 8 / 8 B, array aligned → 64 B each | owner only: tick, IRQ exit, `schedule()` | no | **Padded** (`percpu_u32_t`, `percpu_u64_t`); `resched_trampoline` indexes `orig_elr` / `orig_spsr` with `CACHE_LINE_SHIFT` (`kernel/arch/arm64/vectors.S:589-596`) |
+| `cpu_steal_deques[]` | `kernel/sched/sched.c:127`, type `kernel/include/steal_deque.h` | 392 B, 8-byte aligned → 448 B, 64-byte aligned | any CPU under `steal_deque_lock[v]` | thieves read `top` / `bottom` without the lock when they skip a victim whose flag is set (`steal_deque_is_empty`, diagnostic) | **Padded** (struct aligned): the tail of one deque shared a line with the head of the next |
+| `sched.cpu_fallback[]` (run queues) | `kernel/sched/sched.c:234`, type `kernel/include/sched.h` | 64 B, aligned | any CPU under `rq_lock[c]` | policies read `ready_count` lock-free | Already one line per CPU; static assert added |
+| `steal_trace[]`, `steal_trace_dq[]`, `steal_pdwin[]` | `kernel/sched/sched.c:140`, `:141`, `:149`, types `kernel/sched/steal_trace.h` | 384 / 64 / 1344 B, aligned | owner, or under `steal_deque_lock[v]` | thieves read the watched CPU's window block | Already whole lines per CPU; now checked by the layout test |
+| `pmu_cache_pressure_q16_per_cpu[]`, `pmu_cp_state[]` | `kernel/arch/arm64/pmu.c:333`, `:341` | 4 B / 24 B → 64 B each | owner only, every tick (`scheduler_tick` → `pmu_sample_cache_pressure`, AI scheduler builds) | the AI state extraction reads every CPU's pressure value | **Padded** (`percpu_u32_t`; struct aligned) |
+| `swo_rq_owner[]` (`SWO_DIAG` only) | `kernel/sched/sched.c:160` | 4 B → 64 B | whichever CPU holds `rq_lock[c]`, at every lock and unlock | a waiter reads it once and again after 1 ms | **Padded** (`percpu_u32_t`) |
+| `swo_diag_*[]`, sixteen arrays (`SWO_DIAG` only) | were `kernel/sched/sched.c:616-639`; now `swo_pc[]` at `kernel/sched/sched.c:608`, type in `kernel/include/sched.h` | 16 packed arrays → one 128 B struct per CPU | owner only, at every phase change of `schedule()` | the dump and the prelude report | **Padded** as one per-CPU struct (`struct swo_diag_percpu`) |
+| `slot_trace_idx[]`, `slot_trace_rq_holder[]`, `slot_trace_pd_ticks[]` (`SLOT_TRACE` only) | `kernel/sched/slot_trace.c:38`, `:41`, `:257` | 4 / 1 / 4 B → 64 B each | owner; `rq_holder[c]` by whichever CPU holds `rq_lock[c]` | every trace record reads all `rq_holder[]` | **Padded** (`percpu_u32_t`, `percpu_u8_t`) |
+| `smp_resched_ipi_count[]` (x86-64) | `kernel/arch/x86_64/platform_x86.c:46` | 8 B → 64 B | owner only, per reschedule IPI | tests | **Padded** (`percpu_u64_t`) |
+| `slot_trace_ring[][]` (`SLOT_TRACE` only) | `kernel/sched/slot_trace.c:37` | rows of `SLOT_TRACE_LEN` × 48 B | owner only | the dump | Not padded: only the last line of one CPU's ring and the first of the next can be shared |
+| `cpu_data[]`, `cpu_logical_map[]`, `cpu_current_el_fallback[]` | `kernel/sched/smp.c:24`, `:27`, `:28` (x86: `kernel/arch/x86_64/platform_x86.c:197-198`) | 40 B / 8 B / 8 B | written during boot only | read on every `cpu_id()` lookup (`ARM64_GET_LOGICAL_CPU` in assembly) | Not padded: read-only after boot, so the shared lines stay shared-clean; padding `cpu_logical_map[]` would spread a table every CPU scans over eight lines |
+| `cpu_boot_flag[]` | `kernel/sched/smp.c:37` | 4 B, array aligned | each secondary once at boot; the Pi 5 supervisor on a resurrect | CPU 0 polls it during secondary boot only | Not padded: not on the scheduler, steal, wake or tick path |
+| `cpu_stacks[][]` | `kernel/sched/smp.c:41` | `STACK_SIZE` each | owner | no | Not padded: each element is far larger than a line |
+| `last_idle_loops[]`, `frozen_samples[]`, `resurrect_attempts[]`, `resurrect_successes[]` | `kernel/sched/cpu_supervisor.c:88-91` | 4 / 4 / 8 / 8 B | the supervisor task only (one CPU), once a second | the `cpu` shell command | Not padded: single writer |
+| `pmu_ready_per_cpu[]` | `kernel/arch/arm64/pmu.c:72` | 1 B | each CPU once at boot | the profile harness | Not padded: written once per boot |
+| `gicr_cpu_base[]`, `spi_excluded_by[][]`, `spi_forced_cpu0_by[][]` | `kernel/drivers/gic.c:93`, `:808`, `:815` | 8 B / bitmap rows | boot; core isolation calls | no | Not padded: not written on the scheduler, steal, wake or tick path |
+| `dump_line_start[]`, `dump_uart_held[]`, `dump_entry[]` | `kernel/src/fault_dump.c:27-29` | 1 B / 1 B / small | the dumping CPU | no | Not padded: fault path only |
+| `smp_done_wb[]` | `kernel/src/shell_sys.c:1775` | 4 B | each `bench smp` worker once per run | the shell polls it during `bench smp` | Not padded: bench harness, not a scheduler path. Its false sharing ends when the workers finish |
+| `tracer_percpu[]` (AI trace ring) | `kernel/sched/ai/sched_trace_ai.c:67` | 64 B header + ring | owner | readers on demand | Already padded by hand (`_hdrpad`) |
+| `sc_restored[]`, `sc_saved[]`, `sc_owner[]` (`SWITCH_CHECK` only) | `kernel/sched/switch_check.c:21-23` | 4 B, indexed by task slot | the CPUs switching that task | no | Not per-CPU (per task); debug option; not padded |
+
+Not per-CPU arrays, and unchanged: `sched.context_switches` and
+`sched.timer_ticks` (`kernel/sched/sched.c`) and `timer_handler_count`
+(`kernel/drivers/timer.c`) are single global counters that every CPU
+increments, on every switch and every tick. That is true sharing of one
+word; making them per-CPU changes what they count, which is outside a
+placement-only change.
+
 ## Work stealing (Pre-existing + B3 activation + S4 default flip)
 
 `kernel/sched/steal_deque.c` implements a Chase–Lev-style deque per
@@ -1203,8 +1305,9 @@ Override: `make kernel PLATFORM=<p> WORK_STEALING=ON` or `WORK_STEALING=OFF` map
 
 The deque's bookkeeping (`buf`, `gen_buf`, `bottom`, `top`) is
 serialized by `steal_deque_lock[MAX_CPUS]` — a separate cacheable
-`spinlock_t` array in `kernel/sched/sched.c`, same pattern as
-`rq_lock[]`. The deque array itself is cacheable BSS on every
+`SPINLOCK_ARRAY` in `kernel/sched/sched.c`, same pattern as
+`rq_lock[]`, one cache line per lock (see "Per-CPU data layout"). The
+deque array itself is cacheable BSS on every
 platform (#1193). The deque used to embed its
 own spinlock; on Jetson the former blanket `SPINLOCK_SKIP_LOCKING`
 reduced it to a barrier-only no-op, letting concurrent pushes/pops
@@ -1231,7 +1334,7 @@ they trust the caller.
   correctness requirement) to avoid contending a lock the victim is
   almost certainly about to take.
 
-**Observability (sched_diag_steal_* counters):**
+**Observability (sched_diag[].steal_* counters):**
 
 Five per-CPU counters are exposed via the `cpu` shell command and
 the `bench stealing` output:

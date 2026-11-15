@@ -10,6 +10,7 @@
  */
 
 #include "preempt.h"
+#include "sched.h"      /* preempt_disabled[] */
 
 #if defined(SECONDARY_PREEMPT)
 
@@ -31,9 +32,9 @@ _Static_assert(ARM64_MAX_CPUS_LITERAL == MAX_CPUS,
 /* Per-CPU state. preempt_init() points these at the cacheable BSS
  * arrays below; the asm trampoline and maybe_arm_resched_trampoline
  * reach the state through the pointers. */
-volatile uint32_t *reschedule_pending;
-volatile uint64_t *orig_elr;
-volatile uint64_t *orig_spsr;
+percpu_u32_t *reschedule_pending;
+percpu_u64_t *orig_elr;
+percpu_u64_t *orig_spsr;
 
 /* PSR mode bits [3:0]. Kernel-mode sources we're willing to preempt:
  *   0x5 = EL1h (EL1 using SP_EL1) — QEMU + Jetson + x86 path
@@ -51,11 +52,12 @@ volatile uint64_t *orig_spsr;
  * unmasks IRQs itself after saving caller-clobbered registers. */
 #define PSR_I           (1UL << 7)
 
-extern volatile int preempt_disabled[MAX_CPUS];
-
-static volatile uint32_t reschedule_pending_wb[MAX_CPUS] __attribute__((aligned(64)));
-static volatile uint64_t orig_elr_wb[MAX_CPUS] __attribute__((aligned(64)));
-static volatile uint64_t orig_spsr_wb[MAX_CPUS] __attribute__((aligned(64)));
+/* One cache line per element (cacheline.h, #1263): each CPU writes its own
+ * element on its tick and its IRQ exit. resched_trampoline (vectors.S)
+ * indexes orig_elr / orig_spsr with CACHE_LINE_SHIFT. */
+static percpu_u32_t reschedule_pending_wb[MAX_CPUS];
+static percpu_u64_t orig_elr_wb[MAX_CPUS];
+static percpu_u64_t orig_spsr_wb[MAX_CPUS];
 
 void preempt_init(void)
 {
@@ -64,9 +66,9 @@ void preempt_init(void)
     orig_spsr = orig_spsr_wb;
 
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        reschedule_pending[i] = 0;
-        orig_elr[i]  = 0;
-        orig_spsr[i] = 0;
+        reschedule_pending[i].v = 0;
+        orig_elr[i].v  = 0;
+        orig_spsr[i].v = 0;
     }
 }
 
@@ -155,7 +157,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
  * ticks to fault on every CPU.
  */
 void maybe_arm_resched_trampoline_on(struct trap_frame *tf,
-                                     volatile uint32_t *pending)
+                                     percpu_u32_t *pending)
 {
     /* Pre-preempt_init bail (#750).
      *
@@ -198,10 +200,10 @@ void maybe_arm_resched_trampoline_on(struct trap_frame *tf,
 
     uint32_t cpu = cpu_id();
 
-    if (!pending[cpu]) {
+    if (!pending[cpu].v) {
         return;
     }
-    if (preempt_disabled[cpu]) {
+    if (preempt_disabled[cpu].v) {
         return;
     }
     /* Accept either EL1h or EL2h — kernel-mode source. EL0t and
@@ -215,9 +217,9 @@ void maybe_arm_resched_trampoline_on(struct trap_frame *tf,
      * for resched_trampoline to replay. orig_spsr is the interrupted
      * context's PSTATE (which may have had IRQs unmasked — e.g. the
      * idle task does `daifclr + wfi`). */
-    pending[cpu] = 0;
-    orig_elr[cpu]  = tf->elr;
-    orig_spsr[cpu] = tf->spsr;
+    pending[cpu].v = 0;
+    orig_elr[cpu].v  = tf->elr;
+    orig_spsr[cpu].v = tf->spsr;
 
     /* Redirect eret into the trampoline and force DAIF.I=1 in the
      * SPSR that `eret` will install. If we left tf->spsr unchanged,

@@ -1193,7 +1193,7 @@ Multi-core integration tests that exercise the scheduler with actual tasks runni
 
 #### Harness-driven dormancy recovery (#216 Tier 3, Pi 5 only)
 
-`tearDown()` in `test_integration.c` watches `sched_diag_idle_loops[c]`
+`tearDown()` in `test_integration.c` watches `sched_diag[c].idle_loops`
 for every secondary CPU after each test completes. If a CPU's idle
 counter is unchanged across `DORMANCY_STALL_THRESHOLD` (default 3)
 consecutive `tearDown` calls, the harness:

@@ -2,7 +2,7 @@
  * test_nc_axis.c - Where CPU-shared scheduler state lives (#1193)
  *
  * Run queues, the task table, the current-task pointers, the
- * sched_diag_* counters and the SECONDARY_PREEMPT state live in
+ * sched_diag[] counters and the SECONDARY_PREEMPT state live in
  * cacheable Normal Write-Back Inner Shareable memory on every platform;
  * the "NC axis" that once put them in the 2 MB Normal Non-Cacheable
  * block on Pi 5 and Jetson is gone (docs/adr/0007-cross-cpu-coherency.md).
@@ -38,9 +38,10 @@
 #error "Pi 5 and Jetson always have the NC region (device DMA)"
 #endif
 
-/* sched_diag.h declares the counters as arrays (no NC pointer form). */
-_Static_assert(sizeof(sched_diag_tick) == MAX_CPUS * sizeof(uint32_t),
-               "sched_diag_tick must be a MAX_CPUS array");
+/* sched_diag.h declares the counters as an array of per-CPU structs (no
+ * NC pointer form). */
+_Static_assert(sizeof(sched_diag) == MAX_CPUS * sizeof(struct sched_diag_cpu),
+               "sched_diag must be a MAX_CPUS array");
 
 #define DESC_VALID      0x1UL
 #define DESC_TABLE      0x2UL           /* bit 1 at L1/L2: table, at L3: page */
@@ -155,14 +156,14 @@ static void test_current_task_slots_placement(void)
 
 static void test_sched_diag_placement(void)
 {
-    assert_cpu_shared_placement(&sched_diag_tick[0], "sched_diag_tick");
+    assert_cpu_shared_placement(&sched_diag[0].tick, "sched_diag_tick");
 }
 
 static void test_preempt_state_placement(void)
 {
 #if defined(SECONDARY_PREEMPT)
-    assert_cpu_shared_placement(&reschedule_pending[0], "reschedule_pending");
-    assert_cpu_shared_placement(&orig_elr[0], "orig_elr");
+    assert_cpu_shared_placement(&reschedule_pending[0].v, "reschedule_pending");
+    assert_cpu_shared_placement(&orig_elr[0].v, "orig_elr");
 #else
     TEST_IGNORE_MESSAGE("SECONDARY_PREEMPT not built");
 #endif

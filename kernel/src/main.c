@@ -936,7 +936,7 @@ void kernel_main(void *dtb)
 #if !defined(ENABLE_BOOT_TESTS)
     /* Spawn the CPU-resurrection supervisor (#216 Tier 2) on platforms
      * that need it. No-op stub on QEMU / Jetson / x86-64. The
-     * supervisor watches sched_diag_idle_loops once per second and
+     * supervisor watches sched_diag[].idle_loops once per second and
      * issues psci_cpu_on for any CPU whose counter has been frozen
      * for SUPERVISOR_FROZEN_THRESHOLD samples. Independent of the
      * test harness's per-test dormancy detector (PR #290) — both

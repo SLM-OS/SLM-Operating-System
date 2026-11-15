@@ -179,7 +179,7 @@ thief's median share, and at 0 tasks in some runs (coherency run 3,
 `critic-3-C2.md` section 3).
 
 **Idle wakes.** A sustained run also prints one `iw mode=sustained`
-line per CPU: the idle-loop passes (`sched_diag_idle_loops`) and timer
+line per CPU: the idle-loop passes (`sched_diag[].idle_loops`) and timer
 ticks during the run, with their rates per second. `bench idle-wakes
 [ms]` measures the same at rest: it sleeps the shell for ms (default
 5000, range 100 to 60000) so CPU 0 idles as well and prints one

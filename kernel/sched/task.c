@@ -37,7 +37,12 @@ static spinlock_t task_lock = SPINLOCK_INIT;
 /* Per-CPU current running task (set by scheduler), in cacheable BSS.
  * Hardware coherency makes a CPU's write visible to other CPUs with no
  * cache maintenance (#1193). */
-static struct task *current_task[MAX_CPUS];
+/* One cache line per CPU (cacheline.h, #1263): each CPU stores its own
+ * element on every context switch and task_current() reads it on every
+ * path, so packed elements made each switch on one CPU a cache miss in
+ * task_current() on all the others. */
+PERCPU_CELL_TYPE(percpu_task_slot_t, struct task *);
+static percpu_task_slot_t current_task[MAX_CPUS];
 
 void task_table_init(void)
 {
@@ -130,13 +135,12 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr,
      * over. See task_entry_unmasks_irq for which CPUs. */
 #if !defined(PLATFORM_X86_64)
     {
-        extern volatile int preempt_disabled[];
         uint64_t mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
         /* cpu_logical_map[] lookup — Jetson dual-cluster safe (#647). */
         int hw_cpu = cpu_logical_id(mpidr);
         if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
-            preempt_disabled[hw_cpu] = 0;
+            preempt_disabled[hw_cpu].v = 0;
             SLOT_TRACE(ST_PD_CLEAR, task_current(), hw_cpu, hw_cpu, 1);
             steal_pdwin_clear((uint32_t)hw_cpu);    /* #1216 trace */
         }
@@ -152,8 +156,7 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr,
     }
 #else
     {
-        extern volatile int preempt_disabled[];
-        preempt_disabled[cpu_id()] = 0;
+        preempt_disabled[cpu_id()].v = 0;
         steal_pdwin_clear(cpu_id());                /* #1216 trace */
         __asm__ volatile("mfence" ::: "memory");
     }
@@ -748,7 +751,7 @@ struct task *task_current_on_cpu(uint32_t cpu)
     if (cpu >= MAX_CPUS) {
         return NULL;
     }
-    return current_task[cpu];
+    return current_task[cpu].v;
 }
 
 /*
@@ -757,7 +760,7 @@ struct task *task_current_on_cpu(uint32_t cpu)
 void task_set_current(struct task *task)
 {
     uint32_t cpu = cpu_id();
-    current_task[cpu] = task;
+    current_task[cpu].v = task;
 }
 
 /*
@@ -1172,6 +1175,6 @@ const volatile void *task_current_slot_addr(uint32_t cpu)
     if (cpu >= MAX_CPUS) {
         return NULL;
     }
-    return (const volatile void *)&current_task[cpu];
+    return (const volatile void *)&current_task[cpu].v;
 }
 #endif

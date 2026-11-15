@@ -36,6 +36,7 @@
 #define STEAL_DEQUE_H
 
 #include <stdint.h>
+#include "cacheline.h"
 
 struct task; /* forward declaration */
 
@@ -53,7 +54,8 @@ typedef struct {
     uint32_t gen_buf[STEAL_DEQUE_CAPACITY];
     uint32_t bottom;      /* next free slot on owner side */
     uint32_t top;         /* next slot to steal on thief side */
-} steal_deque_t;
+} CACHE_LINE_ALIGNED steal_deque_t;   /* no line shared by two CPUs' deques (#1263) */
+CACHE_LINE_ASSERT_PADDED(steal_deque_t);
 
 /*
  * Initialize an empty deque.

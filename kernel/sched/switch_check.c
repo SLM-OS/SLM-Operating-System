@@ -160,11 +160,11 @@ void switch_window_hold(struct task *current)
             while (!__atomic_load_n(&switch_window_moved, __ATOMIC_ACQUIRE) &&
                    timer_get_count() - t0 < f / 5) {
             }
-            uint32_t k0 = sched_diag_tick[cpu];
-            while (sched_diag_tick[cpu] - k0 < (uint32_t)want &&
+            uint32_t k0 = sched_diag[cpu].tick;
+            while (sched_diag[cpu].tick - k0 < (uint32_t)want &&
                    timer_get_count() - t0 < f / 5) {
             }
-            switch_window_ticks_seen = (int)(sched_diag_tick[cpu] - k0);
+            switch_window_ticks_seen = (int)(sched_diag[cpu].tick - k0);
         }
         __atomic_store_n(&switch_window_in, 0, __ATOMIC_RELEASE);
     }

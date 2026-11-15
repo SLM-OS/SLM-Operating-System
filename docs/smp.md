@@ -234,7 +234,7 @@ Since there's no thread-local storage in bare metal, per-CPU data is accessed vi
 
 This requires a memory access for every per-CPU operation but is simple and reliable.
 
-**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines (false sharing, a performance cost only). The caches are coherent on every supported core, so `cpu_data[]` needs no cache maintenance before secondary boot (see `docs/adr/0007-cross-cpu-coherency.md`).
+**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines. It is written during boot only, so the sharing costs nothing afterwards; per-CPU data that is written at run time has one line per element (`docs/scheduler.md` "Per-CPU data layout", #1263). The caches are coherent on every supported core, so `cpu_data[]` needs no cache maintenance before secondary boot (see `docs/adr/0007-cross-cpu-coherency.md`).
 
 ---
 

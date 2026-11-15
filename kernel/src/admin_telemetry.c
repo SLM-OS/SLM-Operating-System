@@ -270,17 +270,10 @@ void admin_telemetry_reset_inference(void)
  * not publish — deltas are meaningless on the first sample. Subsequent
  * calls publish the per-CPU and aggregate-eviction deltas.
  *
- * The sched_diag_* counters are MAX_CPUS arrays defined in sched.c
- * (sized declarations in sched_diag.h); the unsized externs below are
- * compatible with them.
+ * The counters are sched_diag[cpu] in sched.c, declared in sched_diag.h
+ * only (no local externs: the layout is per-CPU structs, #1263).
  */
-extern volatile uint32_t sched_diag_picked[];
-extern volatile uint32_t sched_diag_idle_loops[];
-extern volatile uint32_t sched_diag_steal_attempts[];
-extern volatile uint32_t sched_diag_steal_successes[];
-extern volatile uint32_t sched_diag_steal_stale[];
-extern volatile uint32_t sched_diag_steal_empty_victim[];
-extern volatile uint32_t sched_diag_steal_push_full[];
+#include "sched_diag.h"
 
 static uint32_t g_periodic_last_pump_ms;
 static bool     g_periodic_baseline;
@@ -308,7 +301,7 @@ static char g_last_cpu_payload[TELEMETRY_MAX_PAYLOAD];
 static char g_last_steal_payload[TELEMETRY_MAX_PAYLOAD];
 static char g_last_memory_payload[TELEMETRY_MAX_PAYLOAD];
 
-/* Wrap-safe delta helper. sched_diag_* are uint32_t and incremented
+/* Wrap-safe delta helper. sched_diag[] are uint32_t and incremented
  * without saturation; if a counter wraps between samples we still want
  * a sensible delta (the unsigned subtraction does the right thing
  * mod 2^32 — at 1 Hz publish + one increment per scheduler decision,
@@ -331,8 +324,8 @@ static void publish_cpu_util(uint32_t cpus)
     uint32_t picked_now[MAX_CPUS];
     uint32_t idle_now[MAX_CPUS];
     for (uint32_t i = 0; i < cpus && i < MAX_CPUS; i++) {
-        picked_now[i] = sched_diag_picked[i];
-        idle_now[i]   = sched_diag_idle_loops[i];
+        picked_now[i] = sched_diag[i].picked;
+        idle_now[i]   = sched_diag[i].idle_loops;
     }
 
     for (uint32_t i = 0; i < cpus && i < MAX_CPUS; i++) {
@@ -380,11 +373,11 @@ static void publish_steal(uint32_t cpus)
     uint64_t att = 0, ok = 0, stl = 0, emp = 0, fll = 0;
 
     for (uint32_t i = 0; i < cpus && i < MAX_CPUS; i++) {
-        uint32_t a_now = sched_diag_steal_attempts[i];
-        uint32_t s_now = sched_diag_steal_successes[i];
-        uint32_t t_now = sched_diag_steal_stale[i];
-        uint32_t e_now = sched_diag_steal_empty_victim[i];
-        uint32_t f_now = sched_diag_steal_push_full[i];
+        uint32_t a_now = sched_diag[i].steal_attempts;
+        uint32_t s_now = sched_diag[i].steal_successes;
+        uint32_t t_now = sched_diag[i].steal_stale;
+        uint32_t e_now = sched_diag[i].steal_empty_victim;
+        uint32_t f_now = sched_diag[i].steal_push_full;
 
         att += delta_u32(a_now, g_prev_steal_attempts[i]);
         ok  += delta_u32(s_now, g_prev_steal_successes[i]);
@@ -455,13 +448,13 @@ void admin_telemetry_periodic_pump(uint32_t now_ms)
         uint32_t cpus = cpu_count;
         if (cpus > MAX_CPUS) cpus = MAX_CPUS;
         for (uint32_t i = 0; i < cpus; i++) {
-            g_prev_picked[i]             = sched_diag_picked[i];
-            g_prev_idle_loops[i]         = sched_diag_idle_loops[i];
-            g_prev_steal_attempts[i]     = sched_diag_steal_attempts[i];
-            g_prev_steal_successes[i]    = sched_diag_steal_successes[i];
-            g_prev_steal_stale[i]        = sched_diag_steal_stale[i];
-            g_prev_steal_empty_victim[i] = sched_diag_steal_empty_victim[i];
-            g_prev_steal_push_full[i]    = sched_diag_steal_push_full[i];
+            g_prev_picked[i]             = sched_diag[i].picked;
+            g_prev_idle_loops[i]         = sched_diag[i].idle_loops;
+            g_prev_steal_attempts[i]     = sched_diag[i].steal_attempts;
+            g_prev_steal_successes[i]    = sched_diag[i].steal_successes;
+            g_prev_steal_stale[i]        = sched_diag[i].steal_stale;
+            g_prev_steal_empty_victim[i] = sched_diag[i].steal_empty_victim;
+            g_prev_steal_push_full[i]    = sched_diag[i].steal_push_full;
         }
         RustEvictionStats est;
         memset(&est, 0, sizeof(est));

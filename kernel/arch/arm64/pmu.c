@@ -23,6 +23,8 @@
 #include "../../include/pmu.h"
 #include "../../include/smp.h"
 #include "../../include/config.h"
+#include "../../include/cacheline.h"
+#include "../../include/percpu_layout.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -328,7 +330,7 @@ bool pmu_is_ready(void)
  * `ready_count` cross-CPU read pattern in
  * `ai_state.c::extract_global`.
  */
-static volatile uint32_t pmu_cache_pressure_q16_per_cpu[MAX_CPUS];
+static percpu_u32_t pmu_cache_pressure_q16_per_cpu[MAX_CPUS];   /* one cache line per CPU (#1263) */
 
 /* Per-CPU tracking state for the EWMA. Only the owning CPU writes or
  * reads its own slot — no cross-CPU access for this array. */
@@ -336,7 +338,7 @@ static struct {
     uint32_t last_misses;
     uint64_t last_cycles;
     bool primed;
-} pmu_cp_state[MAX_CPUS];
+} CACHE_LINE_ALIGNED pmu_cp_state[MAX_CPUS];   /* one cache line per CPU (#1263) */
 
 /* EWMA smoothing factor: new sample weight = 1/4, prior weight = 3/4.
  * Picked so a one-tick miss-rate spike doesn't dominate the AI feature,
@@ -391,13 +393,13 @@ void pmu_sample_cache_pressure(void)
 
     /* EWMA: new = (old * 3 + sample) / 4. Use the Q16 representation
      * directly. */
-    uint32_t prior = pmu_cache_pressure_q16_per_cpu[cpu];
+    uint32_t prior = pmu_cache_pressure_q16_per_cpu[cpu].v;
     uint64_t blended = (((uint64_t)prior * ((1u << PMU_CP_SHIFT) - 1u))
                         + q16) >> PMU_CP_SHIFT;
     if (blended > PMU_Q16_ONE) {
         blended = PMU_Q16_ONE;
     }
-    pmu_cache_pressure_q16_per_cpu[cpu] = (uint32_t)blended;
+    pmu_cache_pressure_q16_per_cpu[cpu].v = (uint32_t)blended;
 }
 
 uint32_t pmu_get_cache_pressure_q16(uint32_t cpu)
@@ -405,7 +407,21 @@ uint32_t pmu_get_cache_pressure_q16(uint32_t cpu)
     if (cpu >= MAX_CPUS) {
         return 0;
     }
-    return pmu_cache_pressure_q16_per_cpu[cpu];
+    return pmu_cache_pressure_q16_per_cpu[cpu].v;
 }
 
 #endif /* !PLATFORM_X86_64 */
+
+#if defined(ENABLE_BOOT_TESTS)
+/* Test hook (#1263): this file's padded per-CPU arrays, for
+ * test_percpu_layout.c. */
+size_t pmu_percpu_layout(const struct percpu_layout_ent **tab)
+{
+    static const struct percpu_layout_ent ents[] = {
+        PERCPU_LAYOUT_ENT(pmu_cache_pressure_q16_per_cpu),
+        PERCPU_LAYOUT_ENT(pmu_cp_state),
+    };
+    *tab = ents;
+    return sizeof(ents) / sizeof(ents[0]);
+}
+#endif /* ENABLE_BOOT_TESTS */
