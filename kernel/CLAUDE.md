@@ -815,8 +815,12 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
 
 `pmm_init` calls `pmm_add_region_split` (not the bare `pmm_add_region`)
 for every memory region it adds to the buddy allocator. The wrapper
-queries `dtb_get_memreserves()` and carves any reservation out of
-the region before adding the surviving subranges.
+takes its reserve list from `pmm_collect_reserves()` (firmware
+`dtb_get_memreserves()` entries, user reserves and the DTB blob) and
+carves every reservation out of the region before adding the surviving
+subranges. The carve is at byte bounds and is not page-rounded, so a
+reserve that starts mid-page currently loses that page to the free
+lists (#1276).
 
 Two reserve encodings are honored — both produced by the same
 `dtb_get_memreserves` call:
@@ -841,14 +845,16 @@ pages after the image, which is where the heap starts (Pi 5 firmware
 puts it in low RAM, also inside the heap). `pmm_collect_reserves`
 appends the blob's page-aligned range (`dtb_get_blob_range()`: address
 and `totalsize`, rejected above `DTB_MAX_BLOB_SIZE`, 2 MB) to the carve
-list on every boot path, and `pmm_init` ends with a free-list walk that
-prints `PMM: DTB at ... is clear of every free block` or a `[WARN]` with
-the first overlapping block (or, for a rejected header, `PMM: DTB at ...
-has no usable totalsize`). `test_suite_dtb` re-parses the boot blob
-after its own test blobs, so later suites see the real one. A new boot
-path that hands over a DTB needs nothing more than `dtb_parse` before
-`pmm_init`. The arm64 header's `image_size` is `__kernel_end - _start`
-(`.bss` and boot stack included); UEFI does not read it.
+list on every boot path that passes the blob to `dtb_parse` (Pi 5's
+`x0`-NULL scan fallback does not, #1277; QEMU hands over no DTB), and
+`pmm_init` ends with a free-list walk that prints `PMM: DTB at ... is
+clear of every free block` or a `[WARN]` with the first overlapping
+block (or, for a rejected header, `PMM: DTB at ... has no usable
+totalsize`). `test_suite_dtb` re-parses the boot blob after its own test
+blobs, so later suites see the real one. A new boot path that hands over
+a DTB needs nothing more than `dtb_parse` before `pmm_init`. The arm64
+header's `image_size` is `__kernel_end - _start` (`.bss` and boot stack
+included); UEFI does not read it.
 
 **Re-entry guard (PR #598):** `pmm_add_region_split` uses file-scope
 scratch arrays (`pmm_split_*`) shared across calls. The "single-

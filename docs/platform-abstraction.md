@@ -226,11 +226,14 @@ VPU/firmwarekms write would silently corrupt them.
 **The DTB blob itself (#1244).** Neither encoding covers the blob that
 carries it, and the loader decides where the blob sits: kexec-tools puts
 it in the first free pages after the kernel image (where the heap
-starts), Pi 5 firmware puts it in low RAM (inside the heap), UEFI leaves
-it above the managed RAM, QEMU puts it below the kernel. The PMM
-therefore appends the blob's own page-aligned range, taken from its
-address and the header's `totalsize` (`dtb_get_blob_range()`), to the
-carve list (`pmm_collect_reserves`), on every boot path. After the
+starts), Pi 5 firmware puts it in low RAM (inside the heap), and UEFI
+leaves it above the managed RAM. QEMU's `-kernel` ELF load hands SLM-OS
+no DTB, so there is nothing to reserve there. The PMM appends the blob's
+own page-aligned range, taken from its address and the header's
+`totalsize` (`dtb_get_blob_range()`), to the carve list
+(`pmm_collect_reserves`) on every boot path that hands the blob to
+`dtb_parse`. The one that does not is Pi 5's fallback scan for a blob
+when `x0` is NULL: the blob it finds is never parsed (#1277). After the
 regions are added, `pmm_init` walks the free lists and prints one line:
 `PMM: DTB at ... is clear of every free block`, or a `[WARN]` naming the
 first overlapping block. A `totalsize` above `DTB_MAX_BLOB_SIZE` (2 MB,

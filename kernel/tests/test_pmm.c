@@ -1022,15 +1022,24 @@ static void test_no_free_block_overlaps_live_dtb(void)
                                     (uintptr_t)(r.addr + r.size)));
 }
 
-/* The overlap walk sees a free block and stops seeing it once allocated. */
+/* The overlap walk sees a free block and stops seeing it once allocated.
+ * On SMP hardware another CPU can allocate the page again between the free
+ * and the count (it is at the head of the order-0 list), so a single round
+ * that sees 0 after the free is retried; a walk that never sees free blocks
+ * fails every round. */
 static void test_free_overlap_count_sees_a_free_page(void)
 {
-    void *p = pmm_alloc_page();
-    TEST_ASSERT_NOT_NULL(p);
-    uintptr_t a = (uintptr_t)p;
-    TEST_ASSERT_EQUAL_UINT64(0, pmm_free_overlap_count_locked(a, a + PAGE_SIZE));
-    pmm_free_page(p);
-    TEST_ASSERT_TRUE(pmm_free_overlap_count_locked(a, a + PAGE_SIZE) >= 1);
+    bool seen_free = false;
+    for (int round = 0; round < 8 && !seen_free; round++) {
+        void *p = pmm_alloc_page();
+        TEST_ASSERT_NOT_NULL(p);
+        uintptr_t a = (uintptr_t)p;
+        TEST_ASSERT_EQUAL_UINT64(0, pmm_free_overlap_count_locked(a, a + PAGE_SIZE));
+        pmm_free_page(p);
+        seen_free = pmm_free_overlap_count_locked(a, a + PAGE_SIZE) >= 1;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(seen_free,
+                             "overlap walk never saw a just-freed page");
 }
 
 /* ============================================================================

@@ -90,8 +90,9 @@ void pmm_init(void);
  * code, but no protection is granted. The caller is responsible for
  * the ordering — there's no late-binding rescan.
  *
- * `size` is the byte length; the carve helper page-rounds internally
- * so partial-page reservations protect the containing 4 KB page.
+ * `size` is the byte length. The carve is at byte bounds and is not
+ * page-rounded: a range that starts mid-page does not protect that page
+ * (#1276), so pass page-aligned ranges.
  *
  * Returns 0 on success, -1 if the user-reserve table is full
  * (PMM_MAX_USER_RESERVES in pmm_internal.h, currently 2048, sized for
