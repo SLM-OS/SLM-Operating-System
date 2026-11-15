@@ -1960,3 +1960,126 @@ states, the block's first 64 bytes and the 64 bytes before it.
 - The blind critic for Part A starts now on the pushed rows; the deciding
   experiment for the suite failure is added to its material when it has
   run.
+
+## Entry 47 (written 20:58 UTC, from date): critic round 1 on Part A (FAIL), the builder's responses, and a 6.5-hour stop on a usage limit
+
+### Corrections to earlier entries
+
+- Entry 46's heading time was a guess. It was written at about 13:40 UTC
+  (the hand-over to builder B in it, 13:32 UTC, and the check at 13:48 UTC
+  are from `date`). Builder A's "lab time 11:36 to about 14:08 UTC" in the
+  same entry is the builder's estimate and is also wrong: its A2 lab work
+  ended by 13:30 UTC.
+- Entry 44, "every padded array is 512 bytes": 512 bytes each except
+  `cpu_steal_deques` (3584) and `swo_pc` (1024).
+
+### Critic A, round 1: FAIL (`critic-A.md`, `stage1-derivation.md`; copied to the log branch at the end of the session)
+
+Fable 5.2, blind: derived the rows from the captures and the code before
+reading the claims (log Entries 44 to 46, the draft PR body, the draft
+#1262 comment). Every table number reproduces (all 36 R3 cells, 1000 of
+1000 in 12 boots, the alternation, all 24 bench run means, CTR_EL0 on 6 + 4
+CPUs, production 10 of 10 three times, `--assert-shares` 20, suite totals,
+`/ci`, section deltas). All 64 `A-*boot*.txt` bodies are byte-identical to
+their labctl output files and the 42 output directories hold no unsaved
+run. No code defect: every `SPINLOCK_ARRAY` element is an aligned 64-byte
+line (nm on five padded ELFs), the four sites in `resched_trampoline` are
+the only assembly indexers and are consistent, no stale extern, sizeof or
+pointer-arithmetic site, no lock-order or semantic change.
+
+Findings, in the critic's order:
+
+1. HIGH. The new suite failure is understated. The archive holds 822 runs
+   of `test_preempt_flag_follows_migrated_task` on unpadded kernels with
+   the #1234 fix (c0ea0714, 60c548f3, 6a4cfa93); minimum `moved` 5, never
+   0. Against that: 1 of 6 padded Jetson suite boots (1 of 3 UEFI-direct),
+   not "1 of 9".
+2. MEDIUM. A stale number: "no measured wait above 6.64 ms" is Entry 41's
+   maximum; this session measured 6701 us
+   (`A-uefi-r3w-U-ae1399ba-x1000-boot01.txt:3349`). This session: 1.03 to
+   6.70 ms; a prelude report in 1.3% (kexec) and 4.5% (UEFI-direct) of
+   iterations; slow finishes in 0.8% and 2.8%.
+3. MEDIUM. Undisclosed confound in the unpadded R3 baseline: in the
+   `SWO_DIAG` test kernel `swo_rq_owner[]` (added by ae1399ba, written at
+   every rq-lock take and release) shares the 64-byte line with
+   `rq_lock[]`; in unpadded production `rq_lock` has the line to itself.
+   Entry 41's 1441f690 rows (no owner array) show slow finishes too, so the
+   instrumentation does not create the effect, but no R3 row exists
+   without `SWO_DIAG`.
+4. MEDIUM. Evidence about #1262 left out of the draft comment: 14 of 279
+   lock waits with under 100 failed try-locks (8 under 10), 1.06 to 4.71
+   ms; one wait that began with lock word 1; 4 of 109 slow finishes with no
+   prelude report, one of them CPUs 4 and 5 in `task_exit` for 4.2 ms with
+   every rq lock word 0.
+5. LOW-MEDIUM. The column "iterations with a prelude over 1 ms" counts
+   report lines (a prelude or any rq-lock wait over 1 ms); strict counts
+   18, 12, 7 / 37, 59, 36 (35 by the report's own field, the builder's
+   count).
+6. LOW-MEDIUM. Scope: supported for jetson-nano-2, the `SWO_DIAG` test
+   kernel, the wake phase; not excluded: which array, other layout shifts,
+   production kernel, migrate phase, nano-1.
+7. LOW-MEDIUM. Audit gaps: `sched.isolated_cores` and `sched.initialized`
+   share a line with the global counters; standalone locks `task_lock`
+   (`task.c:31`), `sleep_queue_lock` (`task_sleep.c:42`), `blkdev_lock`
+   next to `timer_handler_count` (`timer.c:176`).
+8. LOW. Regression-test gaps (`slot_trace_*` not in the layout table; the
+   checker test did not exercise the checker).
+9. LOW. Wording (Pi 5 has 14 blob names where #1109 says 13; the 512-byte
+   sentence).
+10. LOW. Bench: conclusion and arithmetic right; add that 6 runs come from
+    3 boots and that a cost up to about 5% on Jetson is not excluded.
+
+### Builder A's responses (branch `fix/percpu-cacheline` d09b063b; kernel code unchanged from c0612fa7; nothing posted except a comment on #1279)
+
+Commits on ae1399ba: c0612fa7 (the change), d70f93f0 (ledger), 5c4bcdda
+(test change, below), 7881056d (layout-test gaps), d09b063b (documents and
+one comment in `spinlock.h`). Evidence `gauntlet-5-hw-jetson` 3e935cbe.
+Each finding is answered in the documents and drafts (this session's
+figures with file names, `A-r3w-detail.txt`; the confound; the added #1262
+evidence; the relabelled column with both strict counts; scope words; the
+audit table "found and not changed (#1279)"; the layout test; the suite
+names compared with the close-out suites by script,
+`A-suite-failnames-vs-closeout.txt`; bench caveats).
+
+**The suite failure, what is known so far.** The builder's first reading
+(`cur < 4`) is withdrawn. From the source: `pdm_moved` counts a worker
+waking on a CPU other than the one it last ran on; the wake path takes the
+CPU from the policy's `assign_cpu` (a shared round-robin cursor when CPUs
+are idle) and from stealing, and the test's migration of a BLOCKED task
+only rewrites `assigned_cpu`, which the wake path does not use. So the
+coverage condition rests on incidental jitter. Existing captures: unpadded
+6a4cfa93 suites show `moved` 5 to 7 within 21 wake-ups in 15 of 15 boots;
+padded Pi 5 suites show `moved` 2, 4, 2 with `runs=100/100` in 3 of 3
+boots (they pass); padded Jetson 5 of 6 like the unpadded, 1 with 0.
+Disassembly of the unpadded and padded Pi 5 production images
+(`A-fndiff-pi5-prod.txt`): `find_target_cpu`, `heuristic_assign_cpu`,
+`scheduler_add_task`, `task_wake_sleepers`, the sleep path, `timer_handler`
+and the queue helpers are instruction-identical apart from addresses;
+`schedule` (with the inlined steal), `scheduler_tick`, `sched_migrate_task`,
+`idle_task_func`, `task_current` differ in register allocation, so
+equivalence there rests on the source diff (accessor rewrites). No logic
+change found; timing is the explanation by elimination, not shown.
+
+Prepared for a lab slot (A2b), not yet run: diag branches
+`diag/1263-pdm-U` 6439476f (ae1399ba + a test-only print of steal
+successes and each worker's wake CPU) and `diag/1263-pdm-P` 6247f73a
+(c0612fa7 + the same 19 lines), x200 images for Pi 5 and Jetson; and the
+test change 5c4bcdda: `pdm_a` sets its own affinity to the next of CPUs 1,
+2, 3 before each sleep, `pdm_b` stays unpinned, the BLOCKED-task migration
+loop is removed, checks unchanged. QEMU at 5c4bcdda: `make test` and x86-64
+pass; the test x200 with `WORK_STEALING=ON` 200 of 200, `moved` 6 to 8
+(builder's scratch logs, to be pushed with the A2b evidence).
+
+### Stop on a usage limit
+
+Builder B stopped at 14:22:42 UTC and builder A at 14:30:09 UTC with "hit
+your Fable limit"; the orchestrator was stopped as well and resumed at
+20:55 UTC on the user's "Try again". State found at 20:55 UTC: claims on
+both boards still held by this session; pi-5-1 online; jetson-nano-2 power
+on, serial ok, no ping (probably still in SLM-OS after builder B's fifth
+diagnostic boot); B's trigger log shows 5 triggers and a sixth loop that
+ended without a trigger; no trigger process, no QEMU. Builder A's `/ci` at
+d09b063b ran to step 12 by 14:40 UTC in its scratch directory (not yet
+read). 6.5 hours lost. The 20-minute check-in was cancelled (its prompts
+had queued up during the stop). Builder B was resumed at 20:57 UTC to
+finish boots 06 to 10 and the Pi 5 suite.
