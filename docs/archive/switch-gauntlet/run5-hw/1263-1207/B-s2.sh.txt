@@ -1,0 +1,8 @@
+#!/bin/bash
+# s2.sh <boot no> [last]: save run_01 of the B1b call just finished (647c2c33 suite row), print its class lines, arm the next trigger.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+no=$1; elf=/root/slmos-1207-suite-647c2c33.elf; [ "$2" = last ] && elf=-
+d=b1207-suite-ver-$(printf %02d $no)
+$S/b/b1step.sh $d B-kexec-suite-647c2c33 $no kexec-suite-ver $elf "jetson-nano-2 kexec, full test kernel fix/pmm-coalesce 647c2c33 (free-list verifier, PMM_CHECK off; /root/slmos-1207-suite-647c2c33.elf sha256 78d13867), integration suite, boot_test 1 run timeout 540 s" | cut -c1-260 | grep -v "^pmm lines"
+f=/var/lib/labctl/output/$d/run_01.txt
+echo "FINDINGS: $(grep -a -c 'pmm-verify\] FINDING' $f) total; non-self-test:"; grep -a 'pmm-verify\] FINDING\|pmm-verify\] order' $f | grep -a -v 'verifier self-test' | cut -c1-200

@@ -1,0 +1,32 @@
+13:38:51 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=8a745a25-b2a9-4da4-bc27-19f69d9ec753 pid=3072589
+13:40:24 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=e5c070d5-4150-4d8f-9c9d-0b167667a845 state+uptime=[running 25.21 ] reply=[78d13867b87fcc9b ]
+13:40:24 end triggers=1
+13:48:28 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=3126357
+13:50:01 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=7c92b2dd-9db4-464e-94f2-30376206ab1a state+uptime=[running 24.70 ] reply=[78d13867b87fcc9b ]
+13:50:01 end triggers=1
+13:58:08 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=3188148
+13:59:41 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=ca3296d2-11d4-446f-9e13-99fc34f6698c state+uptime=[running 25.94 ] reply=[78d13867b87fcc9b ]
+13:59:41 end triggers=1
+14:04:58 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=3227978
+14:06:30 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=072ab0ab-9755-441c-b071-77874bac201b state+uptime=[running 24.21 ] reply=[78d13867b87fcc9b ]
+14:06:30 end triggers=1
+14:14:38 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=3284067
+14:17:25 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=04710dd1-e02a-4fcd-ac6d-350b9a66f9af state+uptime=[running 27.35 ] reply=[78d13867b87fcc9b ]
+14:17:25 end triggers=1
+14:22:44 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=3333595
+14:37:45 end triggers=0
+20:56:48 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=1038970
+20:58:18 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=c1c1460e-507c-4770-878a-8a8ce79cb3bb state+uptime=[running 26.03 ] reply=[78d13867b87fcc9b ]
+20:58:18 end triggers=1
+21:06:27 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=1083874
+21:07:54 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=59e13fee-88b1-40b6-a6ee-6342e3f7ca4a state+uptime=[running 26.70 ] reply=[78d13867b87fcc9b ]
+21:07:54 end triggers=1
+21:13:18 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=1116249
+21:14:44 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=8b3e4210-a2bf-4fe8-a96d-a50edf012178 state+uptime=[running 24.76 ] reply=[78d13867b87fcc9b ]
+21:14:44 end triggers=1
+21:20:05 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=1148691
+21:21:30 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=8bb4e1ec-ce92-4e71-8c2a-1cd9fe66a0f5 state+uptime=[running 25.04 ] reply=[78d13867b87fcc9b ]
+21:21:30 end triggers=1
+21:26:48 start mode=kexec n=1 elfs=[/root/slmos-1207-suite-647c2c33.elf] skip_current_boot_id=none pid=1180876
+21:28:16 trigger 1/1 elf=/root/slmos-1207-suite-647c2c33.elf boot_id=104fb483-63c7-4d39-bc90-1a37dac1a627 state+uptime=[running 25.74 ] reply=[78d13867b87fcc9b ]
+21:28:16 end triggers=1

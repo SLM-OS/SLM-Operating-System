@@ -1,0 +1,21 @@
+running
+--- jetson-nano-2 post state (B1b), board clock 2026-11-15T13:38:31Z
+BootCurrent: 0001
+Boot000E* SLM-OS NVMe
+BootNext lines: 0
+098f316368baf94ef117195d30cda8e1f2124fc9e66fecef7bce4c15f815d6c5  /root/slmos.elf
+elf files in /root: 14; 1207 files left in /root: 0; elf files in /tmp: 0
+-rwxr-xr-x 1 root root 10089968 Nov  5 04:10 /root/slmos-1079.elf
+-rwxr-xr-x 1 root root  8885392 Nov  3 14:16 /root/slmos-1088.elf
+-rwxr-xr-x 1 root root 10220056 Nov  3 20:02 /root/slmos-1092.elf
+-rwxr-xr-x 1 root root  8595976 Oct 29 23:10 /root/slmos-A.elf
+-rwxr-xr-x 1 root root  8596168 Oct 29 23:10 /root/slmos-B.elf
+-rwxr-xr-x 1 root root  8596488 Oct 29 23:22 /root/slmos-C.elf
+-rwxr-xr-x 1 root root  7740672 May  6  2026 /root/slmos-combined.elf
+-rwxr-xr-x 1 root root  7740520 May  6  2026 /root/slmos-control.elf
+-rwxr-xr-x 1 root root  8596488 Oct 30 02:36 /root/slmos-D.elf
+-rwxr-xr-x 1 root root  8602432 Oct 30 13:11 /root/slmos-E.elf
+-rwxr-xr-x 1 root root  9796520 Oct 31 16:47 /root/slmos.elf
+-rwxr-xr-x 1 root root  8316080 Oct 29 15:28 /root/slmos.elf.pre-pr6
+-rwxr-xr-x 1 root root  7515528 Apr 29  2026 /root/slmos.elf.prev
+-rwxr-xr-x 1 root root 16558408 Apr 28  2026 /root/slmos.elf.symposium

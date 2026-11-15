@@ -71,3 +71,12 @@ After B1 (interim, no lab): head 647c2c33 adds the free-list verifier (every bui
   B-candidates-writers.txt                              where the damaged blocks are and candidate writers (code reading only)
   B-images.txt                                          now also the 647c2c33 images; B-images-b1-f55c5293.txt is the list used in B1
   B-save-v2.sh.txt, B-b1step-v2.sh.txt                  save scripts for the next lab rows (summary lines also pick up [pmm-verify]); B1 used B-save.sh.txt / B-b1step.sh.txt
+
+Phase B1b, jetson-nano-2, kexec, head 647c2c33 (one boot per boot_test call, same pattern and trigger as B1; B-s2.sh.txt)
+  B-kexec-suite-647c2c33-boot01..10.txt        integration suite with the free-list verifier
+  B-finding-boot04.txt                         the one finding (boot 04): observations, inferences, next checks
+  B-trigger-kexec-suite-ver.log.txt            trigger log (10 triggers; one loop at 14:22 ended with none: its boot_test
+                                               call was never issued, the session was stopped there and resumed 6.5 h later)
+  B-jetson-asfound-b1b.txt, B-jetson-post-state-b1b.txt
+Phase B2, pi-5-1: on gauntlet-5-hw-pi5, same directory (B-pi5-suite-647c2c33-boot01..03.txt, B-pi5-restore-check-boot01.txt,
+  B-pi5-card-and-restore.txt)

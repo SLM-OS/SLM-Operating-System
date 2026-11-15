@@ -1,0 +1,60 @@
+#1207, phase B1b: the one verifier finding in 10 kexec suite boots at 647c2c33.
+File: B-kexec-suite-647c2c33-boot04.txt (line numbers below are lines of that file).
+
+Observations
+ 1. Line 1683 "PMM initialized"; no finding at the end of pmm_init, before the first suite, or after any suite up to
+    and including test_suite_oplib_gpu_as (the "last suite boundary" named by finding 1; the suite starts at line 2693).
+ 2. Line 2709 "[TEST] GPU Tests". Line 2755, inside that suite, just before its last four tests:
+      [gpu-kind=0] channel bring-up: inherit 2072 us, channel 2 us, warmup 354 us (...)
+    followed by test_slm_gpu_run_mnist_returns_negative_off_jetson (FAIL), test_slm_gpu_run_mnist_null_buf_fails (PASS),
+    test_slm_gpu_set_mnist_input_returns_negative_off_jetson (FAIL), test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson
+    (FAIL). These call slm_gpu_run_mnist / slm_gpu_set_mnist_input / slm_gpu_set_mnist_input_fill (kernel/tests/test_gpu.c:846-893),
+    which on a kexec boot run on the inherited MNIST channel (three of the #1109 known failures: they expect no hand-off).
+ 3. Line 2768, the walk after test_suite_gpu:
+      [pmm-verify] FINDING 1 at 168048 ms (after test_suite_gpu; last suite boundary: after test_suite_oplib_gpu_as)
+        order 4: element's prev link is not the element before it
+        count 64, walked 2, head 0x139930000, bad link value 0x139580000, held by 0x139800000
+      holder 0x139800000 (page state 0x84 = listed head, order 4): next 0x139580000, prev 0x139930000, then data
+        (736799f0c31f61ac caf827147520e448 180468a2329c03d9 ...): its own links are intact.
+      the block it points at, 0x139580000 (page state 0x84, pages before and after 0x0 = free, not a head):
+        first 64 bytes: all zero; the 64 bytes before it (0x13957ffc0): all zero.
+    So the third block of the order-4 list, a 64 KB block at a 64 KB-aligned address, has both links zero: its prev link
+    should be 0x139800000. At least 128 bytes straddling its start are zero.
+ 4. Line 5596, test_exhaustion_recovery reaches it:
+      [pmm-verify] FINDING 2 at 178019 ms (free_list_pop; ...)  order 4: head's next link is NULL with blocks still counted
+        count 62, walked 0, head 0x139580000 ... first 64 bytes all zero, 64 bytes before all zero
+    then line 5626 "order 4: count 61 without a list" with the per-order table (every other order consistent), and the
+    named panic at line 5652. This is #1207's halt, with its cause block identified.
+ 5. Reserved ranges printed in the same boot near that address: mnist pushbuf 0x139460000 (65536 B), qmd_pool 0x1398f0000
+    (262144 B), resident channel inst block 0x13998d000, its PDB 0x139984000, sched userd 0x13998e000, gpfifo 0x13998f000,
+    sched pushbuf 0x139a40000 (65536 B). 0x139580000 is 0x120000 above the mnist pushbuf and 0x370000 below the qmd_pool;
+    it is not in any range the capture prints. The 910 + 917 channel-VM pages are reserved in 84 + 65 ranges that the
+    capture does not list one by one.
+ 6. xhci_init printed at line 1816, more than 900 lines and many clean walks before the finding.
+
+What follows from the observations
+ - The block was intact after test_suite_oplib_gpu_as and damaged by the end of test_suite_gpu: the write happened during
+   test_suite_gpu. This is the first time the damage is bracketed.
+ - It is not the xHCI hand-over window (that ended before the first suite, and every walk until the GPU suite was clean).
+ - The data written is zeros, over at least the last 64 bytes of one 64 KB block and the first 64 of the next.
+
+Inferences (not shown)
+ - The writer is the MNIST GPU path that the last tests of the suite start on the inherited channel (the bring-up line is
+   the only GPU activity in that suite's log): either the GPU writing through its own page tables into a physical page
+   that the hand-off reservation does not cover, or SLM-OS code on that path clearing a buffer whose address or length
+   comes from the hand-off page. A 64 KB-aligned 64 KB block is the size and alignment of the GA10B hand-off's own
+   buffers (both pushbufs are 65536-byte ranges at 64 KB-aligned addresses), which fits "one more buffer of the same
+   allocation family that is not in the reserve list"; not verified.
+ - Whether the once-a-second tick walk runs on this board was not checked separately (the finding came from the suite
+   boundary walk); if it does, the write fell in the last second of the suite, which is where those tests are.
+ - Why only some boots: the write must land on the first 16 bytes of a block that is on a free list, and a later
+   allocation must reach it; where Linux put the hand-off buffers differs every boot. Not verified.
+ - The three earlier halts of this session (f55c5293 boot01 order 7, boot05 order 5; here order 4) and the older captures
+   are consistent with the same writer; only this one has the bytes.
+
+Next checks (not run)
+ - Print, in ga10b_handoff_reserve.c, every reserved range and every buffer address and length the hand-off page carries,
+   and compare with the damaged address in a boot that shows a finding.
+ - Run the suite with the three MNIST tests skipped on kexec (or the hand-off helper not started): if the finding rate
+   goes to zero over about 30 boots, the writer is confirmed.
+ - Walk the free lists right after each of those three tests instead of at the suite boundary.
