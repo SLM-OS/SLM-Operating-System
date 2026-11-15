@@ -1,0 +1,12 @@
+reference kexec-suite-6a4cfa93-boot01.txt: 15 names, 0 with 'blob' in the name
+A-kexec-suite-c0612fa7-boot01.txt: 15 names; not in reference: [] reference-only: []
+A-kexec-suite-c0612fa7-boot02.txt: 15 names; not in reference: [] reference-only: []
+A-kexec-suite-c0612fa7-boot03.txt: 15 names; not in reference: [] reference-only: []
+reference uefi-suite-6a4cfa93-boot01.txt: 22 names, 0 with 'blob' in the name
+A-uefi-suite-c0612fa7-boot01.txt: 22 names; not in reference: [] reference-only: []
+A-uefi-suite-c0612fa7-boot02.txt: 22 names; not in reference: [] reference-only: []
+A-uefi-suite-c0612fa7-boot03.txt: 23 names; not in reference: [test_preempt_flag_follows_migrated_task ] reference-only: []
+reference pi5-suite-6a4cfa93-boot01.txt: 20 names, 14 with 'blob' in the name
+A-pi5-suite-c0612fa7-boot01.txt: 20 names; not in reference: [] reference-only: []
+A-pi5-suite-c0612fa7-boot02.txt: 20 names; not in reference: [] reference-only: []
+A-pi5-suite-c0612fa7-boot03.txt: 20 names; not in reference: [] reference-only: []

@@ -1,0 +1,2047 @@
+== find_target_cpu: U 59 instructions, P 59; differing after level 1 (branch targets, adrp pages): 3; after level 2 (also load/store/add immediates): 0
+   @U+16 / P+16
+     - add x23, x23, #0x540
+     + add x23, x23, #0x2c0
+   @U+40 / P+40
+     - ldr w1, [x24, #2112]
+     + ldr w1, [x24, #1472]
+   @U+52 / P+52
+     - add x24, x24, #0x840
+     + add x24, x24, #0x5c0
+== heuristic_assign_cpu: U 61 instructions, P 61; differing after level 1 (branch targets, adrp pages): 3; after level 2 (also load/store/add immediates): 0
+   @U+28 / P+28
+     - ldr w0, [x21, #2112]
+     + ldr w0, [x21, #1472]
+   @U+52 / P+52
+     - ldr w1, [x21, #2112]
+     + ldr w1, [x21, #1472]
+   @U+76 / P+76
+     - add x21, x21, #0x840
+     + add x21, x21, #0x5c0
+== calculate_deadline_pressure: U 43 instructions, P 43; differing after level 1 (branch targets, adrp pages): 0; after level 2 (also load/store/add immediates): 0
+== scheduler_add_task: U 127 instructions, P 127; differing after level 1 (branch targets, adrp pages): 3; after level 2 (also load/store/add immediates): 0
+   @U+84 / P+84
+     - ldr w0, [x0, #2112]
+     + ldr w0, [x0, #1472]
+   @U+252 / P+252
+     - ldr w1, [x0, #2112]
+     + ldr w1, [x0, #1472]
+   @U+336 / P+336
+     - add x4, x4, #0xa00
+     + add x4, x4, #0xc00
+== scheduler_add_task_to_cpu: U 9 instructions, P 9; differing after level 1 (branch targets, adrp pages): 1; after level 2 (also load/store/add immediates): 0
+   @U+16 / P+16
+     - ldr w2, [x2, #2112]
+     + ldr w2, [x2, #1472]
+== task_wake_sleepers: U 75 instructions, P 75; differing after level 1 (branch targets, adrp pages): 4; after level 2 (also load/store/add immediates): 0
+   @U+44 / P+44
+     - add x4, x1, #0x9c0
+     + add x4, x1, #0xbd0
+   @U+76 / P+76
+     - ldr x1, [x1, #2496]
+     + ldr x1, [x1, #3024]
+   @U+236 / P+236
+     - add x4, x1, #0x9c0
+     - ldr x1, [x1, #2496]
+     + add x4, x1, #0xbd0
+     + ldr x1, [x1, #3024]
+== task_sleep_ms: U 79 instructions, P 79; differing after level 1 (branch targets, adrp pages): 5; after level 2 (also load/store/add immediates): 0
+   @U+92 / P+92
+     - add x1, x1, #0x9c0
+     + add x1, x1, #0xbd0
+   @U+172 / P+172
+     - ldr x5, [x2, #2496]
+     - str x21, [x2, #2496]
+     - add x2, x2, #0x9c0
+     + ldr x5, [x2, #3024]
+     + str x21, [x2, #3024]
+     + add x2, x2, #0xbd0
+   @U+264 / P+264
+     - add x0, x0, #0x9c0
+     + add x0, x0, #0xbd0
+== task_sleep_wake: U 61 instructions, P 61; differing after level 1 (branch targets, adrp pages): 3; after level 2 (also load/store/add immediates): 0
+   @U+32 / P+32
+     - add x3, x1, #0x9c0
+     + add x3, x1, #0xbd0
+   @U+64 / P+64
+     - ldr x1, [x1, #2496]
+     + ldr x1, [x1, #3024]
+   @U+152 / P+152
+     - add x3, x1, #0x9c0
+     + add x3, x1, #0xbd0
+== scheduler_tick: U 158 instructions, P 166; differing after level 1 (branch targets, adrp pages): 62; after level 2 (also load/store/add immediates): 58
+   @U+16 / P+16
+     - stp x23, x24, [sp, #48]
+     + str x23, [sp, #48]
+   @U+24 / P+24
+     - adrp x21, <task_table_fallback>
+     - adrp x19, <cpu_steal_deques>
+   @U+40 / P+32
+     - add x21, x21, #0xa00
+     - csel w20, w0, wzr, ge
+     - mov w23, w20
+   @U+56 / P+36
+     - add x24, x21, x23, lsl #6
+     - add x19, x19, #0xb00
+     + csel w19, w0, wzr, ge
+     + adrp x21, <task_table_fallback>
+     + mov w20, w19
+   @U+68 / P+52
+     - add x3, x19, #0xff0
+     - ldr x0, [x24, #48]
+     - ldr x2, [x21, #528]
+     - ldr w1, [x3, x23, lsl #2]
+     + add x21, x21, #0xc00
+     + ubfiz x1, x19, #6, #32
+     + add x4, x21, #0x240
+     + add x23, x21, x1
+     + ldr x3, [x21, #528]
+     + ldr x0, [x23, #48]
+     + ldr w2, [x4, x1]
+     + add x3, x3, #0x1
+   @U+88 / P+88
+     - add x2, x2, #0x1
+     - str x0, [x24, #48]
+     - add w1, w1, #0x1
+     - str x2, [x21, #528]
+     - str w1, [x3, x23, lsl #2]
+     + str x3, [x21, #528]
+     + add w2, w2, #0x1
+     + str x0, [x23, #48]
+     + str w2, [x4, x1]
+   @U+120 / P+116
+     - tbz w1, #0, L+128
+     + tbz w1, #0, L+140
+   @U+160 / P+156
+     - b.eq L+116
+     + b.eq L+128
+   @U+188 / P+184
+     - mov w0, w20
+     + mov w0, w19
+   @U+196 / P+192
+     - add x19, x19, #0xf50
+     - ldr w0, [x19, x23, lsl #2]
+     + adrp x0, <cpu_steal_deques>
+     + lsl x20, x20, #6
+     + add x0, x0, #0xe00
+     + add x0, x0, #0x8c0
+     + ldr w0, [x0, x20]
+   @U+212 / P+220
+     - sbfiz x20, x20, #2, #32
+     - ldr x0, [x0, #2624]
+     + sbfiz x19, x19, #6, #32
+     + ldr x0, [x0, #1984]
+   @U+224 / P+232
+     - str w1, [x0, x20]
+     + str w1, [x0, x19]
+   @U+236 / P+244
+     - ldp x23, x24, [sp, #48]
+     + ldr x23, [sp, #48]
+   @U+256 / P+264
+     - b.ne L-132
+     - ldr x0, [x24, #40]
+     + b.ne L-144
+     + ldr x0, [x23, #40]
+   @U+268 / P+276
+     - str x0, [x24, #40]
+     - b L-148
+     + str x0, [x23, #40]
+     + b L-160
+   @U+280 / P+288
+     - ldr w4, [x13, #2112]
+     - cbz w4, L+320
+     + adrp x0, <sched_diag>
+     + ldr w4, [x13, #1472]
+     + add x10, x0, #0xd00
+     + cbz w4, L+336
+   @U+292 / P+308
+     - add x13, x13, #0x840
+     + add x13, x13, #0x5c0
+   @U+300 / P+316
+     - add x10, x21, #0x300
+     + add x10, x21, #0x680
+   @U+332 / P+348
+     - cbz w0, L+292
+     + cbz w0, L+308
+   @U+372 / P+388
+     - b L+120
+     + b L+124
+   @U+396 / P+412
+     - cbz x3, L+96
+     + cbz x3, L+100
+   @U+428 / P+444
+     + nop
+   @U+488 / P+508
+     - cbnz x3, L-80
+     + cbnz x3, L-84
+   @U+496 / P+516
+     - cbz w0, L+120
+     + cbz w0, L+132
+   @U+520 / P+540
+     - add x10, x10, #0x4
+     + add x10, x10, #0x40
+   @U+528 / P+548
+     - b.hi L-208
+     + b.hi L-212
+     + adrp x0, <sched_diag>
+   @U+536 / P+560
+     - cbz w4, L+68
+     + add x10, x0, #0xd00
+     + cbz w4, L+72
+     + add x10, x0, #0xd00
+   @U+548 / P+580
+     - add x2, x19, #0x160
+     + add x2, x10, #0xa00
+   @U+604 / P+636
+     - str w4, [x19, #448]
+     - str x8, [x19, #456]
+     - b L-448
+     + str w4, [x10, #2656]
+     + str x8, [x10, #2664]
+     + b L-484
+   @U+620 / P+652
+     - b L-112
+     + b L-124
+   @U+628 / P+660
+     - b L-268
+     + b L-284
+== sched_migrate_task: U 167 instructions, P 164; differing after level 1 (branch targets, adrp pages): 86; after level 2 (also load/store/add immediates): 69
+   @U+0 / P+0
+     - cbz x0, L+660
+     + cbz x0, L+648
+   @U+28 / P+28
+     - ldr w0, [x0, #2112]
+     + ldr w0, [x0, #1472]
+   @U+36 / P+36
+     - b.ls L+592
+     + b.ls L+580
+   @U+48 / P+48
+     - b.eq L+588
+     + b.eq L+576
+   @U+64 / P+64
+     - b.ne L+548
+     + b.ne L+536
+   @U+80 / P+80
+     - b.eq L+244
+     + b.eq L+260
+   @U+88 / P+88
+     - b.hi L+256
+     + b.hi L+272
+   @U+108 / P+108
+     - cbz w0, L+488
+     + cbz w0, L+476
+   @U+116 / P+116
+     - mov w1, #0x1
+     - add x0, x0, #0xa00
+     - add x0, x0, #0x300
+     - add x0, x0, w19, uxtw #2
+     + ubfiz x1, x19, #6, #32
+     + add x0, x0, #0xc00
+     + mov w2, #0x1
+     + add x0, x0, #0x680
+     + add x0, x0, x1
+   @U+140 / P+144
+     - ldaxr w2, [x0]
+     - cbnz w2, L-8
+     - stxr w2, w1, [x0]
+     - cbnz w2, L-16
+     + ldaxr w1, [x0]
+     + cbnz w1, L-8
+     + stxr w1, w2, [x0]
+     + cbnz w1, L-16
+   @U+160 / P+164
+     - cbz w0, L+404
+     + cbz w0, L+388
+   @U+168 / P+172
+     - mov w1, #0x1
+     - add x0, x0, #0xa00
+     - add x0, x0, #0x300
+     - add x0, x0, w21, uxtw #2
+     + ubfiz x1, x21, #6, #32
+     + add x0, x0, #0xc00
+     + mov w2, #0x1
+     + add x0, x0, #0x680
+     + add x0, x0, x1
+   @U+192 / P+200
+     - ldaxr w2, [x0]
+     - cbnz w2, L-8
+     - stxr w2, w1, [x0]
+     - cbnz w2, L-16
+     + ldaxr w1, [x0]
+     + cbnz w1, L-8
+     + stxr w1, w2, [x0]
+     + cbnz w1, L-16
+   @U+212 / P+220
+     - cbz w0, L+256
+     + cbz w0, L+228
+   @U+244 / P+252
+     - b.ls L+256
+     - cbz w0, L+340
+     + b.ls L+228
+     + cbz w0, L+320
+   @U+256 / P+264
+     - add x0, x0, #0xa00
+     - add x0, x0, #0x300
+     - add x0, x0, w19, uxtw #2
+     + ubfiz x1, x19, #6, #32
+     + add x0, x0, #0xc00
+     + add x0, x0, #0x680
+     + add x0, x0, x1
+   @U+280 / P+292
+     - cbz w0, L+292
+     + cbz w0, L+268
+   @U+288 / P+300
+     - add x0, x0, #0xa00
+     - add x0, x0, #0x300
+     - add x0, x0, w21, uxtw #2
+     + ubfiz x21, x21, #6, #32
+     + add x0, x0, #0xc00
+     + add x0, x0, #0x680
+     + add x0, x0, x21
+   @U+360 / P+376
+     - cbz w0, L+220
+     + cbz w0, L+192
+   @U+368 / P+384
+     - mov w1, #0x1
+     - add x0, x0, #0xa00
+     - add x0, x0, #0x300
+     - add x0, x0, w21, uxtw #2
+     + ubfiz x1, x21, #6, #32
+     + add x0, x0, #0xc00
+     + mov w2, #0x1
+     + add x0, x0, #0x680
+     + add x0, x0, x1
+   @U+392 / P+412
+     - ldaxr w2, [x0]
+     - cbnz w2, L-8
+     - stxr w2, w1, [x0]
+     - cbnz w2, L-16
+     + ldaxr w1, [x0]
+     + cbnz w1, L-8
+     + stxr w1, w2, [x0]
+     + cbnz w1, L-16
+   @U+412 / P+432
+     - cbz w0, L+152
+     + cbz w0, L+120
+   @U+420 / P+440
+     - mov w1, #0x1
+     - add x0, x0, #0xa00
+     - add x0, x0, #0x300
+     - add x0, x0, w19, uxtw #2
+     - sevl
+     - wfe
+     - ldaxr w2, [x0]
+     - cbnz w2, L-8
+     - stxr w2, w1, [x0]
+     - cbnz w2, L-16
+     - ldr w0, [x20, #20]
+     - cbnz w0, L-248
+     + ubfiz x1, x19, #6, #32
+     + b L-268
+   @U+480 / P+460
+     - cbz w0, L-264
+     + cbz w0, L-236
+   @U+496 / P+476
+     - b L-276
+     - cbz w0, L+104
+     + b L-248
+     + cbz w0, L+112
+   @U+508 / P+488
+     - add x0, x0, #0xa00
+     - add x0, x0, #0x300
+     - add x21, x0, w21, uxtw #2
+     - stlr wzr, [x21]
+     + ubfiz x21, x21, #6, #32
+     + add x0, x0, #0xc00
+     + add x0, x0, #0x680
+     + add x0, x0, x21
+     + stlr wzr, [x0]
+   @U+532 / P+516
+     - cbz w0, L+40
+     + cbz w0, L+44
+   @U+540 / P+524
+     - add x0, x0, #0xa00
+     - add x0, x0, #0x300
+     - add x0, x0, w19, uxtw #2
+     + ubfiz x1, x19, #6, #32
+     + add x0, x0, #0xc00
+     + add x0, x0, #0x680
+     + add x0, x0, x1
+   @U+560 / P+548
+     - b L-252
+     + b L-224
+   @U+568 / P+556
+     - b L-360
+     + b L-340
+   @U+576 / P+564
+     - b L-268
+     + b L-240
+   @U+584 / P+572
+     - b L-176
+     + b L-144
+   @U+592 / P+580
+     - b L-316
+     + b L-292
+   @U+600 / P+588
+     - b L-444
+     + b L-428
+   @U+608 / P+596
+     - b L-80
+     + b L-84
+   @U+620 / P+608
+     - add x0, x0, #0x2e0
+     + add x0, x0, #0x918
+   @U+632 / P+620
+     - b L-300
+     + b L-272
+   @U+644 / P+632
+     - add x0, x0, #0x2b0
+     + add x0, x0, #0x8e8
+   @U+656 / P+644
+     - b L-324
+     + b L-296
+== sched_rebalance_tick: U 126 instructions, P 127; differing after level 1 (branch targets, adrp pages): 22; after level 2 (also load/store/add immediates): 9
+   @U+80 / P+80
+     - cbz w0, L+336
+     + cbz w0, L+340
+   @U+92 / P+92
+     - add x20, x20, #0xb00
+     - ldr x0, [x20, #3840]
+     + add x20, x20, #0xe00
+     + ldr x0, [x20, #2176]
+   @U+108 / P+108
+     - str x0, [x20, #3840]
+     + str x0, [x20, #2176]
+   @U+116 / P+116
+     - cbnz x0, L+300
+     + cbnz x0, L+304
+   @U+124 / P+124
+     - ldr w5, [x9, #2112]
+     + ldr w5, [x9, #1472]
+   @U+132 / P+132
+     - b.ls L+284
+     + b.ls L+288
+   @U+144 / P+144
+     - add x8, x8, #0xa00
+     + add x8, x8, #0xc00
+   @U+204 / P+204
+     - b.eq L+212
+     + b.eq L+216
+   @U+220 / P+220
+     - b.hi L+196
+     + b.hi L+200
+   @U+240 / P+240
+     - cbz w0, L+188
+     - add x0, x8, #0x300
+     + cbz w0, L+192
+     + ubfiz x1, x19, #6, #32
+     + add x0, x8, #0x680
+     + add x0, x0, x1
+   @U+252 / P+260
+     - add x0, x0, w19, uxtw #2
+   @U+352 / P+356
+     - add x8, x8, #0x300
+     - add x10, x8, x10, lsl #2
+     + add x8, x8, #0x680
+     + add x10, x8, x10, lsl #6
+   @U+372 / P+376
+     - ldr w0, [x9, #2112]
+     + ldr w0, [x9, #1472]
+   @U+404 / P+408
+     - ldr x0, [x20, #3848]
+     + ldr x0, [x20, #2184]
+   @U+412 / P+416
+     - str x0, [x20, #3848]
+     + str x0, [x20, #2184]
+   @U+456 / P+460
+     - add x8, x8, #0x300
+     - add x10, x8, x10, lsl #2
+     + add x8, x8, #0x680
+     + add x10, x8, x10, lsl #6
+== timer_handler: U 26 instructions, P 26; differing after level 1 (branch targets, adrp pages): 1; after level 2 (also load/store/add immediates): 0
+   @U+12 / P+12
+     - add x0, x0, #0x9e0
+     + add x0, x0, #0xce0
+== schedule: U 862 instructions, P 899; differing after level 1 (branch targets, adrp pages): 1147; after level 2 (also load/store/add immediates): 1124
+   @U+40 / P+40
+     - adrp x21, <cpu_steal_deques>
+   @U+52 / P+48
+     - add x21, x21, #0xb00
+     + add x20, x20, #0xc00
+   @U+60 / P+56
+     - csel w18, w0, wzr, ge
+     - add x2, x21, #0xf10
+     - mov w26, w18
+     + csel w28, w0, wzr, ge
+   @U+76 / P+64
+     - ldr w0, [x2, x26, lsl #2]
+     - add x20, x20, #0xa00
+     - lsl x3, x26, #6
+     - sbfiz x24, x18, #6, #32
+     - ldr x3, [x20, x3]
+     - add x24, x20, x24
+     + add x1, x20, #0x240
+     + ubfiz x0, x28, #6, #32
+     + sbfiz x22, x28, #6, #32
+     + add x1, x1, x0
+     + ldr x2, [x20, x0]
+     + add x4, x20, x22
+     + mov w27, w28
+     + ldr w0, [x1, #8]
+   @U+104 / P+100
+     - str w0, [x2, x26, lsl #2]
+     - cbz x3, L+884
+     - adrp x22, <vmm_state>
+     - add x28, x22, #0xc
+     - add x25, x20, #0x300
+     - mov w26, #0x1
+     - b L+100
+     + str w0, [x1, #8]
+     + cbz x2, L+888
+     + adrp x21, <vmm_state>
+     + add x26, x21, #0xc
+     + add x23, x20, #0x680
+     + mov w24, #0x1
+     + b L+104
+   @U+140 / P+136
+     - ldaxr w0, [x27]
+     + ldaxr w0, [x25]
+   @U+148 / P+144
+     - stxr w0, w26, [x27]
+     + stxr w0, w24, [x25]
+   @U+156 / P+152
+     - ldr x0, [x24, #24]
+     + ldr x0, [x4, #24]
+   @U+164 / P+160
+     - ldr w2, [x28]
+     - str xzr, [x24, #24]
+     - ldr w1, [x24, #32]
+     - cbz w2, L+548
+     - stlr wzr, [x27]
+     + ldr w2, [x26]
+     + str xzr, [x4, #24]
+     + ldr w1, [x4, #32]
+     + cbz w2, L+556
+     + stlr wzr, [x25]
+   @U+216 / P+212
+     - csel w18, w0, wzr, ge
+     - sbfiz x24, x18, #6, #32
+     - add x24, x20, x24
+     - ldr w0, [x28]
+     - mov w23, w18
+     - add x27, x25, w18, uxtw #2
+     + csel w28, w0, wzr, ge
+     + sbfiz x4, x28, #6, #32
+     + add x4, x20, x4
+     + mov w27, w28
+     + ldr w0, [x26]
+     + add x25, x23, x27, lsl #6
+   @U+248 / P+244
+     - ldr x0, [x24, #24]
+     + ldr x0, [x4, #24]
+   @U+256 / P+252
+     - str w18, [sp, #104]
+     + str x4, [sp, #96]
+   @U+264 / P+260
+     - ldr w18, [sp, #104]
+     - mov x25, x0
+     - mov w0, w18
+     - str w18, [sp, #104]
+     + mov x23, x0
+     + mov w0, w28
+   @U+284 / P+272
+     - ldr w18, [sp, #104]
+     + ldr x4, [sp, #96]
+   @U+292 / P+280
+     - cbz x25, L+16
+     - ldr w0, [x25, #20]
+     + cbz x23, L+16
+     + ldr w0, [x23, #20]
+   @U+304 / P+292
+     - b.eq L+536
+     - mov w1, w18
+     - mov x3, x25
+     - mov x0, x24
+     + b.eq L+552
+     + mov w1, w28
+     + mov x0, x4
+     + str x4, [sp, #96]
+     + mov x3, x23
+   @U+324 / P+316
+     - ldr x1, [x24, #16]
+     - mov x26, x0
+     + ldr x4, [sp, #96]
+     + mov x24, x0
+     + ldr x1, [x4, #16]
+   @U+336 / P+332
+     - b.eq L+24
+     - ldr x1, [x24]
+     + b.eq L+32
+     + ldr x1, [x4]
+   @U+348 / P+344
+     - b.eq L+384
+     - mov w1, w18
+     + b.eq L+392
+     + mov w1, w28
+     + str x4, [sp, #96]
+   @U+360 / P+360
+     - cmp x25, x26
+     - b.eq L+596
+     + ldr x4, [sp, #96]
+     + cmp x23, x24
+     + b.eq L+592
+   @U+376 / P+380
+     - ldr x0, [x26, #744]
+     - str w2, [x26, #20]
+     - str w2, [x26, #824]
+     + ldr x0, [x24, #744]
+     + str w2, [x24, #20]
+     + str w2, [x24, #824]
+   @U+400 / P+404
+     - str x0, [x26, #744]
+     - cbz x25, L+16
+     - ldr w0, [x25, #20]
+     + str x0, [x24, #744]
+     + cbz x23, L+16
+     + ldr w0, [x23, #20]
+   @U+416 / P+420
+     - b.eq L+552
+     - mov x0, x26
+     - str w18, [sp, #104]
+     + b.eq L+548
+     + mov x0, x24
+     + adrp x20, <cpu_steal_deques>
+   @U+432 / P+436
+     - ldr w18, [sp, #104]
+     - mov x1, x25
+     - mov x2, x26
+     - mov w0, w18
+     - str w18, [sp, #104]
+     + mov x1, x23
+     + mov w0, w28
+     + mov x2, x24
+     + add x20, x20, #0xe00
+   @U+456 / P+456
+     - ldr w18, [sp, #104]
+     - add x0, x21, #0xf50
+     + lsl x3, x27, #6
+   @U+468 / P+464
+     - str w1, [x0, x23, lsl #2]
+     - cmp w18, #0x7
+     - b.hi L+60
+     - add x1, x23, x23, lsl #2
+     + add x0, x20, #0x8c0
+     + str w1, [x0, x3]
+     + cmp w28, #0x7
+     + b.hi L+64
+     + add x1, x27, x27, lsl #2
+     + adrp x6, <steal_trace>
+   @U+488 / P+492
+     - lsl x0, x23, #6
+     - add x2, x2, #0xb40
+     - add x20, x20, #0xfc0
+     - add x1, x23, x1, lsl #2
+     - ldr w3, [x20, x0]
+     - mov w0, w18
+     - add x1, x2, x1, lsl #6
+     + add x6, x6, #0x8c0
+     + add x2, x2, #0xd00
+     + add x1, x27, x1, lsl #2
+     + add x2, x2, #0x780
+     + mov w0, w28
+     + ldr w2, [x2, x3]
+     + add x1, x6, x1, lsl #6
+   @U+520 / P+524
+     - cmp w3, w1
+     + cmp w2, w1
+   @U+536 / P+540
+     - ldr w0, [x22, #12]
+     - cbz w0, L+380
+     - stlr wzr, [x27]
+     + ldr w0, [x21, #12]
+     + cbz w0, L+376
+     + stlr wzr, [x25]
+   @U+556 / P+560
+     - cbz x25, L+376
+     - ldr x4, [x25, #688]
+     + cbz x23, L+372
+     + ldr x4, [x23, #688]
+   @U+568 / P+572
+     - ldr x5, [x25, #696]
+     + ldr x5, [x23, #696]
+   @U+588 / P+592
+     - b.hi L+2784
+     - ldrb w0, [x26, #768]
+     + b.hi L+2928
+     + ldrb w0, [x24, #768]
+   @U+600 / P+604
+     - ldr x0, [x26, #784]
+     - cbnz x0, L+344
+     - ldrb w0, [x25, #768]
+     - cbnz w0, L+1880
+     - mov x1, x26
+     - mov x0, x25
+     + ldr x0, [x24, #784]
+     + cbnz x0, L+340
+     + ldrb w0, [x23, #768]
+     + cbnz w0, L+1964
+     + mov x1, x24
+     + mov x0, x23
+   @U+648 / P+652
+     - add x21, x21, #0xf50
+   @U+656 / P+656
+     + add x20, x20, #0x8c0
+     + csel w1, w0, wzr, ge
+     + lsl x1, x1, #6
+   @U+660 / P+672
+     - mov w1, w0
+   @U+668 / P+676
+     - csel w1, w1, wzr, ge
+     - str wzr, [x21, x1, lsl #2]
+     - sbfiz x19, x19, #2, #32
+     + str wzr, [x20, x1]
+   @U+684 / P+684
+     - adrp x0, <cpu_stacks>
+     + adrp x1, <cpu_stacks>
+     + sbfiz x0, x19, #6, #32
+     + ldp x19, x20, [sp, #16]
+   @U+704 / P+712
+     - ldr x0, [x0, #2624]
+     - str wzr, [x0, x19]
+     - ldp x19, x20, [sp, #16]
+     + ldr x1, [x1, #1984]
+     + str wzr, [x1, x0]
+   @U+728 / P+732
+     - b L-540
+     + b L-548
+   @U+736 / P+740
+     - str x0, [x24]
+     - cbz x0, L+1768
+     - ldr w0, [x24, #36]
+     - str xzr, [x26, #24]
+     + str x0, [x4]
+     + cbz x0, L+1852
+     + ldr w0, [x4, #36]
+     + str xzr, [x24, #24]
+   @U+756 / P+760
+     - str w0, [x24, #36]
+     - cmp x25, x26
+     + str w0, [x4, #36]
+     + cmp x23, x24
+   @U+768 / P+772
+     - ldr w0, [x25, #20]
+     + ldr w0, [x23, #20]
+   @U+780 / P+784
+     - b.ls L+2632
+     + b.ls L+2776
+   @U+788 / P+792
+     - str w0, [x25, #20]
+     - ldr w0, [x22, #12]
+     - cbz w0, L+188
+     - stlr wzr, [x27]
+     + str w0, [x23, #20]
+     + ldr w0, [x21, #12]
+     + cbz w0, L+184
+     + stlr wzr, [x25]
+   @U+840 / P+844
+     - ldr x0, [x24, #16]
+     - str wzr, [x25, #20]
+     - cmp x0, x25
+     - b.eq L+24
+     - mov w1, w18
+     - mov x0, x25
+     - str w18, [sp, #104]
+     + ldr x0, [x4, #16]
+     + str wzr, [x23, #20]
+     + cmp x0, x23
+     + b.eq L+20
+     + mov w1, w28
+     + mov x0, x23
+   @U+872 / P+872
+     - ldr w18, [sp, #104]
+     - ldr x0, [x24]
+     + ldr x4, [sp, #96]
+     + ldr x0, [x4]
+   @U+884 / P+884
+     - str w18, [sp, #104]
+     + str x4, [sp, #96]
+   @U+892 / P+892
+     - ldr w18, [sp, #104]
+     - mov w0, w18
+     - str w18, [sp, #104]
+     + ldr x4, [sp, #96]
+     + mov w0, w28
+     + str x4, [sp, #96]
+   @U+908 / P+908
+     - ldr w18, [sp, #104]
+     + ldr x4, [sp, #96]
+   @U+916 / P+916
+     - b L-608
+     + b L-620
+   @U+928 / P+928
+     - cbnz x25, L-368
+     - ldrb w0, [x26, #768]
+     - cbz w0, L-320
+     - ldr x0, [x26, #784]
+     - cbz x0, L-328
+     - ldrh w1, [x26, #816]
+     + cbnz x23, L-364
+     + ldrb w0, [x24, #768]
+     + cbz w0, L-316
+     + ldr x0, [x24, #784]
+     + cbz x0, L-324
+     + ldrh w1, [x24, #816]
+   @U+956 / P+956
+     - b L-340
+     - cbnz x25, L-192
+     - b L-172
+     - ldr w0, [x25, #820]
+     - str x25, [x24, #24]
+     - str w0, [x24, #32]
+     - b L-560
+     + b L-336
+     + cbnz x23, L-188
+     + b L-168
+     + ldr w0, [x23, #820]
+     + str x23, [x4, #24]
+     + str w0, [x4, #32]
+     + b L-556
+   @U+988 / P+988
+     - b L-180
+     - add x2, x21, #0xf30
+     - sxtw x12, w18
+     - str w18, [sp, #104]
+     - ldr w0, [x2, x26, lsl #2]
+     - adrp x22, <vmm_state>
+     - str w18, [sp, #112]
+     - str x12, [sp, #120]
+     + b L-176
+     + ldr w0, [x1, #20]
+     + adrp x24, <sched_diag>
+     + adrp x21, <vmm_state>
+     + str x4, [sp, #96]
+   @U+1024 / P+1012
+     - str w0, [x2, x26, lsl #2]
+     + str w0, [x1, #20]
+   @U+1032 / P+1020
+     - add x7, x26, x26, lsl #1
+     - add x6, x21, #0x2c0
+     - ldr w1, [x20, #704]
+     - mov x14, x0
+     - add x2, x6, x7, lsl #7
+     - ldr x12, [sp, #120]
+     - ldr w0, [x2, #64]
+     - str w1, [sp, #140]
+     - ldr w18, [sp, #104]
+     - cmp w1, w0
+     - ldr w1, [sp, #112]
+     - b.eq L+148
+     - ldr w0, [sp, #140]
+     + add x1, x24, #0xd00
+     + add x7, x27, x27, lsl #1
+     + ldr w2, [x20, #1600]
+     + add x6, x1, #0xb80
+     + mov x12, x0
+     + str x1, [sp, #128]
+     + add x1, x6, x7, lsl #7
+     + ldr x4, [sp, #96]
+     + ldr w0, [x1, #64]
+     + str w2, [sp, #152]
+     + cmp w2, w0
+     + b.eq L+156
+     + ldr w0, [sp, #152]
+   @U+1088 / P+1076
+     - str w0, [x2, #64]
+     + str w0, [x1, #64]
+   @U+1096 / P+1084
+     - ldr w3, [x22, #12]
+     - str w3, [x2, #68]
+     - str x14, [x2, #72]
+     - str xzr, [x2, #88]
+     - str wzr, [x2, #96]
+     - str wzr, [x2, #180]
+     - str wzr, [x2, #184]
+     - str wzr, [x2, #188]
+     - str wzr, [x2, #192]
+     - str wzr, [x2, #196]
+     - str wzr, [x2, #200]
+     - str wzr, [x2, #204]
+     - str wzr, [x2, #208]
+     - str wzr, [x2, #212]
+     - str wzr, [x2, #216]
+     - str wzr, [x2, #220]
+     - str wzr, [x2, #224]
+     - str wzr, [x2, #228]
+     - str wzr, [x2, #232]
+     - add x2, x7, w0, uxtw
+     - add x4, x2, #0x30
+     - add x3, x2, #0x40
+     - add x4, x6, x4, lsl #2
+     - add x2, x2, #0x50
+     + ldr w2, [x21, #12]
+     + str w2, [x1, #68]
+     + str x12, [x1, #72]
+     + str xzr, [x1, #88]
+     + str wzr, [x1, #96]
+     + str wzr, [x1, #180]
+     + str wzr, [x1, #184]
+     + str wzr, [x1, #188]
+     + str wzr, [x1, #192]
+     + str wzr, [x1, #196]
+     + str wzr, [x1, #200]
+     + str wzr, [x1, #204]
+     + str wzr, [x1, #208]
+     + str wzr, [x1, #212]
+     + str wzr, [x1, #216]
+     + str wzr, [x1, #220]
+     + str wzr, [x1, #224]
+     + str wzr, [x1, #228]
+     + str wzr, [x1, #232]
+     + nop
+     + nop
+     + add x1, x7, w0, uxtw
+     + add x3, x1, #0x30
+     + add x2, x1, #0x40
+     + add x3, x6, x3, lsl #2
+     + add x1, x1, #0x50
+   @U+1196 / P+1192
+     - add x3, x6, x3, lsl #2
+   @U+1204 / P+1196
+     - str wzr, [x4, #44]
+     - str wzr, [x3, #24]
+     - str wzr, [x2, #4]
+     + add x1, x6, x1, lsl #2
+     + str wzr, [x3, #44]
+     + str wzr, [x2, #24]
+     + str wzr, [x1, #4]
+   @U+1224 / P+1220
+     - add x0, x26, x26, lsl #1
+     - add x2, x21, #0x2c0
+     - adrp x3, <g_cp_store>
+     - ldr w3, [x3, #2112]
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+   @U+1244 / P+1232
+     - mov w13, #0xb
+     + mov w10, #0xb
+   @U+1252 / P+1240
+     - ldr w5, [x2, x0]
+     + add x2, x1, #0xb80
+     + adrp x1, <g_handle>
+     + ldr w3, [x2, x0]
+   @U+1260 / P+1256
+     - ccmp w3, #0x1, #0x0, ne
+     - add w5, w5, #0x1
+     - str w5, [x2, x0]
+     + ldr w1, [x1, #1472]
+     + add w3, w3, #0x1
+     + str w3, [x2, x0]
+     + ccmp w1, #0x1, #0x0, ne
+   @U+1276 / P+1276
+     - str x14, [x6, #80]
+     - add x2, x2, #0xb40
+     - b.hi L+1256
+     - add x0, x26, x26, lsl #2
+     - add x0, x26, x0, lsl #2
+     + str x12, [x6, #80]
+     + add x2, x2, #0x8c0
+     + b.hi L+1340
+     + add x0, x27, x27, lsl #2
+     + add x0, x27, x0, lsl #2
+   @U+1300 / P+1300
+     - ldr x5, [x0, #24]
+     - sub x0, x5, #0x1
+     - cmp x14, x0
+     - b.ls L+72
+     - sub x5, x14, x5
+     + ldr x3, [x0, #24]
+     + sub x0, x3, #0x1
+     + cmp x12, x0
+     + b.ls L+80
+     + ldr x2, [sp, #128]
+     + sub x3, x12, x3
+   @U+1324 / P+1328
+     - add x6, x21, #0x218
+     + add x6, x2, #0xab8
+   @U+1348 / P+1352
+     - cmp x5, x2
+     + cmp x3, x2
+   @U+1356 / P+1360
+     - add x2, x26, x26, lsl #1
+     + add x2, x27, x27, lsl #1
+   @U+1368 / P+1372
+     - add x0, x21, x0, lsl #2
+     - ldr w2, [x0, #1028]
+     + ldr x2, [sp, #128]
+     + add x0, x2, x0, lsl #2
+     + ldr w2, [x0, #3268]
+   @U+1380 / P+1388
+     - str w2, [x0, #1028]
+     + str w2, [x0, #3268]
+   @U+1392 / P+1400
+     - lsl w25, w11, w1
+     + lsl w25, w11, w28
+   @U+1400 / P+1408
+     - str w0, [sp, #136]
+     - b.ne L+1484
+     + str w0, [sp, #140]
+     + b.ne L+1604
+   @U+1412 / P+1420
+     - add x28, x2, #0xc
+     - cmp w3, w11
+     - b.ls L+1856
+     - add x16, x26, x26, lsl #1
+     - add x15, x21, #0x2c0
+     + add x26, x2, #0xc
+     + cmp w1, w11
+     + b.ls L+1988
+     + ldr x0, [sp, #128]
+     + add x14, x27, x27, lsl #1
+   @U+1436 / P+1444
+     - add x28, x2, #0xc
+     - mov w27, #0x0
+     - stp x19, x24, [sp, #184]
+     - add x7, x15, x16, lsl #7
+     + mov w24, #0x0
+     + add x26, x2, #0xc
+     + stp x19, x4, [sp, #184]
+     + mov w4, w28
+     + mov x19, x26
+     + mov w28, w24
+     + str x22, [sp, #216]
+     + mov w22, w11
+     + add x13, x0, #0xb80
+     + str x27, [sp, #104]
+     + add x23, x13, x14, lsl #7
+     + str x12, [sp, #144]
+     + str wzr, [sp, #164]
+     + mov x24, x23
+     + stp x13, x14, [sp, #168]
+     + str x21, [sp, #200]
+     + stp wzr, w10, [sp, #208]
+     + add w0, w4, w22
+     + udiv w2, w0, w1
+     + msub w1, w2, w1, w0
+     + cmp w4, w1
+     + b.eq L+584
+     + adrp x0, <cpu_steal_deques>
+     + ubfiz x3, x1, #6, #32
+     + add x0, x0, #0xe00
+     + add x2, x20, #0xa80
+     + add x0, x0, #0x8c0
+     + mov w8, #0x1c0
+     + ldr w11, [x0, x3]
+     + mov w10, w1
+     + umaddl x27, w1, w8, x2
+     + cbnz w11, L+868
+     + ldr w0, [sp, #140]
+     + add x25, x20, #0x880
+     + add x9, x20, #0x680
+     + add x25, x25, x3
+     + add x23, x9, x3
+     + str w11, [sp, #96]
+     + stp w4, w22, [sp, #156]
+     + mov x22, x10
+     + add w0, w0, #0x1
+     + stp w1, w0, [sp, #136]
+     + add w0, w28, #0x20
+     + str w0, [sp, #116]
+     + mov x0, x19
+     + mov w19, w28
+     + mov x28, x0
+     + b L+228
+     + mov w0, #0x1
+     + sevl
+     + wfe
+     + ldaxr w1, [x25]
+     + cbnz w1, L-8
+     + stxr w1, w0, [x25]
+     + cbnz w1, L-16
+     + mov x0, x27
+     + bl <steal_deque_is_empty>
+     + mov w26, w0
+     + add x1, sp, #0xec
+     + mov x0, x27
+     + bl <steal_deque_steal>
+     + mov x2, x0
+     + cbz w26, L+252
+     + ldr w0, [x28]
+     + cbz w0, L+312
+     + stlr wzr, [x25]
+     + sev
+     + msr daif, x21
+     + cbz x2, L+308
+     + mrs x15, daif
+     + msr daifset, #0x2
+     + ldr w0, [x28]
+     + cbz w0, L+592
+     + mov w0, #0x1
+     + sevl
+     + wfe
+     + ldaxr w1, [x23]
+     + cbnz w1, L-8
+     + stxr w1, w0, [x23]
+     + cbnz w1, L-16
+     + ldr w1, [x2, #820]
+     + ldr w0, [sp, #236]
+     + cmp w1, w0
+     + b.eq L+568
+     + ldr w0, [x24, #44]
+     + add w0, w0, #0x1
+     + str w0, [x24, #44]
+     + ldr w0, [x28]
+     + cbz w0, L+588
+     + stlr wzr, [x23]
+     + sev
+     + msr daif, x15
+     + ldr x1, [sp, #104]
+     + add x0, x20, #0x240
+     + add w19, w19, #0x1
+     + add x0, x0, x1, lsl #6
+     + mov w1, #0x1
+     + str w1, [sp, #96]
+     + ldr w1, [x0, #28]
+     + add w1, w1, #0x1
+     + str w1, [x0, #28]
+     + ldr w0, [sp, #116]
+     + cmp w0, w19
+     + b.eq L+748
+     + add x1, x20, #0x880
+     + lsl x0, x22, #6
+     + str wzr, [sp, #236]
+     + ldr w0, [x1, x0]
+     + cbz w0, L+16
+     + ldr w0, [x24, #36]
+     + add w0, w0, #0x1
+     + str w0, [x24, #36]
+     + mrs x21, daif
+     + msr daifset, #0x2
+     + ldr w0, [x28]
+     + cbnz w0, L-268
+     + dmb ish
+     + mov x0, x27
+     + bl <steal_deque_is_empty>
+     + mov w26, w0
+     + add x1, sp, #0xec
+     + mov x0, x27
+     + bl <steal_deque_steal>
+     + mov x2, x0
+     + cbnz w26, L-244
+     + mov x0, x27
+     + str x2, [sp, #120]
+     + bl <steal_deque_is_empty>
+     + ldr x2, [sp, #120]
+     + cbz w0, L-264
+     + ldr x0, [sp, #128]
+     + add x0, x0, #0x780
+     + add x0, x0, x22, lsl #6
+     + ldr w1, [x0, #4]
+     + add w1, w1, #0x1
+     + str w1, [x0, #4]
+     + ldr x1, [sp, #144]
+     + str x1, [x0, #16]
+     + ldr w1, [sp, #152]
+     + str w1, [x0, #8]
+     + ldr w0, [x28]
+     + cbnz w0, L-304
+     + dmb ish
+     + msr daif, x21
+     + cbnz x2, L-300
+   @U+1456 / P+2028
+     - mov w19, w11
+     - mov w28, w27
+     - mov x27, x0
+     - str x22, [sp, #200]
+     - mov x22, x26
+     - mov x26, x7
+     - str x14, [sp, #144]
+     - stp wzr, wzr, [sp, #160]
+     - stp x15, x16, [sp, #168]
+     - stp w18, w13, [sp, #208]
+     - str x12, [sp, #216]
+     - add w0, w1, w19
+     - udiv w2, w0, w3
+     - msub w11, w2, w3, w0
+     - cmp w1, w11
+     - b.eq L+476
+     - add x2, x21, #0xf50
+     - mov w12, w11
+     - add x0, x20, #0x360
+     - mov w5, #0x188
+     - ldr w9, [x2, x12, lsl #2]
+     - umaddl x25, w11, w5, x0
+     - cbnz w9, L+812
+     - ldr w0, [sp, #136]
+     - add x10, x20, #0x300
+     - add x23, x20, #0x340
+     - add x4, x10, x12, lsl #2
+     - str x12, [sp, #112]
+     - add x23, x23, x12, lsl #2
+     - str w9, [sp, #120]
+     - mov x24, x4
+     - stp w1, w19, [sp, #152]
+     + ldr w11, [sp, #96]
+     + mov w28, w19
+     + mov x19, x0
+     + ldp w4, w22, [sp, #156]
+     + cbnz w11, L+68
+     + add x1, x20, #0x240
+     + ldr w0, [sp, #208]
+     + ldr x2, [sp, #104]
+   @U+1588 / P+2064
+     - stp w11, w0, [sp, #132]
+     - add w0, w28, #0x20
+     - str w0, [sp, #128]
+     + add x1, x1, x2, lsl #6
+     + str w0, [sp, #208]
+     + add x0, x2, x2, lsl #1
+     + ldr x2, [sp, #128]
+     + add x2, x2, #0xb80
+     + add x0, x2, x0, lsl #7
+     + ldr w2, [x1, #32]
+     + add w2, w2, #0x1
+     + str w2, [x1, #32]
+     + ldr w1, [x0, #40]
+     + add w1, w1, #0x1
+     + str w1, [x0, #40]
+     + adrp x0, <g_handle>
+     + add w22, w22, #0x1
+     + ldr w1, [x0, #1472]
+     + cmp w1, w22
+     + b.hi L-616
+     + mov w24, w28
+     + ldr x27, [sp, #104]
+     + mov w28, w4
+     + mov x26, x19
+     + ldp x19, x4, [sp, #184]
+     + ldr x12, [sp, #144]
+     + ldr x21, [sp, #200]
+     + ldr w10, [sp, #212]
+     + cbnz w24, L+784
+     + ldr w0, [sp, #164]
+     + cbz w0, L+1280
+     + cmp w10, #0xb
+     + b.eq L+36
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+     + lsl x0, x0, #5
+     + add x0, x0, w10, uxtw
+     + add x0, x1, x0, lsl #2
+     + ldr w1, [x0, #3224]
+     + add w1, w1, #0x1
+     + str w1, [x0, #3224]
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+     + mov w7, #0x50
+     + add x1, x1, #0xb80
+     + add x0, x1, x0, lsl #7
+     + ldr w1, [x0, #16]
+     + add w1, w1, #0x1
+     + str w1, [x0, #16]
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+     + add x24, x1, #0xb80
+     + add x3, x24, x0, lsl #7
+     + ldr w1, [x3, #96]
+     + cmp w1, #0xf
+     + b.hi L-2156
+     + ldr x8, [x3, #72]
+     + mov w6, w1
+     + add w1, w1, #0x1
+     + add x0, x6, x0, lsl #5
+     + add x6, x3, x6
+     + add x0, x0, #0x10
+     + add x0, x24, x0, lsl #2
+     + sub w12, w12, w8
+     + str w12, [x0, #36]
+     + strb w7, [x6, #164]
+     + str w1, [x3, #96]
+     + b L-2204
+     + dmb ish
+     + ldr w1, [x2, #820]
+     + ldr w0, [sp, #236]
+     + cmp w1, w0
+     + b.ne L-560
+     + ldr w0, [x2, #20]
+     + cbz w0, L+48
+     + ldr w0, [x24, #48]
+     + add w0, w0, #0x1
+     + str w0, [x24, #48]
+     + ldr w0, [x28]
+     + cbnz w0, L-568
+     + nop
+     + nop
+     + nop
+     + dmb ish
+     + msr daif, x15
+     + b L-580
+     + ldr w0, [x2, #708]
+     + ldr w1, [sp, #136]
+     + cmp w1, w0
+     + b.eq L+116
+     + ldr w0, [x24, #52]
+     + add w0, w0, #0x1
+     + str w0, [x24, #52]
+     + ldr w0, [x28]
+     + cbnz w0, L-628
+     + b L-48
+     + ldr w1, [x24, #28]
+   @U+1604 / P+2444
+     - mov w27, w28
+     - mov x28, x22
+     - mov x22, x0
+     - b L+228
+     + str w4, [sp, #96]
+     + add w1, w1, #0x1
+     + str w1, [x24, #28]
+     + bl <steal_deque_is_empty>
+     + ldr w4, [sp, #96]
+     + cbnz w0, L+24
+     + ldp x1, x0, [sp, #168]
+     + add x1, x1, x0, lsl #7
+     + ldr w0, [x1, #32]
+     + add w0, w0, #0x1
+     + str w0, [x1, #32]
+     + ldr w0, [sp, #164]
+     + add w22, w22, #0x1
+     + add w0, w0, #0x1
+     + str w0, [sp, #164]
+     + adrp x0, <g_handle>
+     + ldr w1, [x0, #1472]
+     + cmp w1, w22
+     + b.hi L-1004
+     + b L-388
+     + ldr w0, [x2, #704]
+     + cmn w0, #0x1
+     + b.eq L+348
+     + ldr x0, [sp, #104]
+     + ldr x1, [sp, #128]
+     + add x0, x0, x0, lsl #1
+     + add x1, x1, #0xb80
+     + add x0, x1, x0, lsl #7
+     + ldr w1, [x0, #56]
+     + add w1, w1, #0x1
+     + str w1, [x0, #56]
+     + ldr w0, [x28]
+     + cbnz w0, L-772
+     + b L-192
+     + bl <vmm_boot_l1_pa>
+     + mov w1, #0x0
+     + bl <vmm_user_addrspace_switch>
+     + b L-1972
+     + str xzr, [x4, #8]
+     + b L-1852
+     + mov x0, x28
+     + ldp w4, w22, [sp, #156]
+     + mov w28, w19
+     + mov x19, x0
+     + b L-508
+     + ldr x3, [x2, #1368]
+     + sub x0, x3, #0x1
+     + cmp x12, x0
+     + b.ls L+80
+     + ldr x0, [sp, #128]
+     + sub x3, x12, x3
+     + mov x10, #0x0
+     + add x6, x0, #0xab8
+     + b L+16
+     + add x10, x10, #0x1
+     + cmp x10, #0xa
+     + b.eq L+16
+     + ldr x0, [x6, x10, lsl #3]
+     + cmp x3, x0
+     + b.cs L-20
+     + ldr x3, [sp, #128]
+     + add x0, x27, x27, lsl #1
+     + lsl x0, x0, #5
+     + add x0, x0, w10, uxtw
+     + add x0, x3, x0, lsl #2
+     + ldr w3, [x0, #3180]
+     + add w3, w3, #0x1
+     + str w3, [x0, #3180]
+     + adrp x0, <cpu_steal_deques>
+     + add x0, x0, #0xe00
+     + add x0, x0, #0x8c0
+     + ldr w0, [x0, #64]
+     + cbz w0, L-1444
+     + ldr w0, [x2, #1348]
+     + cbz w0, L+244
+     + ldr w0, [x2, #1352]
+     + cmp w0, #0x4
+     + b.hi L+36
+     + add x3, x27, x27, lsl #1
+     + lsl x3, x3, #5
+     + add x0, x3, w0, uxtw
+     + ldr x3, [sp, #128]
+     + add x0, x3, x0, lsl #2
+     + ldr w3, [x0, #3124]
+     + add w3, w3, #0x1
+     + str w3, [x0, #3124]
+     + ldr x6, [x2, #1360]
+     + cmp x12, x6
+     + b.cc L-1508
+     + ldr x3, [sp, #128]
+     + sub x6, x12, x6
+     + mov x0, #0x0
+     + add x7, x3, #0xb08
+     + b L+16
+     + add x0, x0, #0x1
+     + cmp x0, #0x7
+     + b.eq L+16
+     + ldr x3, [x7, x0, lsl #3]
+     + cmp x6, x3
+     + b.cs L-20
+     + add x3, x27, x27, lsl #1
+     + lsl x3, x3, #5
+     + add x0, x3, w0, uxtw
+     + ldr x3, [sp, #128]
+     + add x0, x3, x0, lsl #2
+     + ldr w3, [x0, #3148]
+     + add w3, w3, #0x1
+     + str w3, [x0, #3148]
+     + b L-1588
+     + mov x0, x2
+     + ldr w1, [sp, #136]
+     + str x2, [sp, #96]
+     + bl <remove_from_cpu_queue_locked>
+     + ldr x2, [sp, #96]
+     + cbnz w0, L+168
+     + ldr x0, [sp, #104]
+     + ldr x1, [sp, #128]
+     + add x0, x0, x0, lsl #1
+     + add x1, x1, #0xb80
+     + add x0, x1, x0, lsl #7
+     + ldr w1, [x0, #60]
+     + add w1, w1, #0x1
+     + str w1, [x0, #60]
+     + ldr w0, [x28]
+     + cbnz w0, L-1140
+     + b L-560
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+     + mov w7, #0x58
+     + add x1, x1, #0xb80
+     + add x0, x1, x0, lsl #7
+     + ldr w1, [x0, #12]
+     + add w1, w1, #0x1
+     + str w1, [x0, #12]
+     + b L-732
+     + ldr x3, [sp, #128]
+     + add x0, x27, x27, lsl #1
+     + add x3, x3, #0xb80
+     + add x0, x3, x0, lsl #7
+     + ldr w3, [x0, #200]
+     + add w3, w3, #0x1
+     + str w3, [x0, #200]
+     + b L-1724
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+     + add x24, x1, #0xb80
+     + add x1, x24, x0, lsl #7
+     + ldr w2, [x1, #8]
+     + add w2, w2, #0x1
+     + str w2, [x1, #8]
+     + ldr w2, [x1, #96]
+     + cmp w2, #0xf
+     + b.ls L+304
+     + adrp x2, <vmm_state>
+     + add x26, x2, #0xc
+     + b L-2948
+     + ldr x21, [sp, #200]
+     + mov x26, x28
+     + mov x25, x2
+     + ldp x19, x4, [sp, #184]
+     + ldr w0, [x21, #12]
+     + ldr x27, [sp, #104]
+     + ldr x12, [sp, #144]
+     + ldr x22, [sp, #216]
+     + ldr w28, [sp, #156]
+     + cbz w0, L+404
+     + stlr wzr, [x23]
+     + sev
+     + msr daif, x15
+     + ldr x2, [sp, #128]
+     + add x1, x20, #0x240
+     + add x0, x27, x27, lsl #1
+     + add x1, x1, x27, lsl #6
+     + add x6, x2, #0xb80
+     + add x0, x6, x0, lsl #7
+     + ldr w6, [x1, #24]
+     + add w6, w6, #0x1
+     + str w6, [x1, #24]
+     + ldr w1, [x0, #4]
+     + add w1, w1, #0x1
+     + str w1, [x0, #4]
+     + ldr x1, [x0, #88]
+     + cbnz x1, L+8
+     + str x12, [x0, #88]
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+     + add x24, x1, #0xb80
+     + add x6, x24, x0, lsl #7
+     + ldr w1, [x6, #96]
+     + cmp w1, #0xf
+     + b.hi L+52
+     + ldr x8, [x6, #72]
+     + mov w7, w1
+     + mov w9, #0x53
+     + add x0, x7, x0, lsl #5
+     + add x7, x6, x7
+     + add w1, w1, #0x1
+     + add x0, x0, #0x10
+     + add x0, x24, x0, lsl #2
+     + sub w8, w12, w8
+     + str w8, [x0, #36]
+     + strb w9, [x7, #164]
+     + str w1, [x6, #96]
+     + add x0, x20, #0x680
+     + ldr w1, [x21, #12]
+     + add x23, x0, x22
+     + cbz w1, L+72
+   @U+1652 / P+3304
+     - bl <steal_deque_is_empty>
+     - mov w3, w0
+     - add x1, sp, #0xec
+     - mov x0, x25
+     - str w3, [sp, #104]
+     - bl <steal_deque_steal>
+     - ldr w3, [sp, #104]
+     - mov x2, x0
+     - cbz w3, L+508
+     - ldr w0, [x22]
+     - cbz w0, L+208
+     - stlr wzr, [x23]
+     - sev
+     - msr daif, x19
+     - cbz x2, L+204
+     - mrs x9, daif
+     - msr daifset, #0x2
+     - ldr w0, [x22]
+     - cbz w0, L+532
+     - mov w0, #0x1
+     - sevl
+     - wfe
+     - ldaxr w1, [x24]
+     - cbnz w1, L-8
+     - stxr w1, w0, [x24]
+     - cbnz w1, L-16
+     - ldr w1, [x2, #820]
+     - ldr w0, [sp, #236]
+     - cmp w1, w0
+     - b.eq L+508
+     - ldr w0, [x26, #44]
+     - add w0, w0, #0x1
+     - str w0, [x26, #44]
+     - ldr w0, [x22]
+     - cbz w0, L+516
+     - stlr wzr, [x24]
+     - sev
+     - msr daif, x9
+     - add x0, x21, #0xf90
+     - mov w2, #0x1
+     - ldr w1, [x0, x28, lsl #2]
+     - add w27, w27, #0x1
+     - str w2, [sp, #120]
+     - add w1, w1, w2
+     - str w1, [x0, x28, lsl #2]
+     - ldr w0, [sp, #128]
+     - cmp w27, w0
+     - b.eq L+676
+     - ldr x1, [sp, #112]
+     - add x0, x20, #0x340
+     - str wzr, [sp, #236]
+     - ldr w0, [x0, x1, lsl #2]
+     - cbz w0, L+16
+     - ldr w0, [x26, #36]
+     - add w0, w0, #0x1
+     - str w0, [x26, #36]
+     - mrs x19, daif
+     - msr daifset, #0x2
+     - ldr w0, [x22]
+     - cbnz w0, L-268
+     - dmb ish
+     - b L-248
+     - dmb ish
+     - msr daif, x19
+     - cbnz x2, L-196
+     - mov x0, x22
+     - ldr w9, [sp, #120]
+     - mov x22, x28
+     - mov w28, w27
+     - mov x27, x0
+     - ldp w1, w19, [sp, #152]
+     - cbnz w9, L+56
+     - add x2, x21, #0xfb0
+     - add x5, x21, #0x2c0
+     - ldr w0, [sp, #164]
+     - ldr w3, [x2, x22, lsl #2]
+     - add w0, w0, #0x1
+     - str w0, [sp, #164]
+     - add x0, x22, x22, lsl #1
+     - add w3, w3, #0x1
+     - add x0, x5, x0, lsl #7
+     - str w3, [x2, x22, lsl #2]
+     - ldr w2, [x0, #40]
+     - add w2, w2, #0x1
+     - str w2, [x0, #40]
+     - adrp x0, <g_cp_store>
+     - add w19, w19, #0x1
+     - ldr w3, [x0, #2112]
+     - cmp w3, w19
+     - b.hi L-508
+     - mov x0, x27
+     - mov w27, w28
+     - ldr x14, [sp, #144]
+     - ldp x19, x24, [sp, #184]
+     - mov x26, x22
+     - mov x28, x0
+     - ldr x22, [sp, #200]
+     - ldp w18, w13, [sp, #208]
+     - cbnz w27, L+784
+     - ldr w0, [sp, #160]
+     - cbz w0, L+1256
+     - cmp w13, #0xb
+     - b.eq L+32
+     - add x0, x26, x26, lsl #1
+     - lsl x0, x0, #5
+     - add x0, x0, w13, uxtw
+     - add x0, x21, x0, lsl #2
+     - ldr w1, [x0, #984]
+     - add w1, w1, #0x1
+     - str w1, [x0, #984]
+     - add x0, x26, x26, lsl #1
+     - add x1, x21, #0x2c0
+     - mov w7, #0x50
+     - add x0, x1, x0, lsl #7
+     - ldr w1, [x0, #16]
+     - add w1, w1, #0x1
+     - str w1, [x0, #16]
+     - add x4, x26, x26, lsl #1
+     - add x6, x21, #0x2c0
+     - add x3, x6, x4, lsl #7
+     - ldr w0, [x3, #96]
+     - cmp w0, #0xf
+     - b.hi L-2020
+     - ldr x8, [x3, #72]
+     - mov w5, w0
+     - add w1, w0, #0x1
+     - add x0, x5, x4, lsl #5
+     - add x5, x3, x5
+     - add x0, x0, #0x10
+     - add x0, x6, x0, lsl #2
+     - sub w14, w14, w8
+     - str w14, [x0, #36]
+     - strb w7, [x5, #164]
+     - str w1, [x3, #96]
+     - b L-2068
+     - mov x0, x25
+     - str x2, [sp, #104]
+     - bl <steal_deque_is_empty>
+     - ldr x2, [sp, #104]
+     - cbz w0, L-520
+     - add x0, x20, #0xfc0
+     - ldr x1, [sp, #112]
+     - add x0, x0, x1, lsl #6
+     - ldr w1, [x0, #4]
+     - add w1, w1, #0x1
+     - str w1, [x0, #4]
+     - ldr x1, [sp, #144]
+     - str x1, [x0, #16]
+     - ldr w1, [sp, #140]
+     - str w1, [x0, #8]
+     - b L-564
+     - dmb ish
+     - ldr w1, [x2, #820]
+     - ldr w0, [sp, #236]
+     - cmp w1, w0
+     - b.ne L-500
+     - ldr w0, [x2, #20]
+     - cbz w0, L+36
+     - ldr w0, [x26, #48]
+     - add w0, w0, #0x1
+     - str w0, [x26, #48]
+     - ldr w0, [x22]
+     - cbnz w0, L-508
+     - dmb ish
+     - msr daif, x9
+     - b L-508
+     - ldr w0, [x2, #708]
+     - ldr w1, [sp, #132]
+     - cmp w1, w0
+     - b.eq L+116
+     - ldr w0, [x26, #52]
+     - add w0, w0, #0x1
+     - str w0, [x26, #52]
+     - ldr w0, [x22]
+     - cbnz w0, L-556
+     - b L-48
+     - ldr w2, [x26, #28]
+     - mov x0, x25
+     - str w1, [sp, #104]
+     - add w2, w2, #0x1
+     - str w2, [x26, #28]
+     - bl <steal_deque_is_empty>
+     - ldr w1, [sp, #104]
+     - cbnz w0, L+24
+     - ldp x2, x0, [sp, #168]
+     - add x2, x2, x0, lsl #7
+     - ldr w0, [x2, #32]
+     - add w0, w0, #0x1
+     - str w0, [x2, #32]
+     - ldr w0, [sp, #160]
+     - add w19, w19, #0x1
+     - add w0, w0, #0x1
+     - str w0, [sp, #160]
+     - adrp x0, <g_cp_store>
+     - ldr w3, [x0, #2112]
+     - cmp w3, w19
+     - b.hi L-936
+     - b L-428
+     - ldr w0, [x2, #704]
+     - cmn w0, #0x1
+     - b.eq L+316
+     - add x0, x28, x28, lsl #1
+     - add x1, x21, #0x2c0
+     - add x0, x1, x0, lsl #7
+     - ldr w1, [x0, #56]
+     - add w1, w1, #0x1
+     - str w1, [x0, #56]
+     - ldr w0, [x22]
+     - cbnz w0, L-692
+     - b L-184
+     - bl <vmm_boot_l1_pa>
+     - mov w1, #0x0
+     - bl <vmm_user_addrspace_switch>
+     - b L-1888
+     - str xzr, [x24, #8]
+     - b L-1768
+     - mov x0, x22
+     - ldp w1, w19, [sp, #152]
+     - mov x22, x28
+     - mov w28, w27
+     - mov x27, x0
+     - b L-544
+     - ldr x6, [x2, #1368]
+     - sub x0, x6, #0x1
+     - cmp x14, x0
+     - b.ls L+76
+     - sub x6, x14, x6
+     - mov x0, #0x0
+     - add x7, x21, #0x218
+     - b L+16
+     - add x0, x0, #0x1
+     - cmp x0, #0xa
+     - b.eq L+16
+     - ldr x4, [x7, x0, lsl #3]
+     - cmp x6, x4
+     - b.cs L-20
+     - mov w13, w0
+     - add x0, x26, x26, lsl #1
+     - lsl x0, x0, #5
+     - add x0, x0, w13, uxtw
+     - add x0, x21, x0, lsl #2
+     - ldr w5, [x0, #940]
+     - add w5, w5, #0x1
+     - str w5, [x0, #940]
+     - ldr w0, [x21, #3924]
+     - cbz w0, L-1344
+     - ldr w0, [x2, #1348]
+     - cbz w0, L+220
+     - ldr w0, [x2, #1352]
+     - cmp w0, #0x4
+     - b.hi L+32
+     - add x5, x26, x26, lsl #1
+     - lsl x5, x5, #5
+     - add x0, x5, w0, uxtw
+     - add x0, x21, x0, lsl #2
+     - ldr w5, [x0, #884]
+     - add w5, w5, #0x1
+     - str w5, [x0, #884]
+     - ldr x6, [x2, #1360]
+     - cmp x14, x6
+     - b.cc L-1404
+     - sub x6, x14, x6
+     - mov x0, #0x0
+     - add x7, x21, #0x268
+     - b L+16
+     - add x0, x0, #0x1
+     - cmp x0, #0x7
+     - b.eq L+16
+     - ldr x4, [x7, x0, lsl #3]
+     - cmp x6, x4
+     - b.cs L-20
+     - add x5, x26, x26, lsl #1
+     - lsl x5, x5, #5
+     - add x0, x5, w0, uxtw
+     - add x0, x21, x0, lsl #2
+     - ldr w5, [x0, #908]
+     - add w5, w5, #0x1
+     - str w5, [x0, #908]
+     - b L-1476
+     - mov x0, x2
+     - ldr w1, [sp, #132]
+     - str x2, [sp, #104]
+     - bl <remove_from_cpu_queue_locked>
+     - ldr x2, [sp, #104]
+     - cbnz w0, L+148
+     - add x0, x28, x28, lsl #1
+     - add x1, x21, #0x2c0
+     - add x0, x1, x0, lsl #7
+     - ldr w1, [x0, #60]
+     - add w1, w1, #0x1
+     - str w1, [x0, #60]
+     - ldr w0, [x22]
+     - cbnz w0, L-1028
+     - b L-520
+     - add x0, x26, x26, lsl #1
+     - add x1, x21, #0x2c0
+     - mov w7, #0x58
+     - add x0, x1, x0, lsl #7
+     - ldr w1, [x0, #12]
+     - add w1, w1, #0x1
+     - str w1, [x0, #12]
+     - b L-736
+     - add x0, x26, x26, lsl #1
+     - add x5, x21, #0x2c0
+     - add x0, x5, x0, lsl #7
+     - ldr w5, [x0, #200]
+     - add w5, w5, #0x1
+     - str w5, [x0, #200]
+     - b L-1596
+     - add x4, x26, x26, lsl #1
+     - add x6, x21, #0x2c0
+     - add x1, x6, x4, lsl #7
+     - ldr w0, [x1, #8]
+     - add w0, w0, #0x1
+     - str w0, [x1, #8]
+     - ldr w2, [x1, #96]
+     - cmp w2, #0xf
+     - b.ls L+296
+     - adrp x2, <vmm_state>
+     - add x28, x2, #0xc
+     - b L-2812
+     - mov x26, x28
+     - mov x28, x22
+     - ldr x22, [sp, #200]
+     - mov x10, x24
+     - ldp x19, x24, [sp, #184]
+     - mov x25, x2
+     - ldr w0, [x22, #12]
+     - ldr x14, [sp, #144]
+     - ldr x12, [sp, #216]
+     - ldr w1, [sp, #152]
+     - ldr w18, [sp, #208]
+     - cbz w0, L+380
+     - stlr wzr, [x10]
+     - sev
+     - msr daif, x9
+     - add x5, x21, #0xf70
+     - add x0, x26, x26, lsl #1
+     - add x7, x21, #0x2c0
+     - ldr w6, [x5, x26, lsl #2]
+     - add x0, x7, x0, lsl #7
+     - add w6, w6, #0x1
+     - str w6, [x5, x26, lsl #2]
+     - ldr w5, [x0, #4]
+     - add w5, w5, #0x1
+     - str w5, [x0, #4]
+     - ldr x5, [x0, #88]
+     - cbnz x5, L+8
+     - str x14, [x0, #88]
+     - add x4, x26, x26, lsl #1
+     - add x8, x21, #0x2c0
+     - add x6, x8, x4, lsl #7
+     - ldr w5, [x6, #96]
+     - cmp w5, #0xf
+     - b.hi L+52
+     - ldr x9, [x6, #72]
+     - mov w7, w5
+     - mov w10, #0x53
+     - add x0, x7, x4, lsl #5
+     - add x7, x6, x7
+     - add w5, w5, #0x1
+     - add x0, x0, #0x10
+     - add x0, x8, x0, lsl #2
+     - sub w4, w14, w9
+     - str w4, [x0, #36]
+     - strb w10, [x7, #164]
+     - str w5, [x6, #96]
+     - add x0, x20, #0x300
+     - ldr w4, [x22, #12]
+     - add x23, x0, x12, lsl #2
+     - cbz w4, L+68
+     - mov w0, #0x1
+     - sevl
+     - wfe
+     - ldaxr w4, [x23]
+     - cbnz w4, L-8
+     - stxr w4, w0, [x23]
+     - cbnz w4, L-16
+     - mov x0, x25
+     - str w18, [sp, #104]
+     + mov w1, w28
+     + str x4, [sp, #96]
+   @U+3176 / P+3316
+     - ldr w0, [x22, #12]
+     - ldr w18, [sp, #104]
+     + ldr w0, [x21, #12]
+     + ldr x4, [sp, #96]
+   @U+3196 / P+3336
+     - b L-3076
+     + b L-3220
+   @U+3204 / P+3344
+     - b L-40
+     + b L-44
+   @U+3212 / P+3352
+     - b L-3092
+     - ldr x5, [x1, #72]
+     + b L-3236
+     + ldr x7, [x1, #72]
+   @U+3224 / P+3364
+     - mov w7, #0x49
+     - add x0, x3, x4, lsl #5
+     - add x4, x1, x3
+     + mov w8, #0x49
+     + add x0, x3, x0, lsl #5
+     + add x6, x1, x3
+   @U+3248 / P+3388
+     - add x28, x2, #0xc
+     - add x0, x6, x0, lsl #2
+     - sub w5, w14, w5
+     - str w5, [x0, #36]
+     - strb w7, [x4, #164]
+     + add x26, x2, #0xc
+     + add x0, x24, x0, lsl #2
+     + sub w7, w12, w7
+     + str w7, [x0, #36]
+     + strb w8, [x6, #164]
+   @U+3272 / P+3412
+     - b L-3152
+     - add x0, x26, x26, lsl #1
+     - add x1, x21, #0x2c0
+     + b L-3296
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+   @U+3288 / P+3428
+     + add x1, x1, #0xb80
+   @U+3304 / P+3448
+     - b L-1184
+     - ldr w0, [sp, #136]
+     - ldr w1, [sp, #164]
+     + b L-1200
+     + ldr w0, [sp, #140]
+     + ldr w1, [sp, #208]
+   @U+3324 / P+3468
+     - b.ne L-48
+     - add x0, x26, x26, lsl #1
+     - add x1, x21, #0x2c0
+     + b.ne L-52
+     + ldr x1, [sp, #128]
+     + add x0, x27, x27, lsl #1
+   @U+3340 / P+3484
+     + add x1, x1, #0xb80
+   @U+3356 / P+3504
+     - b L-1236
+     + b L-1256
+   @U+3364 / P+3512
+     - msr daif, x9
+     - b L-372
+     + msr daif, x15
+     + b L-396
+   @U+3376 / P+3524
+     - ldr w1, [x25]
+     - add x7, x26, #0x4
+     - add x0, x0, #0x370
+     - add x2, x25, #0x4
+     - ldr w6, [x26]
+     + ldr w1, [x23]
+     + add x7, x24, #0x4
+     + add x0, x0, #0x9a8
+     + add x2, x23, #0x4
+     + ldr w6, [x24]
+   @U+3404 / P+3552
+     - add x0, x0, #0x400
+     + add x0, x0, #0xa38
+   @U+3412 / P+3560
+     - mov x0, x27
+     + mov x0, x25
+   @U+3428 / P+3576
+     - ldr w3, [x25, #20]
+     - mov w1, w18
+     - add x2, x25, #0x4
+     - add x0, x0, #0x318
+     + ldr w3, [x23, #20]
+     + mov w1, w28
+     + add x2, x23, #0x4
+     + add x0, x0, #0x950
+== idle_task_func: U 55 instructions, P 58; differing after level 1 (branch targets, adrp pages): 20; after level 2 (also load/store/add immediates): 16
+   @U+32 / P+32
+     - adrp x22, <task_table_fallback>
+     - add x21, x21, #0xb00
+     - add x22, x22, #0xa00
+     - add x21, x21, #0xfd0
+     - add x22, x22, #0x260
+   @U+56 / P+36
+     + add x21, x21, #0xc00
+     + add x22, x21, #0x240
+     + add x21, x21, #0x440
+   @U+60 / P+52
+     + nop
+     + nop
+     + nop
+   @U+72 / P+76
+     - csel w2, w0, wzr, ge
+     - ldr w1, [x21, x2, lsl #2]
+     + csel w1, w0, wzr, ge
+     + add x1, x22, x1, lsl #6
+   @U+84 / P+88
+     - add w1, w1, #0x1
+     - str w1, [x21, x2, lsl #2]
+     + ldr w2, [x1, #16]
+     + add w2, w2, #0x1
+     + str w2, [x1, #16]
+   @U+100 / P+108
+     - add x0, x22, w0, sxtw #3
+     + sbfiz x0, x0, #6, #32
+     + add x0, x21, x0
+   @U+128 / P+140
+     - b L-68
+     + b L-76
+   @U+216 / P+228
+     - b L-156
+     + b L-164
+== task_current: U 17 instructions, P 18; differing after level 1 (branch targets, adrp pages): 5; after level 2 (also load/store/add immediates): 3
+   @U+28 / P+28
+     - b.gt L+28
+     + b.gt L+32
+   @U+36 / P+36
+     + ubfiz x1, x1, #6, #32
+   @U+40 / P+44
+     - add x0, x0, #0x170
+     - add x0, x0, #0x8
+     - ldr x0, [x0, w1, uxtw #3]
+     + add x0, x0, #0x180
+     + add x0, x0, #0x40
+     + ldr x0, [x0, x1]
+== task_set_current: U 15 instructions, P 15; differing after level 1 (branch targets, adrp pages): 4; after level 2 (also load/store/add immediates): 3
+   @U+32 / P+32
+     - add x1, x1, #0x170
+     - add x2, x1, #0x8
+     + add x2, x1, #0x180
+   @U+44 / P+40
+     - str x19, [x2, x1, lsl #3]
+     + add x1, x2, x1, lsl #6
+     + str x19, [x1, #64]
+== smp_notify_cpu: U 25 instructions, P 25; differing after level 1 (branch targets, adrp pages): 1; after level 2 (also load/store/add immediates): 0
+   @U+56 / P+56
+     - ldr w1, [x1, #2112]
+     + ldr w1, [x1, #1472]
+== yield: U 1 instructions, P 1; differing after level 1 (branch targets, adrp pages): 0; after level 2 (also load/store/add immediates): 0
+== add_to_cpu_queue_locked: U 52 instructions, P 52; differing after level 1 (branch targets, adrp pages): 1; after level 2 (also load/store/add immediates): 0
+   @U+36 / P+36
+     - add x5, x5, #0xa00
+     + add x5, x5, #0xc00
+== remove_from_cpu_queue_locked: U 35 instructions, P 35; differing after level 1 (branch targets, adrp pages): 1; after level 2 (also load/store/add immediates): 0
+   @U+8 / P+8
+     - add x4, x4, #0xa00
+     + add x4, x4, #0xc00

@@ -62,3 +62,115 @@
    bin: sha256=e08cf339720e002f14b3ac6b53005112e0f1c227ad529791d6678d3251f7e8e6 bytes=8954520
    sections: .text=2301816 .rodata=6500362 .data=148048 .bss=36235184 
    built: 2026-11-15T05:55:19Z
+== jet-pdm-P
+   worktree=a head=d70f93f0 tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115134211 (d70f93f0)
+   elf: sha256=9a8e6d6b30d7e724f8b16a547c6c2324d3747401ae160f758811aeff680e5b8a bytes=12195608
+   bin: sha256=841deafb1b9005302bff6e2331102d998d7aa0bd0d86bdea2bc091b4b2d31c4d bytes=10109952
+   sections: .text=2544184 .rodata=7366818 .data=148480 .bss=37447408 
+   built: 2026-11-15T13:43:31Z
+== jet-pdm-U
+   worktree=a-base head=ae1399ba tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115134209 (ae1399ba)
+   elf: sha256=a59d3f2428419c3f7227efc672a622b08a9d2e1e660823aceb77dc12bdca9b3d bytes=12195088
+   bin: sha256=989be13f59e93b92e29c2946a3a646c88f9ca5f7fdf7a77aff160e19c6a7235d bytes=10109952
+   sections: .text=2541752 .rodata=7365538 .data=148480 .bss=37447408 
+   built: 2026-11-15T13:43:31Z
+== pi5-pdm-U
+   worktree=a-base head=ae1399ba tracked-modified-files=0
+   make kernel-test PLATFORM=RASPI5 TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115134503 (ae1399ba)
+   elf: sha256=a6072ae85c09c64ab8abb8e47e47c3ae78b8849bcd431a847f3f7f94d624b8d2 bytes=11007224
+   bin: sha256=fa456975beb9abada2d2b83f61de0e1dbc697215a66b72b1ecd9a42fb34db53d bytes=8954520
+   sections: .text=2299800 .rodata=6499066 .data=148048 .bss=36235184 
+   built: 2026-11-15T13:46:17Z
+== pi5-pdm-P
+   worktree=a head=d70f93f0 tracked-modified-files=0
+   make kernel-test PLATFORM=RASPI5 TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115134505 (d70f93f0)
+   elf: sha256=fd90df05ede7a3eb65029f55781e823a34436ba940074acdb2eea21ce4da3301 bytes=11011840
+   bin: sha256=6e571b7d0a9ecb83b4ebe6514185002807cb380a7eedb1a421ad6acefca9d2eb bytes=8958616
+   sections: .text=2302072 .rodata=6500474 .data=148048 .bss=36235184 
+   built: 2026-11-15T13:46:17Z
+== jet-pdmdiag-U
+   worktree=a-base head=6439476f tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115135007 (6439476f)
+   elf: sha256=9a233969d09aa0d0a7f4f12f65a3a1b76aa16ea15e8a1684b08b14aec48d93b8 bytes=12195120
+   bin: sha256=86384001fae86aa6ddb78deeaab1fdedd527e5bc66bde3b5c2b828acc4160488 bytes=10109952
+   sections: .text=2542168 .rodata=7365538 .data=148480 .bss=37451504 
+   built: 2026-11-15T13:51:27Z
+== jet-pdmdiag-P
+   worktree=a head=6247f73a tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115135009 (6247f73a)
+   elf: sha256=55c0a21bb8fc251c2a5dda2aa391483f8f3fce437aade4243a06ab1f6cd5f923 bytes=12195640
+   bin: sha256=5ee385dd2aab3273fbc0313672d7b98a2b10d75612ebcc95d82d40f9535ead1a bytes=10109952
+   sections: .text=2544536 .rodata=7366818 .data=148480 .bss=37451504 
+   built: 2026-11-15T13:51:28Z
+== pi5-pdmdiag-U
+   worktree=a-base head=6439476f tracked-modified-files=0
+   make kernel-test PLATFORM=RASPI5 TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115135128 (6439476f)
+   elf: sha256=6b79686e1d84dbe69ad82b2929bba980f25c439434cc75c2f438547dea11cf9d bytes=11007264
+   bin: sha256=c4582078ed1a14f8cc54a1d2505acd5579fefa5aba34b7053fa30bd3ba84673c bytes=8954520
+   sections: .text=2300216 .rodata=6499130 .data=148048 .bss=36239280 
+   built: 2026-11-15T13:52:42Z
+== pi5-pdmdiag-P
+   worktree=a head=6247f73a tracked-modified-files=0
+   make kernel-test PLATFORM=RASPI5 TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115135130 (6247f73a)
+   elf: sha256=699d30f2337d9a046ab3ad88fca585938aafddf51558034085fa84db9b658c0a bytes=11011880
+   bin: sha256=bf514b5a3428e103b6db16aa6e3d150d9a1a7bd4b71f59f63481e105b41f1b39 bytes=8958616
+   sections: .text=2302424 .rodata=6500538 .data=148048 .bss=36239280 
+   built: 2026-11-15T13:52:42Z
+== jet-pdmnew-5c4bcdda
+   worktree=a head=5c4bcdda tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115140001 (5c4bcdda)
+   elf: sha256=0ff48a76a0c4aeb9da3fe727303aa533f273f8a725cf92f90103ffc20bd8842d bytes=12195608
+   bin: sha256=3fcf28ca110c94715f51cb2bcdefd4d5b5d5ce8746d21a8abada2f812e62a7fe bytes=10109952
+   sections: .text=2544152 .rodata=7366818 .data=148480 .bss=37447408 
+   built: 2026-11-15T14:01:18Z
+== jet-suite-5c4bcdda
+   worktree=a head=5c4bcdda tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO
+   banner:   SLM-OS v0.4.0 build 20261115140121 (5c4bcdda)
+   elf: sha256=28edfc66afc14b572c6b0f038a9c0fcae50fa6542e647982777dc708b525aa56 bytes=12195464
+   bin: sha256=337b9794374d3cd4d175f5f1580a6484c0e0b59e1f6333e4e2007c642aa849ec bytes=10109952
+   sections: .text=2543896 .rodata=7366818 .data=148480 .bss=37447408 
+   built: 2026-11-15T14:02:37Z
+== pi5-pdmnew-5c4bcdda
+   worktree=a head=5c4bcdda tracked-modified-files=0
+   make kernel-test PLATFORM=RASPI5 TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115140240 (5c4bcdda)
+   elf: sha256=13db46d67828720d54d97cb1d6fdc4e41161136cbb6418968821b37c69f0b23e bytes=11011840
+   bin: sha256=2c1514735f25120dd0b60745555a0ff504dff2c6cfc5888e686bce586d65a64e bytes=8958616
+   sections: .text=2302040 .rodata=6500458 .data=148048 .bss=36235184 
+   built: 2026-11-15T14:03:49Z
+== jet-pdmnew-d09b063b
+   worktree=a head=d09b063b tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115141549 (d09b063b)
+   elf: sha256=09c05fea21de9c6b93eae3d7340e4f774c3ec0231535b4732f117f47ecfb350b bytes=12195792
+   bin: sha256=4070c7e0c859372f3f5eeace29d1ccce07100b92186c30c2b9bcd29b23d7ad21 bytes=10109952
+   sections: .text=2543992 .rodata=7367074 .data=148480 .bss=37447408 
+   built: 2026-11-15T14:17:05Z
+== jet-suite-d09b063b
+   worktree=a head=d09b063b tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO
+   banner:   SLM-OS v0.4.0 build 20261115141708 (d09b063b)
+   elf: sha256=c228710f6bf2aa333561b928209b7020575d51f43555b2d85cbff8a9ffce336d bytes=12195656
+   bin: sha256=5167c08c6009864c5d7fb2cd0378f633043610785cf600ef11f541233732ff59 bytes=10109952
+   sections: .text=2543736 .rodata=7366818 .data=148480 .bss=37447408 
+   built: 2026-11-15T14:18:25Z
+== pi5-pdmnew-d09b063b
+   worktree=a head=d09b063b tracked-modified-files=0
+   make kernel-test PLATFORM=RASPI5 TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261115141827 (d09b063b)
+   elf: sha256=edcaa391a3b36320927070bd98cb9594a74bb0410f27c6d11d0ef11168f63e90 bytes=11012032
+   bin: sha256=503b12695a1c32c003c82b3f3b4d6936c5200fc913364f7fe1c479fcd5034a19 bytes=8958616
+   sections: .text=2301880 .rodata=6500586 .data=148048 .bss=36235184 
+   built: 2026-11-15T14:19:37Z

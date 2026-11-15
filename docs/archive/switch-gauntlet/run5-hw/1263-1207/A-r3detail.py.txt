@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""r3detail.py <unpadded R3 evidence file>...
+Per file and in total, from the serial body (header lines '#' excluded):
+  prelude report lines (printed when a prelude OR an rq-lock wait exceeded 1 ms on any CPU),
+  report lines in which at least one CPU counts a prelude over 1 ms (the strict count),
+  lockwait lines: number, min/max us, how many began with lock word != 0,
+    how many have under 100 and under 10 failed try-locks (with their us range),
+  slow finishes, and slow finishes with no prelude report between the slow-10ms dump
+    and the next [ITER] line."""
+import re, sys
+
+tot = dict(rep=0, strict=0, lw=0, lw_w1=0, lw100=0, lw10=0, slow=0, slow_noprel=0)
+allus, us100 = [], []
+for f in sys.argv[1:]:
+    lines = [l.rstrip('\r\n') for l in open(f, encoding='utf-8', errors='replace') if not l.startswith('#')]
+    rep = strict = 0
+    lws = []
+    for i, l in enumerate(lines):
+        if 'swo-diag prelude' in l:
+            rep += 1
+            # cpuN a/b(c)/d/e : e = preludes over 1 ms on that CPU
+            es = [int(x) for x in re.findall(r'cpu\d+ \d+/\d+\(\d+\)/\d+/(\d+)', l)]
+            if any(e > 0 for e in es):
+                strict += 1
+        m = re.search(r'swo-diag lockwait cpu(\d+): (\d+) us, (\d+) failed try-locks, lock word at start (\d+)', l)
+        if m:
+            lws.append((int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(1)), i))
+    # slow finishes and whether a prelude report follows before the next [ITER]
+    slow = noprel = 0
+    i = 0
+    while i < len(lines):
+        if 'swo-diag: slow finish' in lines[i]:
+            slow += 1
+            j = i + 1
+            found = False
+            while j < len(lines) and '[ITER ' not in lines[j]:
+                if 'swo-diag prelude' in lines[j]:
+                    found = True
+                j += 1
+            if not found:
+                noprel += 1
+        i += 1
+    u100 = [x for x in lws if x[1] < 100]
+    u10 = [x for x in lws if x[1] < 10]
+    w1 = [x for x in lws if x[2] != 0]
+    name = f.split('/')[-1]
+    print('%s | prelude report lines %d | with a prelude over 1 ms on some CPU %d | lockwait lines %d (us min %s max %s) | began with lock word != 0: %d %s | under 100 failed try-locks: %d | under 10: %d %s | slow finishes %d | slow finishes with no prelude report: %d'
+          % (name, rep, strict, len(lws), min(x[0] for x in lws) if lws else '-', max(x[0] for x in lws) if lws else '-',
+             len(w1), ['cpu%d %d us %d try-locks' % (x[3], x[0], x[1]) for x in w1],
+             len(u100), len(u10), ['%d us/%d' % (x[0], x[1]) for x in u10], slow, noprel))
+    tot['rep'] += rep; tot['strict'] += strict; tot['lw'] += len(lws); tot['lw_w1'] += len(w1)
+    tot['lw100'] += len(u100); tot['lw10'] += len(u10); tot['slow'] += slow; tot['slow_noprel'] += noprel
+    allus += [x[0] for x in lws]; us100 += [x[0] for x in u100]
+print('TOTAL | prelude report lines %(rep)d | strict %(strict)d | lockwait lines %(lw)d | began with lock word != 0: %(lw_w1)d | under 100 failed try-locks: %(lw100)d | under 10: %(lw10)d | slow finishes %(slow)d | with no prelude report: %(slow_noprel)d' % tot)
+if allus:
+    print('lockwait us over all files: min %d max %d; waits with under 100 failed try-locks: min %d max %d' % (min(allus), max(allus), min(us100) if us100 else 0, max(us100) if us100 else 0))

@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""fndiff.py <U.elf> <P.elf> <function>...
+Compares the disassembly of each function between two images after
+normalising what placement changes: absolute addresses, branch targets
+(rewritten as function-relative offsets), adrp/add/ldr/str page offsets of
+symbols, and symbol+offset annotations. Prints, per function, the number of
+instructions on each side, the number of differing lines after
+normalisation, and the differing hunks (unified diff)."""
+import subprocess, sys, re, difflib
+
+OD = 'aarch64-none-elf-objdump'
+
+
+def disasm(elf, fn):
+    out = subprocess.run([OD, '-d', '--no-show-raw-insn', '--disassemble=' + fn, elf],
+                         capture_output=True, text=True).stdout
+    lines = []
+    base = None
+    for l in out.splitlines():
+        m = re.match(r'^\s*([0-9a-f]+):\s+(.*)$', l)
+        if not m:
+            continue
+        addr = int(m.group(1), 16)
+        if base is None:
+            base = addr
+        ins = m.group(2).split('//')[0].strip()
+        ins = re.sub(r'\s+', ' ', ins)
+        # branch / call targets: "<sym+0x..>" -> keep symbol name, local targets as relative offsets
+        def tgt(mm):
+            a = int(mm.group(1), 16)
+            sym = mm.group(2)
+            name = re.sub(r'\+0x[0-9a-f]+$', '', sym)
+            if name == fn:
+                return 'L%+d' % (a - addr)
+            return '<' + name + '>'
+        ins = re.sub(r'\b([0-9a-f]{4,}) <([^>]+)>', tgt, ins)
+        lines.append(ins)
+    return lines
+
+
+def norm(ins):
+    # immediates that are pure placement: adrp targets and :lo12: style page offsets
+    ins = re.sub(r'(adrp [xw]\d+), .*', r'\1, PAGE', ins)
+    return ins
+
+
+def norm2(ins):
+    # second level: also mask every displacement / immediate of loads, stores and add/sub
+    # (the :lo12: part of a symbol address, and offsets into moved objects)
+    if re.match(r'^(ldr|ldrb|ldrh|ldrsw|ldur|str|strb|strh|stur|ldp|stp|add|sub|ldar|stlr)\b', ins):
+        ins = re.sub(r'#-?(0x[0-9a-f]+|\d+)', '#IMM', ins)
+    return ins
+
+
+u, p = sys.argv[1], sys.argv[2]
+for fn in sys.argv[3:]:
+    a, b = disasm(u, fn), disasm(p, fn)
+    na, nb = [norm(x) for x in a], [norm(x) for x in b]
+    sm = difflib.SequenceMatcher(None, na, nb, autojunk=False)
+    changed = sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != 'equal')
+    ma, mb = [norm2(x) for x in na], [norm2(x) for x in nb]
+    sm2 = difflib.SequenceMatcher(None, ma, mb, autojunk=False)
+    changed2 = sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in sm2.get_opcodes() if tag != 'equal')
+    print('== %s: U %d instructions, P %d; differing after level 1 (branch targets, adrp pages): %d; after level 2 (also load/store/add immediates): %d' % (fn, len(a), len(b), changed, changed2))
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            continue
+        print('   @U+%d / P+%d' % (i1 * 4, j1 * 4))
+        for x in a[i1:i2]:
+            print('     - ' + x)
+        for x in b[j1:j2]:
+            print('     + ' + x)

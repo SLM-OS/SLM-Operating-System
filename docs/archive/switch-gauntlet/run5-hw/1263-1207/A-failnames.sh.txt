@@ -1,0 +1,12 @@
+#!/bin/bash
+# failnames.sh <reference suite file> <suite file>... : compare the set of [FAIL] test
+# names of each file with the reference file's set.
+names() { grep -a -v '^#' "$1" | grep -a '^  \[FAIL\]' | tr -d '\r' | sed 's/^  \[FAIL\] //' | sort -u; }
+ref=$1; shift
+names "$ref" > /tmp/claude-1000/failnames.ref.$$
+echo "reference $(basename $ref): $(wc -l < /tmp/claude-1000/failnames.ref.$$) names, $(grep -c blob /tmp/claude-1000/failnames.ref.$$) with 'blob' in the name"
+for f in "$@"; do
+  names "$f" > /tmp/claude-1000/failnames.cur.$$
+  echo "$(basename $f): $(wc -l < /tmp/claude-1000/failnames.cur.$$) names; not in reference: [$(comm -13 /tmp/claude-1000/failnames.ref.$$ /tmp/claude-1000/failnames.cur.$$ | tr '\n' ' ')] reference-only: [$(comm -23 /tmp/claude-1000/failnames.ref.$$ /tmp/claude-1000/failnames.cur.$$ | tr '\n' ' ')]"
+done
+rm -f /tmp/claude-1000/failnames.*.$$

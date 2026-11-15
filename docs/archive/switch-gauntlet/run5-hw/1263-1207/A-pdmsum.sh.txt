@@ -1,0 +1,26 @@
+#!/bin/bash
+# pdmsum.sh <evidence file>... : test_preempt_flag_follows_migrated_task xN per boot.
+# From the per-iteration line "pdm: [migrations=M ]moved=V runs=A/B bad=X" and,
+# in diag images, "pdm-diag: steals=N a=[..] b=[..]":
+#   iterations, [ITER] PASS / FAIL, the [FILTER] summary,
+#   distribution of moved; iterations with moved=0, moved<5 (the loop ran its
+#   full 1 s without 5 observed moves), bad != 0;
+#   distribution of the larger of the two runs counts, in bands;
+#   steals: total over the boot, iterations with steals=0;
+#   per worker, wake-ups per CPU summed over the boot.
+# Header lines ('#') are excluded.
+for f in "$@"; do
+  body=$(grep -a -v '^#' "$f" | tr -d '\r\000')
+  pdm=$(echo "$body" | grep -a 'pdm: .*moved=')
+  diag=$(echo "$body" | grep -a 'pdm-diag: ')
+  n=$(echo "$pdm" | grep -c 'moved=')
+  echo "$(basename "$f") | $(echo "$body" | grep -a -m1 -oE 'build [0-9]{14} \([0-9a-f-]+\)') | $(echo "$body" | grep -a -m1 -o 'Boot source: [a-zA-Z ]*')"
+  echo "   pdm lines $n | [ITER] PASS $(echo "$body" | grep -a -c '\[ITER [0-9]*/[0-9]*\]  \[PASS\]') | [ITER] FAIL $(echo "$body" | grep -a -c '\[ITER [0-9]*/[0-9]*\]  \[FAIL\]') | $(echo "$body" | grep -a '^\[FILTER\] \[' | head -1)"
+  echo "   moved=0: $(echo "$pdm" | grep -c 'moved=0 ') | moved<5: $(echo "$pdm" | grep -c -E 'moved=[0-4] ') | bad!=0: $(echo "$pdm" | grep 'moved=' | grep -c -v 'bad=0 ') | halts: $(echo "$body" | grep -a -c -E 'System halted|PAGE FAULT|KERNEL PANIC')"
+  echo "   moved distribution: $(echo "$pdm" | grep -o 'moved=[0-9]*' | sort -t= -k2 -n | uniq -c | awk '{printf "%s x %s; ", $1, $2}')"
+  echo "   runs (larger of a/b) bands: $(echo "$pdm" | grep -o 'runs=[0-9]*/[0-9]*' | awk -F'[=/]' '{m=($2>$3)?$2:$3; b=(m<=5)?"1-5":(m<=10)?"6-10":(m<=25)?"11-25":(m<=50)?"26-50":(m<=99)?"51-99":"100+"; c[b]++} END{split("1-5 6-10 11-25 26-50 51-99 100+",o," "); for(i=1;i<=6;i++) if(c[o[i]]) printf "%s: %d; ", o[i], c[o[i]]}')"
+  if [ -n "$diag" ]; then
+    echo "   steals: $(echo "$diag" | grep -o 'steals=[0-9]*' | awk -F= '{s+=$2; if($2==0) z++; n++} END{printf "total %d over %d iterations, iterations with steals=0: %d", s, n, z}')"
+    echo "   wake-ups per CPU, worker a: $(echo "$diag" | sed 's/.* a=\[\([0-9,]*\)\].*/\1/' | awk -F, '{for(i=1;i<=NF;i++) s[i]+=$i} END{for(i=1;i<=6;i++) printf "cpu%d=%d ", i-1, s[i]}') | worker b: $(echo "$diag" | sed 's/.* b=\[\([0-9,]*\)\].*/\1/' | awk -F, '{for(i=1;i<=NF;i++) s[i]+=$i} END{for(i=1;i<=6;i++) printf "cpu%d=%d ", i-1, s[i]}')"
+  fi
+done
