@@ -1597,3 +1597,154 @@ orchestrator asked for an interleaved base/fix A/B at equal load.
 - Builder B meanwhile: `/ci`, the litmus A/B, and where the Jetson reserve
   ranges can be read.
 - #1207 stays P1 and open on the hardware evidence so far.
+
+## Entry 44 (written 09:55 UTC, from date): builder A phases A0 and A1 (#1263, Jetson rows); builder B interim; lab to builder B
+
+Sources: builder A's combined A0 and A1 report and builder B's interim
+report, as received; not yet checked by a critic. Part A: branch
+`fix/percpu-cacheline` c0612fa7 (one commit on ae1399ba); unpadded side
+ae1399ba. Evidence `gauntlet-5-hw-jetson` ecd529e0, `run5-hw/1263-1207/`,
+files `A-*`.
+
+### Part A: the change
+
+- `kernel/include/cacheline.h` holds the one `CACHE_LINE_SIZE` (64) and
+  `CACHE_LINE_SHIFT`; `cache.h`, `spinlock.h` and `gpu/cache.c` take it
+  from there (a second definition in `gpu/cache.c` is removed).
+- `SPINLOCK_ARRAY` elements are `spinlock_padded_t` (64 bytes, aligned);
+  `SPINLOCK_AT(name, i)` gives the lock. Only `rq_lock[]` and
+  `steal_deque_lock[]` use the macro; there is no similar macro.
+- `resched_trampoline` (`vectors.S`) indexes `preempt_disabled[]`,
+  `orig_elr[]` and `orig_spsr[]` with `lsl #CACHE_LINE_SHIFT`.
+- The ten `sched_diag_*[]` arrays are one struct per CPU; the sixteen
+  `SWO_DIAG` arrays are `swo_pc[cpu]`. Placement only.
+- Test `kernel/tests/test_percpu_layout.c` (8 tests) and static asserts;
+  `docs/scheduler.md` section "Per-CPU data layout", `kernel/CLAUDE.md`,
+  `docs/smp.md`.
+
+QEMU at the head: `make test` (`A-qemu-arm-make-test-c0612fa7.txt`) and
+`make test PLATFORM=X86_64` (`A-qemu-x86-make-test-c0612fa7.txt`) pass;
+`AI_SCHED=ON` and `SECONDARY_PREEMPT=ON WORK_STEALING=ON SWO_DIAG=ON`
+passed before the last four edits (`A-qemu-arm-ai-sched-make-test-precommit.txt`,
+`A-qemu-arm-ws-swodiag-make-test-precommit.txt`; rerun requested);
+`check-braces` 0 violations (`A-check-braces-c0612fa7.txt`). Not covered
+by QEMU: the trampoline's indexing (`SECONDARY_PREEMPT` is ignored on
+QEMU); checked by disassembly and by every padded hardware boot.
+
+Layout (`A-layout-check.txt`, `A-images.txt`): in the padded Jetson and
+Pi 5 images every padded array is 512 bytes (8 x 64) at a 64-byte-aligned
+address; in the unpadded images `rq_lock` and `steal_deque_lock` are 32
+bytes each. Section deltas padded minus unpadded: Jetson production
+`.text` +1696, `.rodata` +512; Pi 5 production `.text` +1536, `.rodata`
++512; `.data` and `.bss` totals equal. Not yet itemised: the `.rodata`
++512 and why `.bss` is unchanged (requested).
+
+Line size: `A-jetson-coherency-regs-c0612fa7.txt`, all 6 Jetson CPUs
+(MIDR 0x410fd421) read CTR_EL0 0x9444c004 and CCSIDR reports 64-byte lines
+at L1D, L2 and L3. Pi 5 is captured in A2 (an earlier capture,
+`gauntlet/coherency-2:docs/archive/coherency-gauntlet/c2-hw/pi5-regs.txt`,
+shows the same).
+
+### Part A: audit of per-CPU arrays (short form; full table with sizes, writers and readers in `docs/scheduler.md` on the branch)
+
+Padded: `rq_lock[]` `sched.c:100`; `steal_deque_lock[]` `sched.c:134`;
+`preempt_disabled[]` `sched.c:93` (owner writes, idle CPUs poll every
+victim's flag in `sched_try_steal`; asm `vectors.S:602,627`);
+`sched_diag[]` `sched.c:425` (owner writes on every tick; `steal_push_full`
+written by the CPU adding the task); `switch_in_waiting[]` `sched.c:603`;
+`current_task[]` `task.c:45`; `coop_last_tick_cntpct[]` `sched.c:2235`;
+`reschedule_pending_wb` / `orig_elr_wb` / `orig_spsr_wb` `preempt.c:58-60`
+(asm `vectors.S:589-596`); `cpu_steal_deques[]` `sched.c:127` (392 to 448
+bytes); `pmu_cache_pressure_q16_per_cpu[]`, `pmu_cp_state[]`
+`pmu.c:333,341`; `swo_rq_owner[]` `sched.c:160` and `swo_pc[]`
+`sched.c:608` (`SWO_DIAG`); `slot_trace_idx[]`, `slot_trace_rq_holder[]`,
+`slot_trace_pd_ticks[]` `slot_trace.c:38,41,257` (`SLOT_TRACE`);
+`smp_resched_ipi_count[]` `platform_x86.c:46`.
+
+Already whole lines, now under the layout test: `sched.cpu_fallback[]`
+`sched.c:234`; `steal_trace[]`, `steal_trace_dq[]`, `steal_pdwin[]`
+`sched.c:140,141,149`; `tracer_percpu`.
+
+Not padded: `cpu_data[]`, `cpu_logical_map[]`, `cpu_current_el_fallback[]`
+`smp.c:24,27,28` (boot only; the asm table stays packed); `cpu_boot_flag[]`
+`smp.c:37` (boot and resurrect); `cpu_stacks`; `cpu_supervisor.c:88-91`
+(single writer); `pmu_ready_per_cpu[]` `pmu.c:72` (once per boot);
+`gic.c:93,808,815` and `fault_dump.c:27-29` (not on the paths);
+`smp_done_wb[]` `shell_sys.c:1775` (bench harness); `slot_trace_ring[][]`;
+`switch_check.c` `sc_*[]`.
+
+Found, left unchanged: `sched.context_switches`, `sched.timer_ticks` and
+`timer_handler_count` are single global counters that every CPU
+increments; true sharing, not placement. An issue is being filed.
+
+### Part A rows on jetson-nano-2
+
+R3 wake (`test_wake_during_switch_out`) x1000, `SWO_DIAG=ON`, order U, P,
+U, P, U, P on each path, one boot per `boot_test` call. Counts in
+`A-r3w-summary.txt` by `A-r3sum.sh.txt`, with Entry 41's definitions (the
+script reproduces Entry 41's 4 / 10 / 811552 and 30 / 49 / 827300 from its
+files). All 12 boots: 1000 of 1000, no NOT-FINISHED.
+
+| Path | Side | Files | Slow finishes (over 10 ms) | Iterations with a prelude over 1 ms | Slowest iteration (us) |
+|---|---|---|---|---|---|
+| kexec | unpadded ae1399ba | `A-kexec-r3w-U-ae1399ba-x1000-boot01..03.txt` | 11, 9, 4 | 20, 12, 8 | 832730, 819249, 833892 |
+| kexec | padded c0612fa7 | `A-kexec-r3w-P-c0612fa7-x1000-boot01..03.txt` | 0, 0, 0 | 0, 0, 0 | 315261, 315248, 315244 |
+| UEFI-direct | unpadded ae1399ba | `A-uefi-r3w-U-ae1399ba-x1000-boot01..03.txt` | 32, 34, 19 | 37, 60, 37 | 832885, 833243, 827987 |
+| UEFI-direct | padded c0612fa7 | `A-uefi-r3w-P-c0612fa7-x1000-boot01..03.txt` | 0, 0, 0 | 0, 0, 0 | 315415, 315259, 319164 |
+
+Unpadded: 109 slow finishes in 6000 iterations (24 kexec, 85 UEFI-direct).
+Padded: 0 in 6000. The padded side differs in every padded array of the
+audit, not only the two lock arrays, so the rows do not say which array's
+padding removes the stalls.
+
+`bench context`, Jetson kexec production, 3 boots per side alternating,
+2 runs per boot, 99 round trips per run (`A-bench-context-jetson-base-U{1,2,3}-runs1-2.txt`,
+`A-bench-context-jetson-head-P{1,2,3}-runs1-2.txt`, summary
+`A-bench-context-summary-jetson.txt`): unpadded run means 97, 96, 98, 99,
+100, 91 (mean 96.83 ns, sd 3.19); padded 102, 96, 100, 96, 101, 96 (mean
+98.50 ns, sd 2.81). Delta +1.67 ns (+1.7%), ranges overlap; no difference
+is shown at this sample size. The ledger row waits for the Pi 5 half.
+
+### Part A incidents and disclosures
+
+- The as-found ESP image was not copied before the first staging. The
+  restore used a host copy from the previous session whose sha256 equals
+  the as-found hash in `A-jetson-pre-state.txt`.
+- UEFI-direct boots used a new `uefistage` mode of the trigger loop
+  (`A-trigger.sh.txt`): stage, verify from a fresh read-only mount, arm
+  BootNext and reboot in one Linux boot.
+- `serial_send` results were saved from the builder's own transcript by
+  `A-savesend.py.txt`.
+- No boot failed and no capture was cut. 24 boot files, `save.sh` OK on all.
+- Board as left (`A-jetson-post-state-A1.txt`, 09:47:47Z): SD Linux,
+  BootCurrent 0001, no BootNext, ESP `SLMOS.efi` 789cba62 (fresh read-only
+  mount, `fsck.vfat -n` 6 files, 2196/130892 clusters), `/root/slmos.elf`
+  098f3163, 14 `*.elf*` files, the builder's files removed.
+
+### Part B interim (no lab)
+
+`fix/pmm-coalesce` is now f55c5293 (f650b695 + 679a09c7, `PMM_CHECK`
+prints the reserve list at `pmm_init`, + one document line). New pushed
+branch `diag/1207-check-oldalloc` 17daedda (old allocator with the full
+check report; not for merge). Evidence `gauntlet-5-hw-jetson` c3935e18.
+
+- `/ci` at f55c5293: every step passes (`B-ci-f55c5293-step01..11-*.txt`,
+  `B-ci.out.txt`).
+- Litmus A/B at equal load, 10 full-suite runs each, interleaved
+  (`B-qemu-ab-base-661204e6-run01..10.txt`, `B-qemu-ab-fix-f55c5293-run01..10.txt`):
+  base 10 of 10 pass; fix 8 of 10 (run05 `test_litmus_patterns_pass`,
+  #1230; run08 `test_runner_parks_without_a_lock`, #1184). PMM suite clean
+  in all 10. No evidence that the PMM change moves the #1230 rate; too few
+  runs to exclude a small change.
+- The x50 loops, the five new tests x50, `PMM_CHECK=ON` and x86-64 rerun
+  at f55c5293, all pass (`B-qemu-fix-f55c5293-*.txt`).
+- No existing capture holds the Jetson firmware memreserve values; the
+  `PMM_CHECK` build prints them on every boot.
+
+### Decisions
+
+- 09:50 UTC: lab to builder B for B1: 2 kexec suite boots of
+  `slmos-1207-chk-oldalloc-17daedda.elf`, then 10 of
+  `slmos-1207-suite-f55c5293.elf`.
+- Builder A meanwhile, host only: `/ci`, the two option rows at the
+  committed head, the section itemisation, the counter issue, Pi 5 images.
