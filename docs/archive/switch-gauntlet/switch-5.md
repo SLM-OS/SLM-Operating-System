@@ -1422,3 +1422,50 @@ Local only, not pushed: branches `diag/1244-check-on-main` (665fb18e),
 `diag/1262-padded-locks` (741497c7), `s1262/diag` (= origin
 `c2/switch-window-r2`), and worktrees under
 `.claude/worktrees/Issues-1262-and-1244/.wt/`.
+
+## Entry 42 (written 04:52 UTC, from date): lab session for #1263 and #1207, Hour 0
+
+Orchestrator session with two builders (A: #1263, per-CPU locks share a
+cache line; B: #1207, PMM halt), started 2026-11-15 04:45 UTC with the user
+present. Nothing merges. Evidence goes on `gauntlet-5-hw-jetson` and
+`gauntlet-5-hw-pi5` under `docs/archive/switch-gauntlet/run5-hw/1263-1207/`
+(files `A-*` and `B-*`).
+
+### State as found
+
+| Item | Value |
+|---|---|
+| `main` | dc51107c |
+| PR #1266 (`c2/switch-window-r2`, ae1399ba) | open, not merged |
+| PR #1265 (`fix/kexec-dtb-reserve`, 661204e6) | open, not merged |
+| Part A base | `c2/switch-window-r2` ae1399ba, because #1266 is not in main (R3 wake needs its fix); branch `fix/percpu-cacheline` |
+| Part B base | 661204e6 = main + #1265; branch `fix/pmm-coalesce` |
+| Pushed in Hour 0 | `diag/1262-padded-locks` 741497c7 and `diag/1244-check-on-main` 665fb18e (new branches on origin; the evidence for #1263 and #1244) |
+| labctl | no claims; health: jetson-nano-2 and pi-5-1 online, power on, serial ok; `recovery_mode` binding of jetson-nano-2 released, relay open |
+| jetson-nano-2 over SSH | SD Linux 5.15.148-tegra, BootCurrent 0001, `/root/slmos.elf` 098f3163, 14 `*.elf*` files (the end state of Entry 41); the ESP hash is read by builder A before its first change |
+
+### Self-tests
+
+- `send_later`: this session has no tool of that name. The two mechanisms
+  that stand in for it were tested: a background shell task (25 s sleep;
+  its completion notice arrived) and a one-shot scheduled prompt
+  (`CronCreate`, set for 20:57 PST; result recorded in the next entry).
+- One harmless call per tool family: labctl read tools (`list_claims`,
+  `run_health_check`, `bindings_list`, `actuation_status`, `list_images`,
+  the `lab://sbcs` resource), `git push` (the two branches above), `gh`
+  (issue and PR reads), SSH to the Jetson (read only), `git worktree`
+  add and remove, a write and delete in `/var/lib/labctl/images`, agent
+  spawn and `SendMessage`.
+- Harness limit found: this session's git commands must be single plain
+  commands inside its own worktree, so every worktree of the session is
+  under `.claude/worktrees/Lab-Session-1263/.wt/` (`a`, `b`, `a-evj`,
+  `a-evp`, `b-evj`, `b-evp`, `log`).
+
+### Arrangement
+
+The orchestrator holds the labctl claims on both boards (agent name
+`lab-1263-1207`, session hold, taken 04:49 UTC) and hands the lab to one
+builder at a time by message; a builder ends its turn at the end of each
+phase. Lab order: A1 (Jetson padded and unpadded rows), B1 (Jetson suite),
+A2 (Pi 5 and regression rows), B2 (Pi 5 suite). One QEMU at a time on the
+host through a shared `flock`. Builders do not write this log.
