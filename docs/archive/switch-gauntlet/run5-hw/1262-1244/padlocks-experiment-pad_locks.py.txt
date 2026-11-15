@@ -1,0 +1,19 @@
+import re, sys
+# EXPERIMENT ONLY (#1262): give every rq_lock and steal_deque_lock element its
+# own 64-byte cache line by widening the arrays and scaling every index.
+R = sys.argv[1]
+p = R + '/kernel/sched/sched.c'
+s = open(p).read()
+for name in ('rq_lock', 'steal_deque_lock'):
+    decl = 'static SPINLOCK_ARRAY(%s, MAX_CPUS);' % name
+    assert s.count(decl) == 1, name
+    s = s.replace(decl, 'static SPINLOCK_ARRAY(%s, MAX_CPUS * LOCK_STRIDE);  /* EXPERIMENT: one cache line per lock */' % name)
+    pat = re.compile(r'\b%s\[([A-Za-z_0-9]+)\]' % name)
+    s, n = pat.subn(lambda m: '%s[(%s) * LOCK_STRIDE]' % (name, m.group(1)), s)
+    print(name, 'index sites rewritten:', n)
+    left = [m.group(0) for m in re.finditer(r'\b%s\[[^\]]*\]' % name, s) if 'LOCK_STRIDE' not in m.group(0)]
+    print('  unrewritten:', left)
+anchor = '/* Per-CPU run queue locks'
+assert s.count(anchor) == 1
+s = s.replace(anchor, '#define LOCK_STRIDE 16U   /* EXPERIMENT (#1262): 16 * 4 bytes = one cache line per lock */\n\n' + anchor)
+open(p, 'w').write(s)

@@ -1,0 +1,3 @@
+02:52:35 start mode=kexec n=1 elfs=[/root/slmos-s1262-r3w-diag5.elf] skip_current_boot_id=cc82a125-dba6-4042-be07-c9094957dd54 pid=1022126
+02:54:00 trigger 1/1 elf=/root/slmos-s1262-r3w-diag5.elf boot_id=b46abcab-a6a0-43a9-b832-18028f359895 state+uptime=[running 24.02 ] reply=[a967d207460a75fc ]
+02:54:00 end triggers=1

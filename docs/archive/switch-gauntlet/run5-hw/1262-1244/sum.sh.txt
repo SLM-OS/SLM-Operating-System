@@ -1,0 +1,9 @@
+#!/bin/bash
+# sum.sh <labctl dir name> : one summary per run file of an R3 run.
+for f in /var/lib/labctl/output/$1/run_*.txt; do
+  echo "== $f ($(wc -l < $f) lines) $(grep -a -m1 -o 'build [0-9]* ([0-9a-f-]*)' $f)"
+  grep -a '^\[FILTER\] \[\|NOT-FINISHED' $f | cut -c1-200
+  echo "slow dumps: $(grep -a -c 'swo-diag slow-10ms' $f) reap warns: $(grep -a -c 'zombie reap took' $f) prelude lines: $(grep -a -c 'swo-diag prelude' $f) migrate warns: $(grep -a -c 'Cannot migrate running' $f)"
+  grep -a 'slow finish' $f | cut -c1-120
+  grep -a 'swo-diag prelude' $f | cut -c1-300 | sort -t' ' -k1,1 | tail -${2:-8}
+done

@@ -1,0 +1,13 @@
+--- jetson-nano-2 post state, board clock 2026-11-15T03:33:00Z
+BootCurrent: 0001
+Boot000E* SLM-OS NVMe
+BootNext lines: 0
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /mnt/esp-ro/EFI/SLMOS/SLMOS.efi
+total 8668
+drwxr-xr-x 2 root root    4096 Nov  7 19:43 .
+drwxr-xr-x 4 root root    4096 Nov  8 05:40 ..
+-rwxr-xr-x 1 root root 8864840 Nov 14 18:53 SLMOS.efi
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+098f316368baf94ef117195d30cda8e1f2124fc9e66fecef7bce4c15f815d6c5  /root/slmos.elf
+elf files in /root: 14; session files left: 0
+host 2026-11-15T03:33:00Z: first restore attempt right after the power cycle printed nothing and left the ESP at a9a7ec89; rerun staged 789cba62 (line above)
