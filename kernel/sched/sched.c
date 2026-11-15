@@ -598,6 +598,21 @@ volatile uint64_t swo_diag_phase_t[MAX_CPUS];
 static volatile uint32_t swo_diag_reap_max_us[MAX_CPUS];
 static volatile uint32_t swo_diag_reap_max_id[MAX_CPUS];
 static volatile uint32_t swo_diag_reap_slow[MAX_CPUS];
+/* schedule() prelude timing (entry to holding the rq lock, tick masked):
+ * longest total, longest steal attempt with its probe count, longest wait
+ * for the CPU's own rq lock, and how many preludes took over 1 ms. Reset by
+ * sched_swo_diag_prelude_report(). */
+static volatile uint32_t swo_diag_pre_max_us[MAX_CPUS];
+static volatile uint32_t swo_diag_steal_max_us[MAX_CPUS];
+static volatile uint32_t swo_diag_steal_max_probes[MAX_CPUS];
+static volatile uint32_t swo_diag_lockw_max_us[MAX_CPUS];
+static volatile uint32_t swo_diag_pre_slow[MAX_CPUS];
+static volatile uint32_t swo_diag_steal_probes[MAX_CPUS];
+static inline uint32_t swo_diag_us(uint64_t t0)
+{
+    return (uint32_t)((timer_get_count() - t0) /
+                      (timer_get_frequency() / 1000000U));
+}
 uint64_t swo_diag_stamp(void)
 {
     return timer_get_count();
@@ -2086,6 +2101,9 @@ static struct task *sched_try_steal(uint32_t this_cpu)
         probed++;
         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
             uint32_t captured_gen = 0;
+#if defined(CONFIG_SWO_DIAG)
+            swo_diag_steal_probes[this_cpu]++;
+#endif
             /* #1203: was the lock held when this thief arrived? Plain
              * load; the acquisition below is unchanged. */
             if (steal_deque_lock[victim].lock != 0) {
@@ -2542,6 +2560,9 @@ void schedule(void)
     uint32_t lock_site = 1;            /* SWITCH_CHECK probe site */
     sched_diag_schedule[this_cpu]++;
     SWO_PHASE(this_cpu, SWO_PH_ENTER, 0);
+#if defined(CONFIG_SWO_DIAG)
+    uint64_t swo_t0 = timer_get_count();
+#endif
 
 #if defined(COOP_PREEMPT)
     /* Cooperative preemption: drive scheduler_tick off CNTPCT when the
@@ -2559,7 +2580,21 @@ void schedule(void)
      * next schedule() call picks it up.
      */
     if (!rq->head) {
+#if defined(CONFIG_SWO_DIAG)
+        uint64_t swo_s0 = timer_get_count();
+        uint32_t swo_p0 = swo_diag_steal_probes[this_cpu];
+#endif
         struct task *stolen = sched_try_steal(this_cpu);
+#if defined(CONFIG_SWO_DIAG)
+        {
+            uint32_t us = swo_diag_us(swo_s0);
+            if (us > swo_diag_steal_max_us[this_cpu]) {
+                swo_diag_steal_max_us[this_cpu] = us;
+                swo_diag_steal_max_probes[this_cpu] =
+                    swo_diag_steal_probes[this_cpu] - swo_p0;
+            }
+        }
+#endif
         if (stolen) {
             rq_lock_masked(this_cpu);
             add_to_cpu_queue_locked(stolen, this_cpu);
@@ -2569,7 +2604,27 @@ void schedule(void)
 #endif
 
 relock:
+#if defined(CONFIG_SWO_DIAG)
+    {
+        uint64_t swo_l0 = timer_get_count();
+        rq_lock_masked(this_cpu);
+        uint32_t lw = swo_diag_us(swo_l0);
+        if (lw > swo_diag_lockw_max_us[this_cpu]) {
+            swo_diag_lockw_max_us[this_cpu] = lw;
+        }
+        if (lock_site == 1) {
+            uint32_t pre = swo_diag_us(swo_t0);
+            if (pre > swo_diag_pre_max_us[this_cpu]) {
+                swo_diag_pre_max_us[this_cpu] = pre;
+            }
+            if (pre > 1000) {
+                swo_diag_pre_slow[this_cpu]++;
+            }
+        }
+    }
+#else
     rq_lock_masked(this_cpu);
+#endif
     SWITCH_CHECK_CPU(this_cpu, lock_site);  /* #1242 probe; empty unless SWITCH_CHECK */
     SWO_PHASE(this_cpu, SWO_PH_LOCKED, 0);
 
@@ -3449,5 +3504,37 @@ void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
         *p = *d;
     }
     swo_diag_have_prev = true;
+}
+
+/* One line with every CPU's schedule() prelude maxima since the last call,
+ * printed only if some prelude took over min_us; always resets. */
+void sched_swo_diag_prelude_report(const char *tag, uint32_t min_us)
+{
+    uint32_t pre[MAX_CPUS], st[MAX_CPUS], pr[MAX_CPUS], lw[MAX_CPUS], sl[MAX_CPUS];
+    bool any = false;
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        pre[c] = swo_diag_pre_max_us[c];
+        st[c] = swo_diag_steal_max_us[c];
+        pr[c] = swo_diag_steal_max_probes[c];
+        lw[c] = swo_diag_lockw_max_us[c];
+        sl[c] = swo_diag_pre_slow[c];
+        swo_diag_pre_max_us[c] = 0;
+        swo_diag_steal_max_us[c] = 0;
+        swo_diag_steal_max_probes[c] = 0;
+        swo_diag_lockw_max_us[c] = 0;
+        swo_diag_pre_slow[c] = 0;
+        if (pre[c] > min_us || lw[c] > min_us) {
+            any = true;
+        }
+    }
+    if (!any) {
+        return;
+    }
+    uart_printf("  swo-diag prelude %s (max us entry-to-rq-lock / steal(probes) "
+                "/ rq-lock wait / preludes over 1 ms):", tag);
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        uart_printf(" cpu%u %u/%u(%u)/%u/%u", c, pre[c], st[c], pr[c], lw[c], sl[c]);
+    }
+    uart_printf("\n");
 }
 #endif /* CONFIG_SWO_DIAG */

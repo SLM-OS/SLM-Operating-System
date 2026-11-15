@@ -414,7 +414,18 @@ Before these rules two sequences were traced (first-fault traces in
   old task's `task_exit`. The
 debug build option `SLOT_TRACE=ON` (`kernel/include/slot_trace.h`) records
 these lifecycle events per CPU and dumps them on the first EL1 fault or
-panic.
+panic. The debug build option `SWO_DIAG=ON` (#1262) serves the case where
+nothing faults and a READY task is simply not run: when an R3 iteration
+(`test_wake_during_switch_out`, `test_migrate_ready_during_switch_out`)
+does not finish within its bound, or is still unfinished 10 ms after the
+stop, it prints each unfinished task (state, `on_cpu`, assigned CPU, the
+run queue it is on, the CPU whose `switch_in_waiting` names it, the CPU it
+is current on) and, per CPU, the current task, `switch_in_waiting`, the
+queue, the last point passed in `task_exit()`/`schedule()` with its age,
+the longest zombie reap, and the tick/schedule/idle counters; it polls 1 s
+more and prints the counter deltas. It also logs each "Cannot migrate
+running task" with the task id and CPUs (at most 4 lines per 100 ms). With
+the option off the kernel's `.text` is unchanged.
 
 **Lock strategy:**
 - Single-queue operations (add, remove, schedule) use only that CPU's lock

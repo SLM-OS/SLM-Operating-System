@@ -311,6 +311,7 @@ bool sched_ai_priority_actions_enabled(void);
  * later call also prints the counter deltas since the previous call.
  */
 void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n);
+void sched_swo_diag_prelude_report(const char *tag, uint32_t min_us);
 
 /*
  * Per-CPU beacon: the last point this CPU passed in task_exit()/schedule(),

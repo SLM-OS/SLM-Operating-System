@@ -2710,6 +2710,9 @@ static bool swo_phase(uint32_t mode)
         runs += swo_runs[i];
     }
     const char *name = mode == SWO_MODE_WAKE ? "wake" : "migrate";
+#if defined(CONFIG_SWO_DIAG)
+    sched_swo_diag_prelude_report(name, 1000);
+#endif
     uart_printf("  swo %s: cpus=%u workers=%u moves=%u move_fail=%u runs=%u "
                 "bad_gen=%u two_cpus=%u%s",
                 name, ncpu, nw, swo_moves, swo_move_fail, runs, swo_bad_gen,
