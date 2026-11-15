@@ -1,0 +1,3 @@
+A-pi5-suite-c0612fa7-boot01.txt | build 20261115055356 (c0612fa7) |  | [FAIL] 18 total failure(s) | distinct FAIL names 20 | not in known list: none | halts: 0
+A-pi5-suite-c0612fa7-boot02.txt | build 20261115055356 (c0612fa7) |  | [FAIL] 18 total failure(s) | distinct FAIL names 20 | not in known list: none | halts: 0
+A-pi5-suite-c0612fa7-boot03.txt | build 20261115055356 (c0612fa7) |  | [FAIL] 18 total failure(s) | distinct FAIL names 20 | not in known list: none | halts: 0

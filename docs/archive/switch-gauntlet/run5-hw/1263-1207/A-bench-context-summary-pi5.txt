@@ -1,0 +1,16 @@
+== pi5
+  base A-bench-context-pi5-base-U1-runs1-2.txt: mean 108 p50 111 p95 112
+  base A-bench-context-pi5-base-U1-runs1-2.txt: mean 107 p50 111 p95 112
+  base A-bench-context-pi5-base-U2-runs1-2.txt: mean 108 p50 111 p95 112
+  base A-bench-context-pi5-base-U2-runs1-2.txt: mean 106 p50 111 p95 112
+  base A-bench-context-pi5-base-U3-runs1-2.txt: mean 110 p50 111 p95 129
+  base A-bench-context-pi5-base-U3-runs1-2.txt: mean 107 p50 111 p95 112
+  base: n=6 mean-of-means 107.67 ns sd 1.37 min 106 max 110; p50 values [111]; p95 values [112, 129]; median of p50 111.0; median of p95 112.0
+  head A-bench-context-pi5-head-P1-runs1-2.txt: mean 108 p50 111 p95 112
+  head A-bench-context-pi5-head-P1-runs1-2.txt: mean 107 p50 111 p95 112
+  head A-bench-context-pi5-head-P2-runs1-2.txt: mean 107 p50 111 p95 112
+  head A-bench-context-pi5-head-P2-runs1-2.txt: mean 106 p50 111 p95 112
+  head A-bench-context-pi5-head-P3-runs1-2.txt: mean 108 p50 111 p95 112
+  head A-bench-context-pi5-head-P3-runs1-2.txt: mean 108 p50 111 p95 112
+  head: n=6 mean-of-means 107.33 ns sd 0.82 min 106 max 108; p50 values [111]; p95 values [112]; median of p50 111.0; median of p95 112.0
+  delta -0.33 ns (-0.3%), Welch t -0.5 (SE 0.65 ns); ranges overlap: True

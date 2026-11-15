@@ -1,0 +1,10 @@
+#!/bin/bash
+# classify.sh <known-failures file> <evidence file>...
+# Prints per boot: banner, summary line, fail count, and any [FAIL] name not in the known list.
+K=$1; shift
+for f in "$@"; do
+  fails=$(grep -a '^  \[FAIL\]' "$f" | tr -d '\r' | sed 's/^  \[FAIL\] //' | sort -u)
+  new=$(comm -23 <(echo "$fails" | grep -v '^$') <(sort -u "$K"))
+  n=$(echo "$fails" | grep -c -v '^$')
+  echo "$(basename $f) | $(grep -a -m1 -oE 'build [0-9]{14} \([0-9a-f]+\)' $f) | $(grep -a -m1 -o 'Boot-mode : [A-Za-z]*' $f) | $(grep -a -E 'All test suites passed|total failure' $f | tr -d '\r' | tail -1) | distinct FAIL names $n | not in known list: ${new:-none} | halts: $(grep -a -c -E 'System halted|PAGE FAULT|KERNEL PANIC' $f)"
+done

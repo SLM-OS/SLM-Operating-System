@@ -1,0 +1,59 @@
+# pi-5-1, production UNPADDED baseline ae1399ba, bench boot U1 (= A-pi5-bench-U-ae1399ba-U1-boot.txt), bench context runs 1 and 2 on this boot; command: lua-admin -e "for i=1,2 do print('BC-RUN '..i) slm.shell_exec('bench context') end print('BC-'..'END')"
+# serial_send/serial_capture result of this session, verbatim (the "result" string of the labctl tool result; transcript timestamp 2026-11-15T11:38:10.529Z; first line may be the garbled echo, a known labctl echo issue)
+# saved 2026-11-15T11:38:26Z
+# ---- serial ----
+[Captured 53 lines in 0.1s, pattern 'None' matched]
+lua-admin -e "for i=1,2 do print('BC-RUN '..i) slm.shell_exec('bench context') end print('BC-'..'END')"
+BC-RUN 1
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=10) exiting
+  Context switch: 99 round-trips
+    Average: 108 ns (0 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:    99 ########################################
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:     0
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 92 ns   Max: 204 ns   Mean: 108 ns
+  p50: 111 ns   p95: 112 ns   p99: 204 ns
+
+BC-RUN 2
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=11) exiting
+  Context switch: 99 round-trips
+    Average: 107 ns (0 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:    99 ########################################
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:     0
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 92 ns   Max: 130 ns   Mean: 107 ns
+  p50: 111 ns   p95: 112 ns   p99: 130 ns
+
+BC-END
+slmos> 
+slmos>

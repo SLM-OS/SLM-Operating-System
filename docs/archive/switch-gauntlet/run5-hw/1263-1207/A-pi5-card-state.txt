@@ -1,0 +1,10 @@
+# pi-5-1 SD card (SDWire), Phase A2, 2026-11-15, from this session's labctl results (sdwire_info, sdwire_ls, sdwire_update, boot_test)
+as found (11:36 UTC, board powered off first): one FAT32 partition, label SLMOS, 29818 MiB, clean; no *.prev, no *.orig file;
+  kernel_2712.img 6935256 bytes mtime 2026-10-29T04:54:04Z; kernel8.img 6935256 bytes mtime 2026-10-29T04:54:04Z;
+  other entries in /: bootcode.bin, the bcm27xx dtb files, overlays/, config.txt, slmstore/, fixup*.dat, start*.elf, files/, tryboot.txt, tiny.jsonl, corpus.jsonl
+step 1 (own sdwire_update call): renamed kernel_2712.img -> kernel_2712.img.orig-1263
+steps 2..: boot_test with image=kernel_2712-1263-prod-U.img / -prod-P.img / -suite-P.img, dest=kernel_2712.img (each deploy overwrites the test image only)
+restore: sdwire_update deletes=[kernel_2712.img] (the suite test image), then sdwire_update renames=[kernel_2712.img.orig-1263:kernel_2712.img], in two calls (sdwire_update runs renames before deletes)
+after restore (sdwire_ls): the same entry names, sizes and mtimes as found (compared by eye in the two listings, not by script); kernel_2712.img 6935256 bytes mtime 2026-10-29T04:54:04Z; kernel8.img unchanged; no kernel_2712.img.orig-1263
+restore-check boot: A-pi5-restore-check-boot01.txt, banner SLM-OS v0.4.0 build 20261022005058 (b42b2c1d)
+kernel8.img was not touched at any point.

@@ -1,0 +1,10 @@
+#!/bin/bash
+# pi5bench-save.sh <U|P> <n> : save bench boot <side><n> of pi-5-1 (labctl dir
+# a1263-pi5-bench-<side><n>) and the bench context runs just captured on it.
+S=$(dirname "$0")
+E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a-evp/docs/archive/switch-gauntlet/run5-hw/1263-1207
+side=$1; n=$2
+if [ $side = U ]; then head=ae1399ba; word="UNPADDED baseline ae1399ba"; img="kernel_2712-1263-prod-U.img sha256 c316319b"; tag=base
+else head=c0612fa7; word="PADDED fix/percpu-cacheline c0612fa7"; img="kernel_2712-1263-prod-P.img sha256 8aa647e5"; tag=head; fi
+bash $S/saveone-pi5.sh a1263-pi5-bench-$side$n A-pi5-bench-$side-$head-$side$n-boot.txt - "pi-5-1, production $word (kernel_2712.img = $img, deployed by this boot_test call; the original kernel_2712.img is kept on the card as kernel_2712.img.orig-1263), bench boot $side$n (alternation U1,P1,U2,P2,U3,P3; one SD round trip per swap)"
+python3 -W ignore $S/savesend.py $E/A-bench-context-pi5-$tag-$side$n-runs1-2.txt "BC-RUN 2" "pi-5-1, production $word, bench boot $side$n (= A-pi5-bench-$side-$head-$side$n-boot.txt), bench context runs 1 and 2 on this boot; command: lua-admin -e \"for i=1,2 do print('BC-RUN '..i) slm.shell_exec('bench context') end print('BC-'..'END')\""

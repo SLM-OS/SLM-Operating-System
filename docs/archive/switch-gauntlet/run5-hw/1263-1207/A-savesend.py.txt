@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""savesend.py <dest file> <marker> <title...>
+Writes the text of this agent's most recent labctl serial tool result that
+contains <marker> (and "Captured") to <dest file>, verbatim, under a header.
+Source: this agent's own session transcript (the tool result as returned)."""
+import json, sys, datetime
+
+T = ('/home/john/.claude/projects/-home-john-projects-CS-496-Capstone-SLM-Operating-System'
+     '--claude-worktrees-Lab-Session-1263/564b3ef4-5b80-47c5-8d15-6720773a806c/subagents/'
+     'agent-abuilder-a-bc5feca53ddd7f51.jsonl')
+dst, marker, title = sys.argv[1], sys.argv[2], ' '.join(sys.argv[3:])
+found = None
+for line in open(T, encoding='utf-8', errors='replace'):
+    try:
+        o = json.loads(line)
+    except Exception:
+        continue
+    msg = o.get('message') or {}
+    content = msg.get('content')
+    if not isinstance(content, list):
+        continue
+    for c in content:
+        if not isinstance(c, dict) or c.get('type') != 'tool_result':
+            continue
+        body = c.get('content')
+        texts = []
+        if isinstance(body, str):
+            texts = [body]
+        elif isinstance(body, list):
+            texts = [b.get('text', '') for b in body if isinstance(b, dict)]
+        for t in texts:
+            try:
+                r = json.loads(t).get('result', '')
+            except Exception:
+                r = t
+            if isinstance(r, str) and marker in r and r.startswith('[Captured'):
+                found = (o.get('timestamp', '?'), r)
+if not found:
+    sys.exit('NOT FOUND: ' + marker)
+ts, r = found
+with open(dst, 'w', encoding='utf-8') as fh:
+    fh.write('# %s\n' % title)
+    fh.write('# serial_send/serial_capture result of this session, verbatim (the "result" string of the labctl tool result; transcript timestamp %s; first line may be the garbled echo, a known labctl echo issue)\n' % ts)
+    fh.write('# saved %s\n' % datetime.datetime.utcnow().strftime('%FT%TZ'))
+    fh.write('# ---- serial ----\n')
+    fh.write(r)
+    fh.write('\n')
+means = [l.strip() for l in r.split('\n') if 'Mean:' in l or 'p50:' in l]
+print(dst.split('/')[-1], '|', ts, '|', len(r.split('\n')), 'lines |', ' ; '.join(means))
