@@ -1192,14 +1192,44 @@ polled by others. Aligning the array as a whole is not enough: eight
 **Why.** `rq_lock[]` and `steal_deque_lock[]` were declared with a
 `SPINLOCK_ARRAY` that aligned only the array, so every lock word of each
 array sat in one cache line, which is also one exclusives reservation
-granule. On jetson-nano-2 a CPU of the second cluster (CPUs 4 and 5) then
-waited 1.1 to 6.6 ms for its own, free, `rq_lock` in about 1% (kexec) to
-3% (UEFI-direct) of R3 wake iterations, tick masked, with
-`preempt_disabled` set so that thieves skipped its queue (#1262, #1263;
-switch gauntlet run 5, Entry 41). With one line per lock the waits were
-gone in the experiment that led to this rule. That the `STXR` loses its
-reservation to stores to the neighbouring lock words is inferred from the
-lock-word and try-lock counts, not observed directly.
+granule. On jetson-nano-2, in the R3 wake test kernel
+(`test_wake_during_switch_out` x1000 per boot, `SWO_DIAG=ON`), a CPU of the
+second cluster (CPUs 4 and 5) then waited 1.03 to 6.70 ms for its own
+`rq_lock`, tick masked, with `preempt_disabled` set so that thieves
+skipped its queue (#1262, #1263). Measured on the unpadded kernel
+(ae1399ba), three boots per boot path, 3000 iterations each: a report of
+a prelude or lock wait over 1 ms in 1.3% of iterations on kexec and 4.5%
+on UEFI-direct, and a finish still incomplete 10 ms after the stop in
+0.8% and 2.8% (109 in 6000). With one line per element (c0612fa7), boots
+alternating with the unpadded ones: none in 6000 on either path, and the
+slowest iteration falls from about 830 ms to about 315 ms. Files:
+`A-kexec-r3w-*` and `A-uefi-r3w-*`, `A-r3w-summary.txt` and
+`A-r3w-detail.txt` in `docs/archive/switch-gauntlet/run5-hw/1263-1207/`
+on `gauntlet-5-hw-jetson`.
+
+How far that goes:
+
+- The padded kernel differs from the unpadded one in every padded array
+  of the audit below, so these rows do not say which array matters. That
+  the two lock arrays alone are enough rests on two kexec boots of an
+  earlier experiment (switch gauntlet run 5, Entry 41, 741497c7).
+- The rows are from a diagnostic test kernel. In it `swo_rq_owner[]`
+  (`SWO_DIAG`, stored at every rq-lock take and release) shared the 64-byte
+  line with `rq_lock[]` on the unpadded side; in the unpadded production
+  kernel `rq_lock[]` had its line to itself. The stalls are not made by
+  that array (Entry 41's 1441f690 rows, taken before it existed, have
+  them too), but the rates and maxima above belong to the instrumented
+  layout. No R3 row exists on a kernel without `SWO_DIAG`.
+- Not covered: the production kernel, the R3 migrate phase, a second
+  board, and other placement differences between the two builds (for
+  example `task_lock` no longer shares a line with `current_task[]`).
+- The mechanism is inferred, not observed: the `STXR` of a waiting CPU
+  losing its reservation to stores in the same granule. 265 of the 279
+  reported lock waits fit it (lock word 0 when the wait began, 100 or
+  more failed try-locks). 14 have under 100 failed try-locks in 1.06 to
+  4.71 ms, one began with the lock word 1, and 4 of the 109 slow finishes
+  have no prelude report at all, so something else also stalls those
+  CPUs; all of it is absent on the padded kernel.
 
 **The line is 64 bytes.** `CACHE_LINE_SIZE` (`kernel/include/cacheline.h`,
 the only definition; `cache.h` and `spinlock.h` take it from there) is 64.
@@ -1237,9 +1267,13 @@ reports 64-byte lines at each data cache level (shell: `coherency regs`).
 **Regression test.** `kernel/tests/test_percpu_layout.c` (every platform)
 takes the addresses of elements 0 and 1 of each padded array in the
 running kernel and fails unless both are line-aligned and at least a line
-apart; static arrays reach it through `sched_percpu_layout()` and
-`pmu_percpu_layout()` (test kernels only). Static asserts sit next to each
-type. The trampoline's indexing runs only on Pi 5 and Jetson
+apart; static arrays reach it through `sched_percpu_layout()`,
+`pmu_percpu_layout()` and, in `SLOT_TRACE` builds,
+`slot_trace_percpu_layout()` (test kernels only). Static asserts sit next
+to each type. The test checks the arrays that are listed: a new per-CPU
+array declared packed is caught only if someone adds it to a layout
+table, so the audit below has to be extended by hand with every new
+array. The trampoline's indexing runs only on Pi 5 and Jetson
 (`SECONDARY_PREEMPT` is not built for QEMU), where every preemption goes
 through it.
 
@@ -1276,12 +1310,20 @@ arrays next to them, at the commit that introduced the rule):
 | `tracer_percpu[]` (AI trace ring) | `kernel/sched/ai/sched_trace_ai.c:67` | 64 B header + ring | owner | readers on demand | Already padded by hand (`_hdrpad`) |
 | `sc_restored[]`, `sc_saved[]`, `sc_owner[]` (`SWITCH_CHECK` only) | `kernel/sched/switch_check.c:21-23` | 4 B, indexed by task slot | the CPUs switching that task | no | Not per-CPU (per task); debug option; not padded |
 
-Not per-CPU arrays, and unchanged: `sched.context_switches` and
-`sched.timer_ticks` (`kernel/sched/sched.c`) and `timer_handler_count`
-(`kernel/drivers/timer.c`) are single global counters that every CPU
-increments, on every switch and every tick. That is true sharing of one
-word; making them per-CPU changes what they count, which is outside a
-placement-only change.
+Not per-CPU arrays, found by the audit and **not changed** (#1279). They
+were found after the hardware rows of #1263 had been taken at c0612fa7,
+so the kernel was left as measured:
+
+| Word | Where | What shares its line | Kind |
+|---|---|---|---|
+| `sched.context_switches`, `sched.timer_ticks`, `sched.task_count` | `kernel/sched/sched.c:235-237`, written at `:2798`, `:2997`, `:3088`, `:1210` | each other | True sharing: one word every CPU increments on every switch or tick. Making them per-CPU changes what they count. |
+| `sched.isolated_cores`, `sched.initialized` | `kernel/sched/sched.c:238-239` | the three counters above (same 64-byte line, after the run queues) | False sharing of read-mostly words: `isolated_cores` is read in every `sched_try_steal` (`:2064`) and on placement (`:1280`, `:1382`), `initialized` at `:2959` and through `scheduler_is_initialized()` (`:1049`), and every counter increment takes the line away. Moving them is placement. |
+| `timer_handler_count`, `pit_ticks` | `kernel/drivers/timer.c:171`, written at `:176` | `timer_interval` and `blkdev_lock` (`kernel/drivers/blkdev.c:15`) | True sharing of the counters; the lock word sits in the same reservation granule. |
+| `task_lock` | `kernel/sched/task.c:31` | the first 48 bytes of `task_table_fallback[0]` (Jetson production image) | A standalone lock whose granule holds other written data. |
+| `sleep_queue_lock` | `kernel/sched/task_sleep.c:42` | `sleep_queue_head` and whatever the linker puts before it | A standalone lock on the wake path, same concern. |
+
+Standalone `spinlock_t` objects were not audited beyond these three; the
+rule above covers per-CPU arrays only.
 
 ## Work stealing (Pre-existing + B3 activation + S4 default flip)
 

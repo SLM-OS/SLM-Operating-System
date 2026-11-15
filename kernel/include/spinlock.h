@@ -88,8 +88,8 @@ typedef struct {
  * cache line, which is also one exclusives reservation granule. A CPU
  * taking lock i then loses its LDAXR reservation every time another CPU
  * stores to lock j in the same line, and its STXR fails although lock i is
- * free. On Jetson this kept CPUs 4 and 5 off their own free run-queue
- * lock for 1.1 to 6.6 ms while CPU 0 took and released its own (#1263).
+ * free. In an R3 wake test kernel on Jetson, CPUs 4 and 5 waited up to
+ * 6.7 ms for their own free run-queue lock (#1263; docs/scheduler.md).
  * Aligning the array as a whole does not help: every element needs its
  * own line.
  *

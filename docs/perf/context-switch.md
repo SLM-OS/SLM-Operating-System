@@ -94,6 +94,13 @@ kernel as the #1234 row's "after" (97.3 ns, 109.0 ns), measured again: the
 two sessions differ by 0.5 ns on Jetson and 1.3 ns on Pi 5, which is the
 size of difference this bench does not resolve.
 
+Limits of the row: the 6 runs per side come from 3 boots per side. On
+Jetson the standard error of the difference is 1.74 ns, so the interval
+is about -2 to +5.5 ns: no difference is shown, and a cost of up to about
+5% is not excluded. The running total above adds this row's delta
+although the row itself says the delta is not shown; without it the
+total stays at 97.3 ns and 109.0 ns.
+
 What the row does not measure: `bench context` switches between two tasks
 on one CPU while the other CPUs idle, so it shows the cost of the padded
 layout on the switch path (37 more instructions in `schedule()`, more
