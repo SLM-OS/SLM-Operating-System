@@ -140,7 +140,7 @@ harness when `ENABLE_BOOT_TESTS` is defined and otherwise calls
 ### Cross-CPU memory is cacheable
 
 CPU-shared state (run queues, task table, `current_task`, steal deques,
-`sched_diag_*`, boot and init flags, preemption state) lives in ordinary
+`sched_diag[]`, boot and init flags, preemption state) lives in ordinary
 Normal Write-Back Inner Shareable memory on every platform, protected by
 ordinary spinlocks, with ordering by barriers and acquire/release. There
 is no CPU-to-CPU cache maintenance on shared state. One boot-time set/way

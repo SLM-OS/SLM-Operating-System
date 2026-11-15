@@ -150,9 +150,9 @@ void admin_telemetry_get_feed_stats(struct admin_telemetry_feed_stats *out);
  * the rate-limit deterministically.
  *
  * On each elapsed window:
- *   - Snapshot per-CPU sched_diag_picked / sched_diag_idle_loops and
+ *   - Snapshot per-CPU sched_diag[].picked / sched_diag[].idle_loops and
  *     publish `tel.cpu` (per-CPU load percent).
- *   - Snapshot sched_diag_steal_* and publish `tel.stl` (work-stealing
+ *   - Snapshot sched_diag[].steal_* and publish `tel.stl` (work-stealing
  *     deltas across all CPUs).
  *   - Snapshot pmm + Rust eviction stats and publish `tel.mem` (free
  *     pages, total pages, weight/workspace eviction count deltas).

@@ -2282,7 +2282,6 @@ static volatile uint32_t pdm_bad_cpu;
 
 static void pdm_task(void *arg)
 {
-    extern volatile int preempt_disabled[];
     uint32_t idx = (uint32_t)(uintptr_t)arg;
     uint32_t last = cpu_id();
     while (!__atomic_load_n(&pdm_stop, __ATOMIC_ACQUIRE)) {
@@ -2295,7 +2294,7 @@ static void pdm_task(void *arg)
             __atomic_fetch_add(&pdm_moved, 1, __ATOMIC_RELAXED);
             last = c;
         }
-        if (preempt_disabled[c] != 0) {
+        if (preempt_disabled[c].v != 0) {
             if (__atomic_fetch_add(&pdm_bad, 1, __ATOMIC_RELAXED) == 0) {
                 pdm_bad_cpu = c;
             }
@@ -4798,7 +4797,7 @@ static void test_policy_switch_calls_init_shutdown(void)
     TEST_ASSERT_EQUAL_INT(1, stub_shutdown_called);
 }
 
-/* Sum of sched_diag_steal_successes over all CPUs. The placement tests
+/* Sum of sched_diag[].steal_successes over all CPUs. The placement tests
  * below add an unpinned task to CPU 0, which publishes it to CPU 0's
  * steal deque; under WORK_STEALING an idle CPU may take it before the
  * assert reads assigned_cpu (run 4 C2: assigned_cpu 1 in 2 of 54 runs).
@@ -4808,7 +4807,7 @@ static uint32_t steal_successes_total(void)
 {
     uint32_t n = 0;
     for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
-        n += sched_diag_steal_successes[c];
+        n += sched_diag[c].steal_successes;
     }
     return n;
 }
@@ -5834,15 +5833,14 @@ static void test_policy_tick_callback_invoked(void)
     /* scheduler_tick() is called by the timer ISR. Call it directly
      * a few times to test the tick callback. We need preempt_disabled
      * to be set so schedule() is skipped (we just want the tick call). */
-    extern volatile int preempt_disabled[];
     uint32_t cpu = cpu_id();
-    preempt_disabled[cpu] = 1;
+    preempt_disabled[cpu].v = 1;
 
     scheduler_tick();
     scheduler_tick();
     scheduler_tick();
 
-    preempt_disabled[cpu] = 0;
+    preempt_disabled[cpu].v = 0;
 
     TEST_ASSERT_TRUE(tick_calls[cpu] >= 3);
 

@@ -110,6 +110,7 @@ int test_suite_tcp_telemetry_server(void);
 int test_suite_vmm(void);
 int test_suite_coherency(void);   /* #1193, ARM64 only */
 int test_suite_nc_axis(void);     /* #1193 cacheable placement, ARM64 only */
+int test_suite_percpu_layout(void);   /* #1263 one cache line per per-CPU element */
 
 /* PMM buddy allocator tests */
 int test_suite_pmm(void);

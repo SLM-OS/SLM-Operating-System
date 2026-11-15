@@ -366,13 +366,13 @@ int cmd_cpu(int argc, char *argv[])
         shell_printf("  CPU  Ticks     Schedule  Picked    IdleLoops\r\n");
         shell_printf("  ---  --------  --------  ------    ---------\r\n");
         shell_printf("  diag_tick ptr=0x%lx val[0]=0x%x\r\n",
-                    (unsigned long)(uintptr_t)sched_diag_tick,
-                    *(volatile uint32_t *)sched_diag_tick);
+                    (unsigned long)(uintptr_t)&sched_diag[0].tick,
+                    sched_diag[0].tick);
         for (uint32_t i = 0; i < cpu_count; i++) {
-            uint32_t t = sched_diag_tick[i];
-            uint32_t s = sched_diag_schedule[i];
-            uint32_t p = sched_diag_picked[i];
-            uint32_t il = sched_diag_idle_loops[i];
+            uint32_t t = sched_diag[i].tick;
+            uint32_t s = sched_diag[i].schedule;
+            uint32_t p = sched_diag[i].picked;
+            uint32_t il = sched_diag[i].idle_loops;
             shell_printf("  %3lu  %8u  %8u  %6u    %9u\r\n", i, t, s, p, il);
         }
         shell_printf("  timer_handler_count: %u\r\n", timer_handler_count);
@@ -401,11 +401,11 @@ int cmd_cpu(int argc, char *argv[])
         for (uint32_t i = 0; i < cpu_count; i++) {
             shell_printf("  %3lu  %8u  %8u  %8u  %8u  %8u\r\n",
                         i,
-                        sched_diag_steal_attempts[i],
-                        sched_diag_steal_successes[i],
-                        sched_diag_steal_stale[i],
-                        sched_diag_steal_empty_victim[i],
-                        sched_diag_steal_push_full[i]);
+                        sched_diag[i].steal_attempts,
+                        sched_diag[i].steal_successes,
+                        sched_diag[i].steal_stale,
+                        sched_diag[i].steal_empty_victim,
+                        sched_diag[i].steal_push_full);
         }
 #endif /* CONFIG_WORK_STEALING */
 
@@ -1998,8 +1998,6 @@ static void s3_steal_work_task(void *arg)
  * for reference. At rest on a 100 Hz tick, a CPU that wakes only on
  * its tick shows idle_per_s close to ticks_per_s; anything above it is
  * wakes from other events (SEV, other interrupts). */
-extern volatile uint32_t sched_diag_idle_loops[];
-extern volatile uint32_t sched_diag_tick[];
 
 /* "123.4" for count per second over dt counter ticks at freq. */
 static void s3_fmt_rate(char *buf, size_t n, uint32_t count, uint64_t dt,
@@ -2012,7 +2010,7 @@ static void s3_fmt_rate(char *buf, size_t n, uint32_t count, uint64_t dt,
 
 /* Idle-loop wakes (#1216). Each pass of idle_task_func's loop is one
  * return from its wait instruction (WFI or WFE) followed by a yield(),
- * so the sched_diag_idle_loops delta over an interval counts the times
+ * so the sched_diag[].idle_loops delta over an interval counts the times
  * that CPU's idle task woke. Prints one `iw` line per CPU with the
  * idle and tick deltas and their rates over dt counter ticks. */
 static void s3_print_idle_wakes(const char *mode, const uint32_t *idle0,
@@ -2047,14 +2045,14 @@ static int bench_idle_wakes(uint32_t ms)
     shell_printf("  Interval: %lu ms at rest (shell sleeping), %lu CPUs\r\n",
                  (unsigned long)ms, (unsigned long)cpu_count);
     for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
-        idle0[c] = sched_diag_idle_loops[c];
-        tick0[c] = sched_diag_tick[c];
+        idle0[c] = sched_diag[c].idle_loops;
+        tick0[c] = sched_diag[c].tick;
     }
     uint64_t t0 = timer_get_count();
     task_sleep_ms(ms);
     for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
-        idle1[c] = sched_diag_idle_loops[c];
-        tick1[c] = sched_diag_tick[c];
+        idle1[c] = sched_diag[c].idle_loops;
+        tick1[c] = sched_diag[c].tick;
     }
     uint64_t t1 = timer_get_count();
     s3_print_idle_wakes("rest", idle0, idle1, tick0, tick1, t1 - t0, freq);
@@ -2109,31 +2107,15 @@ struct s3_snap {
 static struct s3_snap s3_pre;
 static struct s3_snap s3_post;
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-extern volatile uint32_t *sched_diag_steal_attempts;
-extern volatile uint32_t *sched_diag_steal_successes;
-extern volatile uint32_t *sched_diag_steal_push_full;
-extern volatile uint32_t *sched_diag_schedule;
-extern volatile uint32_t *sched_diag_idle_loops;
-extern volatile uint32_t *sched_diag_tick;
-#else
-extern volatile uint32_t sched_diag_steal_attempts[];
-extern volatile uint32_t sched_diag_steal_successes[];
-extern volatile uint32_t sched_diag_steal_push_full[];
-extern volatile uint32_t sched_diag_schedule[];
-extern volatile uint32_t sched_diag_idle_loops[];
-extern volatile uint32_t sched_diag_tick[];
-#endif
-
 static void s3_take_snap(struct s3_snap *s)
 {
     for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
-        s->diag_att[c] = sched_diag_steal_attempts[c];
-        s->diag_ok[c] = sched_diag_steal_successes[c];
-        s->diag_pf[c] = sched_diag_steal_push_full[c];
-        s->ticks[c] = sched_diag_tick[c];
-        s->idle[c] = sched_diag_idle_loops[c];
-        s->sched[c] = sched_diag_schedule[c];
+        s->diag_att[c] = sched_diag[c].steal_attempts;
+        s->diag_ok[c] = sched_diag[c].steal_successes;
+        s->diag_pf[c] = sched_diag[c].steal_push_full;
+        s->ticks[c] = sched_diag[c].tick;
+        s->idle[c] = sched_diag[c].idle_loops;
+        s->sched[c] = sched_diag[c].schedule;
         s->tr[c] = *sched_steal_trace_cpu(c);
         s->dq[c] = *sched_steal_trace_dq(c);
         s->pw[c] = *sched_steal_pdwin(c);
@@ -2922,9 +2904,9 @@ int cmd_bench(int argc, char *argv[])
         uint32_t pre_successes[MAX_CPUS] = {0};
         uint32_t pre_push_full[MAX_CPUS] = {0};
         for (uint32_t c = 0; c < cpu_count; c++) {
-            pre_attempts[c] = sched_diag_steal_attempts[c];
-            pre_successes[c] = sched_diag_steal_successes[c];
-            pre_push_full[c] = sched_diag_steal_push_full[c];
+            pre_attempts[c] = sched_diag[c].steal_attempts;
+            pre_successes[c] = sched_diag[c].steal_successes;
+            pre_push_full[c] = sched_diag[c].steal_push_full;
         }
         /* #1203 trace: snapshot, then start a trace run at t0. */
         s3_take_snap(&s3_pre);
@@ -3009,9 +2991,9 @@ int cmd_bench(int argc, char *argv[])
         shell_puts("    CPU  Attempts  Successes  PushFull\r\n");
         shell_puts("    ---  --------  ---------  --------\r\n");
         for (uint32_t c = 0; c < cpu_count; c++) {
-            uint32_t da = sched_diag_steal_attempts[c] - pre_attempts[c];
-            uint32_t ds = sched_diag_steal_successes[c] - pre_successes[c];
-            uint32_t dpf = sched_diag_steal_push_full[c] - pre_push_full[c];
+            uint32_t da = sched_diag[c].steal_attempts - pre_attempts[c];
+            uint32_t ds = sched_diag[c].steal_successes - pre_successes[c];
+            uint32_t dpf = sched_diag[c].steal_push_full - pre_push_full[c];
             shell_printf("    %3lu  %8u  %9u  %8u\r\n",
                         (unsigned long)c, da, ds, dpf);
         }
@@ -11569,9 +11551,8 @@ int cmd_irqtest(int argc, char *argv[])
     bool skip_daifclr = (argc >= 2 && argv[1] && strcmp(argv[1], "noirq") == 0);
     bool single_mode  = (argc >= 2 && argv[1] && strcmp(argv[1], "single") == 0);
 #if defined(SECONDARY_PREEMPT)
-    extern volatile int preempt_disabled[MAX_CPUS];
     if (single_mode) {
-        preempt_disabled[cpu] = 1;
+        preempt_disabled[cpu].v = 1;
         __asm__ volatile("dsb sy" ::: "memory");
         irqtest_puts(" PD=1");
     }
@@ -11906,7 +11887,7 @@ int cmd_irqtest(int argc, char *argv[])
     /* Restore preempt_disabled so the kernel resumes normal scheduling
      * after the probe. */
     if (single_mode) {
-        preempt_disabled[cpu] = 0;
+        preempt_disabled[cpu].v = 0;
         __asm__ volatile("dsb sy" ::: "memory");
         irqtest_puts(" PD=0");
     }
@@ -13111,8 +13092,8 @@ static void thermal_print_cpus(void)
         }
         struct task *t = task_current_on_cpu(c);
         n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %u:%u/%u:%s",
-                           (unsigned)c, (unsigned)sched_diag_tick[c],
-                           (unsigned)sched_diag_schedule[c],
+                           (unsigned)c, (unsigned)sched_diag[c].tick,
+                           (unsigned)sched_diag[c].schedule,
                            t != NULL ? t->name : "-");
     }
     /* Directly: thermal_uart_out's buffer is smaller than this line. */

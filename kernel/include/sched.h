@@ -12,7 +12,8 @@
 #include "task.h"
 #include "smp.h"
 #include "config.h"
-#include "sched_diag.h"     /* sched_diag_* externs, matched to sched.c (#1193) */
+#include "cacheline.h"
+#include "sched_diag.h"     /* sched_diag[] externs, matched to sched.c (#1193) */
 
 /*
  * Per-CPU run queue.
@@ -35,7 +36,16 @@ struct cpu_runqueue {
     uint64_t running_ticks;     /* Ticks where current task is not idle */
     uint64_t total_ticks;       /* Total ticks since boot on this CPU */
 #endif
-} __attribute__((aligned(64)));  /* CACHE_LINE_SIZE */
+} CACHE_LINE_ALIGNED;
+CACHE_LINE_ASSERT_PADDED(struct cpu_runqueue);
+
+/*
+ * preempt_disabled[cpu].v: set while `cpu` is inside its context-switch
+ * window (definition and history in sched.c). One cache line per CPU
+ * (cacheline.h, #1263). This is the only declaration: a local extern with
+ * the old `volatile int []` type would index with the wrong stride.
+ */
+extern percpu_int_t preempt_disabled[MAX_CPUS];
 
 /*
  * Get the run queue for a CPU. Used by scheduling policies to inspect
@@ -325,16 +335,44 @@ void sched_swo_diag_prelude_report(const char *tag, uint32_t min_us);
 #define SWO_PH_WINDOW       4   /* unlocked, before switch_to(arg = next) */
 #define SWO_PH_EXIT         5   /* task_exit(arg), IRQs masked, before TERMINATED */
 #define SWO_PH_EXIT_SCHED   6   /* task_exit(arg): TERMINATED, calling schedule() */
-extern volatile uint32_t swo_diag_phase[MAX_CPUS];
-extern volatile uint32_t swo_diag_phase_arg[MAX_CPUS];
-extern volatile uint64_t swo_diag_phase_t[MAX_CPUS];
+/* Every per-CPU SWO_DIAG word of one CPU, in that CPU's own cache lines
+ * (#1263; these were sixteen packed arrays). The owner writes; the dump
+ * and the prelude report read from another CPU. */
+struct swo_diag_percpu {
+    volatile uint32_t phase;
+    volatile uint32_t phase_arg;
+    volatile uint64_t phase_t;
+    /* Zombie reaper timing: longest task_destroy_gen and how many took > 1 ms. */
+    volatile uint32_t reap_max_us;
+    volatile uint32_t reap_max_id;
+    volatile uint32_t reap_slow;
+    /* schedule() prelude timing (entry to holding the rq lock, tick masked):
+     * longest total, longest steal attempt with its probe count, longest
+     * wait for the CPU's own rq lock, and how many preludes took over 1 ms.
+     * Reset by sched_swo_diag_prelude_report(). */
+    volatile uint32_t pre_max_us;
+    volatile uint32_t steal_max_us;
+    volatile uint32_t steal_max_probes;
+    volatile uint32_t lockw_max_us;
+    /* For the longest wait: failed try-lock spins, the lock word and the
+     * recorded owner when the wait began, and the owner 1 ms into it. A
+     * long wait with few spins means the waiting CPU was not executing. */
+    volatile uint32_t lockw_spins;
+    volatile uint32_t lockw_word0;
+    volatile uint32_t lockw_own0;
+    volatile uint32_t lockw_own1;
+    volatile uint32_t pre_slow;
+    volatile uint32_t steal_probes;
+} CACHE_LINE_ALIGNED;
+CACHE_LINE_ASSERT_PADDED(struct swo_diag_percpu);
+extern struct swo_diag_percpu swo_pc[MAX_CPUS];
 uint64_t swo_diag_stamp(void);
 #define SWO_PHASE(cpu, ph, arg)                                 \
     do {                                                        \
         uint32_t swo_c_ = (cpu);                                \
-        swo_diag_phase_arg[swo_c_] = (uint32_t)(arg);           \
-        swo_diag_phase_t[swo_c_] = swo_diag_stamp();              \
-        swo_diag_phase[swo_c_] = (ph);                          \
+        swo_pc[swo_c_].phase_arg = (uint32_t)(arg);           \
+        swo_pc[swo_c_].phase_t = swo_diag_stamp();              \
+        swo_pc[swo_c_].phase = (ph);                          \
     } while (0)
 #else
 #define SWO_PHASE(cpu, ph, arg) ((void)0)

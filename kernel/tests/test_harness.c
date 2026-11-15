@@ -280,6 +280,8 @@ static int harness_run_suites(void)
     RUN_SUITE(test_suite_hef);
     RUN_SUITE(test_suite_hef_parser);
 #endif
+    /* Per-CPU locks and words each own a cache line (#1263); every platform. */
+    RUN_SUITE(test_suite_percpu_layout);
     RUN_SUITE(test_suite_littlefs);
     RUN_SUITE(test_suite_x86_boot);
     RUN_SUITE(test_suite_elf);

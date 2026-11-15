@@ -84,7 +84,7 @@ static void reset_test_state(void)
 /* ============================================================================
  * Per-test idle-loop snapshots (#216 dormancy investigation, Pi 5 only)
  *
- * Hooks into Unity's setUp / tearDown to capture sched_diag_idle_loops[]
+ * Hooks into Unity's setUp / tearDown to capture sched_diag[].idle_loops
  * before and after every test in this suite. A secondary CPU whose
  * delta is zero across a whole test is dormant during that test — and
  * since tests run sequentially, the FIRST test whose tearDown reports
@@ -99,7 +99,7 @@ static void reset_test_state(void)
  * ============================================================================ */
 
 #if defined(PLATFORM_RASPI5)
-/* sched_diag_idle_loops: declared in sched_diag.h, matched to sched.c. */
+/* sched_diag[].idle_loops: declared in sched_diag.h, matched to sched.c. */
 
 /* A "dormant" CPU is one whose idle_loops counter hasn't moved
  * across THIS many consecutive tearDowns. Single tests can finish
@@ -138,7 +138,7 @@ void tearDown(void)
     /* Snapshot every secondary's absolute idle counter once. */
     uint32_t cur[MAX_CPUS] = {0};
     for (uint32_t c = 1; c < n; c++) {
-        cur[c] = sched_diag_idle_loops[c];
+        cur[c] = sched_diag[c].idle_loops;
     }
 
     /* Update per-CPU stall streak; emit a [dormancy-enter] line the
@@ -756,7 +756,7 @@ static void test_work_stealing_distributes_load(void)
      * overloaded CPU. An earlier version required `distinct >= 2`
      * (at least two distinct CPUs ran tasks), which turned out to
      * be a weak proxy: on Pi 5, secondary CPUs are sometimes
-     * dormant after boot (ws-diag shows sched_diag_schedule[c] == 0
+     * dormant after boot (ws-diag shows sched_diag[c].schedule == 0
      * for one or more CPUs during the entire test window — see
      * issue #216). When only one non-owner CPU is alive as a
      * stealer it grabs all the tasks before the other stealers
@@ -778,10 +778,10 @@ static void test_work_stealing_distributes_load(void)
      * the deque; any delta indicates `scheduler_add_task_to_cpu` thinks
      * it couldn't push and either a workload regression (e.g. capacity
      * shrunk) or a counter-bookkeeping bug. */
-    /* sched_diag_* counters: declared in sched_diag.h (#1193). */
+    /* sched_diag[] counters: declared in sched_diag.h (#1193). */
     uint32_t pre_push_full[MAX_CPUS] = {0};
     for (uint32_t c = 0; c < cpu_count; c++) {
-        pre_push_full[c] = sched_diag_steal_push_full[c];
+        pre_push_full[c] = sched_diag[c].steal_push_full;
     }
 
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
@@ -805,12 +805,12 @@ static void test_work_stealing_distributes_load(void)
         uint32_t pre_picked[MAX_CPUS] = {0};
         uint32_t pre_idle[MAX_CPUS] = {0};
         for (uint32_t c = 0; c < cpu_count; c++) {
-            pre_attempts[c] = sched_diag_steal_attempts[c];
-            pre_successes[c] = sched_diag_steal_successes[c];
-            pre_stale[c] = sched_diag_steal_stale[c];
-            pre_schedule[c] = sched_diag_schedule[c];
-            pre_picked[c] = sched_diag_picked[c];
-            pre_idle[c] = sched_diag_idle_loops[c];
+            pre_attempts[c] = sched_diag[c].steal_attempts;
+            pre_successes[c] = sched_diag[c].steal_successes;
+            pre_stale[c] = sched_diag[c].steal_stale;
+            pre_schedule[c] = sched_diag[c].schedule;
+            pre_picked[c] = sched_diag[c].picked;
+            pre_idle[c] = sched_diag[c].idle_loops;
         }
         uint64_t t_queued = timer_get_count();
 #endif
@@ -890,12 +890,12 @@ static void test_work_stealing_distributes_load(void)
         }
         uart_printf("] per-cpu(att/succ/stale/sched/picked/idle)=");
         for (uint32_t c = 0; c < cpu_count; c++) {
-            uint32_t da = sched_diag_steal_attempts[c] - pre_attempts[c];
-            uint32_t ds = sched_diag_steal_successes[c] - pre_successes[c];
-            uint32_t dst = sched_diag_steal_stale[c] - pre_stale[c];
-            uint32_t dsc = sched_diag_schedule[c] - pre_schedule[c];
-            uint32_t dp = sched_diag_picked[c] - pre_picked[c];
-            uint32_t di = sched_diag_idle_loops[c] - pre_idle[c];
+            uint32_t da = sched_diag[c].steal_attempts - pre_attempts[c];
+            uint32_t ds = sched_diag[c].steal_successes - pre_successes[c];
+            uint32_t dst = sched_diag[c].steal_stale - pre_stale[c];
+            uint32_t dsc = sched_diag[c].schedule - pre_schedule[c];
+            uint32_t dp = sched_diag[c].picked - pre_picked[c];
+            uint32_t di = sched_diag[c].idle_loops - pre_idle[c];
             uart_printf("%s%lu/%lu/%lu/%lu/%lu/%lu",
                         (c == 0) ? "" : ",",
                         (unsigned long)da, (unsigned long)ds,
@@ -911,7 +911,7 @@ static void test_work_stealing_distributes_load(void)
         for (uint32_t c = 0; c < cpu_count; c++) {
             uart_printf("%s%lu",
                         (c == 0) ? "" : ",",
-                        (unsigned long)sched_diag_idle_loops[c]);
+                        (unsigned long)sched_diag[c].idle_loops);
         }
         uart_printf("]\n");
 #endif
@@ -922,7 +922,7 @@ static void test_work_stealing_distributes_load(void)
 
     /* #175: push-full counter must not advance for this workload. */
     for (uint32_t c = 0; c < cpu_count; c++) {
-        uint32_t delta = sched_diag_steal_push_full[c] - pre_push_full[c];
+        uint32_t delta = sched_diag[c].steal_push_full - pre_push_full[c];
         TEST_ASSERT_MESSAGE(delta == 0,
             "steal_deque push overflowed during distributes-load test");
     }

@@ -2326,10 +2326,10 @@ static int l_cpu_info(lua_State *L) {
         lua_pushboolean(L, sched_is_core_isolated(i));
         lua_setfield(L, -2, "isolated");
 
-        lua_pushinteger(L, (lua_Integer)sched_diag_tick[i]);
+        lua_pushinteger(L, (lua_Integer)sched_diag[i].tick);
         lua_setfield(L, -2, "ticks");
 
-        lua_pushinteger(L, (lua_Integer)sched_diag_schedule[i]);
+        lua_pushinteger(L, (lua_Integer)sched_diag[i].schedule);
         lua_setfield(L, -2, "schedules");
 
         lua_rawseti(L, -2, (int)i + 1);

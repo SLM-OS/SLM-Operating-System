@@ -21,13 +21,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/*
- * Cache line size for ARMv8-A.
- *
- * Most Cortex-A cores use 64-byte cache lines.
- * Could be read from CTR_EL0.DminLine, but 64 is safe for all current cores.
- */
-#define CACHE_LINE_SIZE     64
+/* CACHE_LINE_SIZE (64, CTR_EL0.DminLine on every supported core) comes
+ * from cacheline.h, the kernel's one definition. */
+#include "cacheline.h"
 #define CACHE_LINE_MASK     (CACHE_LINE_SIZE - 1)
 
 /*
