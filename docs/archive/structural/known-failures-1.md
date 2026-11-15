@@ -582,18 +582,49 @@ when the kernel was booted through the stub.
 test. The test exists to catch a stray store that makes a kexec or QEMU boot
 read UEFI; guarding on the same variable turns that case into a skip. The
 condition needs a second witness of a UEFI boot that does not come from
-`slmos_boot_source`. No such symbol was found in this reading (the boot-model
-record is zeroed by `test_no_models_means_no_mount`, and may be empty on a
-UEFI boot without models). Candidates for phase 2: the firmware DTB address
-above the RAM identity map (`vmm_map_firmware_dtb()`), or a second marker
-written by the stub. If neither is acceptable, the fallback is
-`boot_source_is_uefi()` with this loss of coverage recorded on #1231.
+`slmos_boot_source`. No such symbol exists today (the boot-model record is
+zeroed by `test_no_models_means_no_mount`, and may be empty on a UEFI boot
+without models).
+
+**Decision (2026-11-15): a second marker written by the stub.** Chosen over
+the firmware DTB address and over accepting the lost coverage.
+
+1. `kernel/include/boot_source.h`: declare
+   `extern volatile uint64_t slmos_efi_stub_marker;` with two non-zero
+   constants, `EFI_STUB_MARKER_UNSET` (the initialiser) and
+   `EFI_STUB_MARKER_RAN`, and a comment that it is a test witness: drivers
+   keep using `boot_source_is_uefi()`.
+2. `kernel/arch/arm64/efi_stub.c`: define the marker there, initialised to
+   `EFI_STUB_MARKER_UNSET`. It must be in `.data` for the same reason as
+   `slmos_boot_source` (`kernel/src/main.c:116-119`): written before the
+   image is cleaned and copied, and before `.bss` is cleared. Defining it in
+   `efi_stub.c` and not next to `slmos_boot_source` in `main.c` keeps the two
+   in different objects, so one stray store or one misplaced section does not
+   move both. `test_efi_reloc.c` is built only where `efi_stub.c` is
+   (`kernel/tests/test_harness.c:235`), so no other platform needs the symbol.
+3. `kernel/arch/arm64/efi_stub.c:726`: store `EFI_STUB_MARKER_RAN` next to the
+   `slmos_boot_source` store, before the first `efi_dcache_clean_inval` at
+   `:728`.
+4. `kernel/tests/test_efi_reloc.c:220-224`: three outcomes.
+   - Marker is `EFI_STUB_MARKER_RAN`: assert `slmos_boot_source ==
+     BOOT_SOURCE_UEFI` (so a UEFI boot that lost its boot source fails), then
+     `TEST_IGNORE_MESSAGE`.
+   - Marker is `EFI_STUB_MARKER_UNSET`: the two asserts as today.
+   - Any other value: fail.
+   Update the comment at `:214-219`, which says the test kernel is only ever
+   loaded with QEMU `-kernel`.
+5. Remove the test's line from
+   `scripts/hw-suite/known-failures-jetson-uefi-1109-1231.txt`.
 
 **Before / after.** UEFI-direct suite: `[FAIL]` at `test_efi_reloc.c:222`
-(expected 1, actual 2) becomes `[IGNORE]` with the reason. Kexec suite and
-`make test`: still `[PASS]`. To show the guard is not vacuous: on QEMU, a
-temporary `slmos_boot_source = BOOT_SOURCE_UEFI` before the test must give
-`[FAIL]`, not `[IGNORE]`.
+(expected 1, actual 2) becomes `[IGNORE]` with the reason; `classify.sh`
+shows `#1231 x8`. Kexec suite and `make test`: still `[PASS]`, not
+`[IGNORE]`. `make test-qemu-uefi` still passes (it checks the relocated boot
+prints "Boot source: UEFI-direct", `Makefile:1003`). To show the guard is not
+vacuous, two temporary edits on QEMU, each of which must give `[FAIL]` and
+not `[IGNORE]`: `slmos_boot_source = BOOT_SOURCE_UEFI` before the test
+(marker unset), and `slmos_efi_stub_marker = EFI_STUB_MARKER_RAN` before the
+test (boot source still direct).
 
 ### 13.4 Skips: the three oplib "unstaged" tests
 
