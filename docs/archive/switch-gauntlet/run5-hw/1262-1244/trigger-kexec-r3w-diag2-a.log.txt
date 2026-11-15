@@ -1,0 +1,5 @@
+00:03:12 start mode=kexec n=3 elfs=[/root/slmos-s1262-r3w-diag2.elf /root/slmos-s1262-r3w-diag2.elf /root/slmos-s1262-r3w-diag2.elf] skip_current_boot_id=none pid=741902
+00:04:39 trigger 1/3 elf=/root/slmos-s1262-r3w-diag2.elf boot_id=a7beb5dc-756d-4550-b2a8-d8e527646ea8 state+uptime=[running 26.31 ] reply=[8a45808076ffc0af ]
+00:08:43 trigger 2/3 elf=/root/slmos-s1262-r3w-diag2.elf boot_id=df8d74cd-b2d5-4466-b48e-b280f2d6edde state+uptime=[running 25.29 ] reply=[8a45808076ffc0af ]
+00:12:49 trigger 3/3 elf=/root/slmos-s1262-r3w-diag2.elf boot_id=39130fbf-8f4e-45fd-a51a-0dfc8964e570 state+uptime=[running 26.96 ] reply=[8a45808076ffc0af ]
+00:12:49 end triggers=3

@@ -1,0 +1,1 @@
+02:4x UTC first staging attempt right after boot printed nothing and exited non-zero (cause not captured); rerun: 02:12:21 host time, board line: 23:45:00 staged SLMOS.efi sha256=5010bbc78331 (fresh ro mount verified); 6 files, 2180/130892 clusters; no BootNext

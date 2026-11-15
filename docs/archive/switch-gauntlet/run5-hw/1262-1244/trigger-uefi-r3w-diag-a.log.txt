@@ -1,0 +1,4 @@
+23:06:28 start mode=uefi n=2 elfs=[] skip_current_boot_id=1231361a-ffe6-48fe-96e0-8001a500156a pid=634412
+23:07:54 trigger 1/2 elf=ESP boot_id=fec07bcd-f984-4cf1-8309-850e275aed57 state+uptime=[running 24.57 ] reply=[BootNext: 000E ]
+23:11:22 trigger 2/2 elf=ESP boot_id=956645e7-4acf-4cc1-849f-d5ff09e7f158 state+uptime=[running 22.42 ] reply=[BootNext: 000E ]
+23:11:22 end triggers=2

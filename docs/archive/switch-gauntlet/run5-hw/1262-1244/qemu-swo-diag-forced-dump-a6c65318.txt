@@ -1,0 +1,27 @@
+[FILTER] tests=test_wake_during_switch_out repeat=2 source=build index=2898
+  swo-diag at-bound: t=903033 us by_cpu=0 migrate_running_total=2 (255 = none)
+  swo-diag cpu0: current id=5 state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=10 ready=1 qlen=1 q=[6] | tick=18 sched=20830 idle=43690 picked=36100 defer=18
+  swo-diag cpu1: current id=2(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=18 sched=16871 idle=43693 picked=21854 defer=41
+  swo-diag cpu2: current id=3(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=18 sched=16779 idle=43693 picked=21554 defer=48
+  swo-diag cpu3: current id=4(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=18 sched=19006 idle=43693 picked=24518 defer=210
+  swo-diag after-poll: t=905452 us by_cpu=0 migrate_running_total=2 (255 = none)
+  swo-diag cpu0: current id=5 state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=10 ready=1 qlen=1 q=[6] | tick=18 sched=20830 idle=43690 picked=36100 defer=18 | delta tick=0 sched=0 idle=0 picked=0 defer=0
+  swo-diag cpu1: current id=2(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=18 sched=16871 idle=43693 picked=21854 defer=41 | delta tick=0 sched=0 idle=0 picked=0 defer=0
+  swo-diag cpu2: current id=3(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=18 sched=16779 idle=43693 picked=21554 defer=48 | delta tick=0 sched=0 idle=0 picked=0 defer=0
+  swo-diag cpu3: current id=4(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=18 sched=19006 idle=43693 picked=24518 defer=210 | delta tick=0 sched=0 idle=0 picked=0 defer=0
+  swo-diag: finished 62 us into the 1 s poll (wm=424)
+  [ITER 1/2]  [PASS] test_wake_during_switch_out (309458 us)
+  swo-diag at-bound: t=1268607 us by_cpu=0 migrate_running_total=2 (255 = none)
+  swo-diag cpu0: current id=5 state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=1 qlen=1 q=[6] | tick=38 sched=49363 idle=43690 picked=86219 defer=60 | delta tick=20 sched=28533 idle=0 picked=50119 defer=42
+  swo-diag cpu1: current id=2(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=23 ready=0 qlen=0 q=[] | tick=43 sched=35950 idle=43700 picked=46521 defer=157 | delta tick=25 sched=19079 idle=7 picked=24667 defer=116
+  swo-diag cpu2: current id=24 state=3 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=41 sched=38356 idle=43700 picked=49514 defer=397 | delta tick=23 sched=21577 idle=7 picked=27960 defer=349
+  swo-diag cpu3: current id=25 state=3 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=39 sched=38701 idle=43697 picked=49805 defer=328 | delta tick=21 sched=19695 idle=4 picked=25287 defer=118
+  swo-diag after-poll: t=1271921 us by_cpu=0 migrate_running_total=2 (255 = none)
+  swo-diag cpu0: current id=5 state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=1 qlen=1 q=[6] | tick=38 sched=49363 idle=43690 picked=86219 defer=60 | delta tick=0 sched=0 idle=0 picked=0 defer=0
+  swo-diag cpu1: current id=2(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=43 sched=35951 idle=43701 picked=46521 defer=157 | delta tick=0 sched=1 idle=1 picked=0 defer=0
+  swo-diag cpu2: current id=3(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=41 sched=38357 idle=43701 picked=49514 defer=397 | delta tick=0 sched=1 idle=1 picked=0 defer=0
+  swo-diag cpu3: current id=4(idle) state=1 on_cpu=1 | switch_in_waiting=NULL id=0 on_cpu=255 | pd=0 rq_lock=0x0 zombie=0 ready=0 qlen=0 q=[] | tick=39 sched=38702 idle=43698 picked=49805 defer=328 | delta tick=0 sched=1 idle=1 picked=0 defer=0
+  swo-diag: finished 2 us into the 1 s poll (wm=226)
+  [ITER 2/2]  [PASS] test_wake_during_switch_out (312024 us)
+[FILTER] Summary
+[FILTER] [PASS] test_wake_during_switch_out: runs=2 passed=2 failed=0 ignored=0 us min=309458 avg=310741 max=312024

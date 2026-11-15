@@ -1,0 +1,22 @@
+#!/bin/bash
+# SWO_DIAG off must cost nothing: build the Jetson production kernel and the
+# Jetson test kernel (R3 wake filter) at the diag head with the option off and
+# at 6a4cfa93, then compare section sizes and the .text/.rodata bytes.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/332cf057-6ae0-47f7-8ea7-10f13477578f/scratchpad
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Issues-1262-and-1244/.wt
+for w in a base; do
+  bash $S/bld.sh $w ts-$w-prod kernel PLATFORM=JETSON_ORIN_NANO >/dev/null
+  cp $W/$w/build/kernel/slmos.elf $S/img/ts-$w-prod.elf
+  bash $S/bld.sh $w ts-$w-test kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_wake_during_switch_out TEST_REPEAT=200 >/dev/null
+  cp $W/$w/build/kernel-test/slmos.elf $S/img/ts-$w-test.elf
+done
+for k in prod test; do
+  echo "== $k: a = diag head, SWO_DIAG off; base = 6a4cfa93"
+  for w in a base; do
+    f=$S/img/ts-$w-$k.elf
+    aarch64-none-elf-size -A $f | awk -v w=$w '$1==".text"||$1==".rodata"||$1==".data"||$1==".bss"{printf "%s %s=%s ", w, $1, $2} END{print ""}'
+    aarch64-none-elf-objcopy -O binary -j .text $f $S/img/ts-$w-$k.text
+    echo "$w .text sha256=$(sha256sum $S/img/ts-$w-$k.text | cut -c1-16) bytes=$(stat -c %s $S/img/ts-$w-$k.text) swo-diag strings=$(strings $f | grep -c 'swo-diag')"
+  done
+  cmp -l $S/img/ts-a-$k.text $S/img/ts-base-$k.text | wc -l | sed 's/^/differing .text bytes: /'
+done

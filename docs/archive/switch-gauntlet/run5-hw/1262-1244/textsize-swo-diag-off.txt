@@ -1,0 +1,12 @@
+== prod: a = diag head, SWO_DIAG off; base = 6a4cfa93
+a .text=2479448 a .rodata=6159778 a .data=148480 a .bss=37429616 
+a .text sha256=d419e1dd224da7cb bytes=2479448 swo-diag strings=0
+base .text=2479448 base .rodata=6160290 base .data=148480 base .bss=37429616 
+base .text sha256=0cb94faf09e95538 bytes=2479448 swo-diag strings=0
+differing .text bytes: 54905
+== test: a = diag head, SWO_DIAG off; base = 6a4cfa93
+a .text=2541752 a .rodata=7365282 a .data=148480 a .bss=37447408 
+a .text sha256=a23a437ce94e999e bytes=2541752 swo-diag strings=0
+base .text=2541752 base .rodata=7365794 base .data=148480 base .bss=37447408 
+base .text sha256=664f77412b981bec bytes=2541752 swo-diag strings=0
+differing .text bytes: 56213

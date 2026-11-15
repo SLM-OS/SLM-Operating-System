@@ -1,0 +1,4 @@
+01:38:36 start mode=kexec n=2 elfs=[/root/slmos-s1244-suite.elf /root/slmos-s1244-suite.elf] skip_current_boot_id=none pid=905620
+01:40:02 trigger 1/2 elf=/root/slmos-s1244-suite.elf boot_id=2252fef1-d850-4908-a4db-3c3563242593 state+uptime=[running 26.04 ] reply=[a8298b17d089d71f ]
+01:48:13 trigger 2/2 elf=/root/slmos-s1244-suite.elf boot_id=4629ffa9-eb14-473c-b584-b80f220b4571 state+uptime=[running 27.01 ] reply=[a8298b17d089d71f ]
+01:48:13 end triggers=2

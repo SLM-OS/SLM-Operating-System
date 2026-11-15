@@ -1,0 +1,17 @@
+#!/bin/bash
+# stage-esp.sh <image> : copy a PE image to \EFI\SLMOS\SLMOS.efi on jetson-nano-2's NVMe ESP.
+# No BootNext, no reboot (the trigger loop arms BootNext per boot). Verifies the
+# write from a fresh read-only mount and runs fsck.vfat -n (#1187 hygiene).
+set -euo pipefail
+IMG=$1; J=root@192.168.4.5
+sum=$(sha256sum "$IMG" | cut -d' ' -f1)
+scp -q -o BatchMode=yes "$IMG" $J:/tmp/slmos-uefi.efi
+ssh -o BatchMode=yes $J "bash -s -- $sum" <<'REMOTE'
+set -euo pipefail
+want=$1; dev=/dev/disk/by-partlabel/SLMOS-ESP; mnt=$(mktemp -d)
+mount $dev $mnt; cp /tmp/slmos-uefi.efi $mnt/EFI/SLMOS/SLMOS.efi; sync; umount $mnt
+mount -o ro $dev $mnt; got=$(sha256sum $mnt/EFI/SLMOS/SLMOS.efi | cut -d' ' -f1); umount $mnt; rmdir $mnt
+rm -f /tmp/slmos-uefi.efi
+[ "$got" = "$want" ] || { echo "MISMATCH got=$got want=$want"; exit 1; }
+echo "$(date -u +%T) staged SLMOS.efi sha256=${want:0:12} (fresh ro mount verified); $(fsck.vfat -n $dev | tail -1); $(efibootmgr | grep -i bootnext || echo 'no BootNext')"
+REMOTE
