@@ -200,6 +200,28 @@ Tests use consistent markers for pass/fail detection:
 
 The Makefile primarily uses the semihosting exit code to determine pass/fail, with fallback to output parsing for crash detection.
 
+### Known Failures on Hardware
+
+On hardware the suite does not yet end with zero failures. Each test that is
+known to fail is listed, with the issue that owns it, in one file per boot
+path under `scripts/hw-suite/`:
+
+| File | Boot path | Tests |
+|------|-----------|-------|
+| `known-failures-jetson-1109.txt` | Jetson, kexec | 14 |
+| `known-failures-jetson-uefi-1109-1231.txt` | Jetson, UEFI-direct | 21 |
+| `known-failures-pi5-1109.txt` | Pi 5 | 18 (3 when the SD card does not probe, #1280) |
+
+Each entry is `<test name><TAB>#<issue>`. A `check:<text><TAB>#<issue>` entry
+names a `[FAIL]` line that a listed test prints as a sub-check; it is not a
+test and is not counted. An entry without an issue number is rejected, and an
+entry is removed when its issue closes.
+
+`scripts/hw-suite/classify.sh <list> <capture>...` reads saved suite captures
+and prints, per capture, the failing tests per issue, any failing test that is
+not in the list, and listed tests that did not fail. It exits 1 when a capture
+has a failure that is not in the list.
+
 ### Running Selected Tests (Filter and Repeat)
 
 A boot-test kernel can run only some tests, many times. The filter is a

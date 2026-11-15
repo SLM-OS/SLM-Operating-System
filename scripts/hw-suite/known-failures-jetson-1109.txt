@@ -1,0 +1,22 @@
+# Known test-kernel failures: Jetson Orin Nano, kexec boot path. 14 tests.
+# Read by classify.sh. Format, one entry per line, TAB-separated:
+#   <test name><TAB>#<issue>         a counted test that fails, and the issue that owns it
+#   check:<text><TAB>#<issue>        a [FAIL] line printed inside a listed test (not a test, not counted)
+# Every entry names an open issue. An entry is removed when its issue closes.
+# Source: known-failures triage, docs/archive/structural/known-failures-1.md (#1109).
+gpu: capabilities detect valid	#1270
+test_builtin_commands_grouped_and_sorted	#1269
+test_coalesce_enables_larger_allocation	#1207
+test_every_command_has_help_entry	#1268
+test_gpu_get_info_valid	#1270
+test_gpu_jetson_uses_stub_driver	#1270
+test_multiple_cores_isolated	#1272
+test_net_driver_registered	#1273
+test_recursive_coalescing	#1207
+test_round_robin_distributes_tasks	#1272
+test_slm_gpu_run_mnist_returns_negative_off_jetson	#1271
+test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson	#1271
+test_slm_gpu_set_mnist_input_returns_negative_off_jetson	#1271
+test_timer_irq_is_physical	#1267
+# Not tests. "no help entry ..." is printed by test_every_command_has_help_entry; tracked in #1268.
+check:no help entry for built-in 'nvcsi'	#1268
