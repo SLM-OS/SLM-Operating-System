@@ -1,0 +1,9 @@
+#!/bin/bash
+# jbackup.sh : copy the as-found \EFI\SLMOS\SLMOS.efi off jetson-nano-2's NVMe ESP
+# (fresh read-only mount) to $S/a/img/SLMOS-asfound-A2.efi and print both hashes.
+S=$(dirname "$0")
+J=root@192.168.4.5
+ssh -o BatchMode=yes $J 'dev=/dev/disk/by-partlabel/SLMOS-ESP; mnt=$(mktemp -d); mount -o ro $dev $mnt && cp $mnt/EFI/SLMOS/SLMOS.efi /tmp/slmos-1263-asfound.efi; umount $mnt; rmdir $mnt; sha256sum /tmp/slmos-1263-asfound.efi'
+scp -q -o BatchMode=yes $J:/tmp/slmos-1263-asfound.efi $S/img/SLMOS-asfound-A2.efi
+ssh -o BatchMode=yes $J 'rm -f /tmp/slmos-1263-asfound.efi'
+echo "host copy: $(sha256sum $S/img/SLMOS-asfound-A2.efi)"

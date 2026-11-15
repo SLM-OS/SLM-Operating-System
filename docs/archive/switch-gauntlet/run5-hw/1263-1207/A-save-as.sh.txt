@@ -1,0 +1,16 @@
+#!/bin/bash
+# save-as.sh <tool result json> <dest> <title...> : save an --assert-shares x20
+# serial_send result (jq .result of the labctl tool result file, verbatim)
+# under a header with the verdict lines, as the close-out session did.
+src=$1; dst=$2; shift 2
+body=$(jq -r .result "$src")
+{
+  echo "# $*"
+  echo "# command: lua-admin -e \"for i=1,20 do print('AS-RUN '..i) print('AS-RC '..i..' '..slm.shell_exec('bench stealing --sustain 2500 --assert-shares')) end print('AS-'..'END')\""
+  echo "# serial_send output of this session, verbatim (jq .result of the tool result file $(basename $src)); the echoed command line is garbled (known labctl echo issue)"
+  echo "# verdicts: ASSERT-SHARES PASS $(echo "$body" | grep -a -c 'ASSERT-SHARES: PASS'), FAIL $(echo "$body" | grep -a -c 'ASSERT-SHARES: FAIL'); AS-RC values: $(echo "$body" | grep -a '^AS-RC ' | awk '{print $3}' | tr -d '\r' | sort | uniq -c | tr '\n' ' '); AS-RUN lines $(echo "$body" | grep -a -c '^AS-RUN '); AS-END present: $(echo "$body" | grep -a -c '^AS-END')"
+  echo "$body" | grep -a 'ASSERT-SHARES:' | tr -d '\r' | awk '{print "# run " NR ": " $0}'
+  echo "# ---- serial ----"
+  echo "$body"
+} > "$dst"
+head -4 "$dst" | tail -1; grep -c "^# run" "$dst"

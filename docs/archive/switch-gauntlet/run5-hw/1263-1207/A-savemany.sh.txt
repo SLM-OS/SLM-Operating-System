@@ -1,0 +1,18 @@
+#!/bin/bash
+# savemany.sh <jetson|pi5> <labctl dir> <evidence prefix> <first boot number> <n> <trigger log name or -> <title...>
+# Saves run_01..run_n of one boot_test call as <prefix>-bootNN.txt with save.sh
+# (both-ends check) into the board's evidence worktree; copies the trigger log.
+S=$(dirname "$0")
+board=$1; dir=$2; prefix=$3; first=$4; n=$5; trig=$6; shift 6
+if [ $board = pi5 ]; then
+  E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a-evp/docs/archive/switch-gauntlet/run5-hw/1263-1207
+  export START='=====|SLM-OS v'
+else
+  E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a-evj/docs/archive/switch-gauntlet/run5-hw/1263-1207
+fi
+mkdir -p $E
+for i in $(seq 1 $n); do
+  b=$(printf %02d $((first + i - 1)))
+  bash $S/save.sh /var/lib/labctl/output/$dir/run_$(printf %02d $i).txt $E/$prefix-boot$b.txt "$*, boot $b (run $i of labctl dir $dir)"
+done
+if [ "$trig" != - ] && [ -f "$S/$trig" ]; then cp "$S/$trig" $E/; sed 's/^/  trigger: /' "$S/$trig"; fi

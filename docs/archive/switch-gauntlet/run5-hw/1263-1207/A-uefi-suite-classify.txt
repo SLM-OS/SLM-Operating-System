@@ -1,0 +1,3 @@
+A-uefi-suite-c0612fa7-boot01.txt | build 20261115055027 (c0612fa7) | Boot-mode : Coldboot | [FAIL] 21 total failure(s) | distinct FAIL names 22 | not in known list: none | halts: 0
+A-uefi-suite-c0612fa7-boot02.txt | build 20261115055027 (c0612fa7) | Boot-mode : Coldboot | [FAIL] 21 total failure(s) | distinct FAIL names 22 | not in known list: none | halts: 0
+A-uefi-suite-c0612fa7-boot03.txt | build 20261115055027 (c0612fa7) | Boot-mode : Coldboot | [FAIL] 22 total failure(s) | distinct FAIL names 23 | not in known list: test_preempt_flag_follows_migrated_task | halts: 0

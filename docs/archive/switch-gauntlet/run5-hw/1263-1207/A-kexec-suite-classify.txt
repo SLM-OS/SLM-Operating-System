@@ -1,0 +1,3 @@
+A-kexec-suite-c0612fa7-boot01.txt | build 20261115055027 (c0612fa7) | Boot-mode : Coldboot | [FAIL] 14 total failure(s) | distinct FAIL names 15 | not in known list: none | halts: 0
+A-kexec-suite-c0612fa7-boot02.txt | build 20261115055027 (c0612fa7) | Boot-mode : Coldboot | [FAIL] 14 total failure(s) | distinct FAIL names 15 | not in known list: none | halts: 0
+A-kexec-suite-c0612fa7-boot03.txt | build 20261115055027 (c0612fa7) | Boot-mode : Coldboot | [FAIL] 14 total failure(s) | distinct FAIL names 15 | not in known list: none | halts: 0

@@ -1,0 +1,2 @@
+11:58:36 /root/slmos-1263-jet-prod-P.elf sha256=9787645fe5e5f378 OK (synced)
+11:58:36 /root/slmos-1263-jet-suite-P.elf sha256=5d6c75ee0e9834c5 OK (synced)
