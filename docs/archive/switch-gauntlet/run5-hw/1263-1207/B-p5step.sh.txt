@@ -1,0 +1,13 @@
+#!/bin/bash
+# p5step.sh <labctl dir name> <evidence file base> <title...>: save run_01 of a Pi 5 boot_test call into the
+# Pi 5 evidence worktree (save.sh, both ends checked) and print its class lines.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263
+d=$1; base=$2; shift 2
+E=$W/.wt/b-evp/docs/archive/switch-gauntlet/run5-hw/1263-1207; mkdir -p $E
+f=/var/lib/labctl/output/$d/run_01.txt
+START='RPi: BOOTSYS|Boot-mode|bootloader|NOTICE:  BL31' bash $S/b/save.sh $f $E/$base.txt "$*" | cut -c1-200
+echo "pmm suite: $(grep -a -A140 'PMM Buddy Allocator Tests' $f | grep -a -m1 'Tests: ' | tr -d '\r' | tr -s ' ') | coalesce $(grep -a -o '\[[A-Z]*\] test_coalesce_enables_larger_allocation' $f | cut -c1-6) recursive $(grep -a -o '\[[A-Z]*\] test_recursive_coalescing$' $f | head -1 | cut -c1-6)$(grep -a -o '\[[A-Z]*\] test_recursive_coalescing.$' $f | head -1 | cut -c1-6) | new tests pass: $(grep -a -c 'PASS\] test_\(coalesce_with_lone\|recursive_coalescing_with_lone\|add_region_leaves\|free_does_not_merge\|free_rejects_range\|verify_reports\)' $f)/6"
+echo "findings: $(grep -a -c 'pmm-verify\] FINDING' $f) total, non-self-test $(grep -a 'pmm-verify\] FINDING' $f | grep -a -c -v 'self-test') | page faults $(grep -a -c 'PAGE FAULT' $f) panics $(grep -a -c 'KERNEL PANIC' $f) | $(grep -a -m1 'total failure\|All test suites passed' $f | tr -d '\r')"
+echo "fails: $(grep -a '^  \[FAIL\] ' $f | tr -d '\r' | sed 's/^  \[FAIL\] //' | sort | tr '\n' ',' | cut -c1-700)"
+echo "order0 at boot: $(grep -a -m1 'Order  0 ' $f | tr -s ' ') first lines: $(head -c 300 $f | tr -d '\r' | tr '\n' '|' | cut -c1-120)"

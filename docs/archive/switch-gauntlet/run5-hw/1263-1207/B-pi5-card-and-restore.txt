@@ -1,0 +1,20 @@
+pi-5-1 SD card, phase B2 (builder B), 2026-11-15. All through labctl MCP (sdwire_info, sdwire_ls, sdwire_update, boot_test).
+
+As found (sdwire_info, sdwire_ls partition 1, board powered off first): one FAT32 partition labelled SLMOS, clean;
+kernel_2712.img 6935256 bytes mtime 2026-10-29T04:54:04Z; kernel8.img 6935256 bytes mtime 2026-10-29T04:54:04Z;
+the root also holds (firmware files, config.txt, tryboot.txt, files/, slmstore/, overlays/, tiny.jsonl, corpus.jsonl).
+
+Steps:
+ 1. sdwire_update renames ["kernel_2712.img:kernel_2712.img.orig-1207"]            (its own call)
+ 2. sdwire_update copies  ["kernel_2712-1207-suite-647c2c33.img:kernel_2712.img"]   (sha256 a1cf8e5f95652cded4161fa102690eb1a66d732c99b83012eb8c2aa056aed278 in /var/lib/labctl/images)
+ 3. boot_test x1, three times (B-pi5-suite-647c2c33-boot01..03.txt), pattern "Task 'main' \(id=\d+\) exiting", timeout 480 s
+ 4. sdwire_update deletes ["kernel_2712.img"]                                        (the test image)
+ 5. sdwire_update renames ["kernel_2712.img.orig-1207:kernel_2712.img"]
+ 6. sdwire_ls: kernel_2712.img 6935256 bytes mtime 2026-10-29T04:54:04Z, kernel8.img unchanged, no *.orig-1207 left:
+    the same listing as found.
+ 7. boot_test x1, pattern "slmos>" (B-pi5-restore-check-boot01.txt)
+ 8. delete_image kernel_2712-1207-suite-647c2c33.img; no image with 1207 in its name is left in /var/lib/labctl/images.
+kernel8.img and every other file were not touched. Board left powered on at the original kernel's shell.
+
+Note on save.sh's verdict "NO-POWER-ON-LINE" for the Pi 5 files: the Pi 5 firmware prints nothing on this UART; each capture
+starts at the kernel's banner block, which is the first output after power-on (as in earlier Pi 5 captures of this log).

@@ -1,0 +1,7 @@
+#!/bin/bash
+# stage-pi5.sh: copy the Pi 5 suite image into labctl's image directory (temp name + mv).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+name=kernel_2712-1207-suite-647c2c33.img
+df -h /var/lib/labctl/images | tail -1
+t=$(mktemp /var/lib/labctl/images/.upload-XXXXXX) && { cp $S/b/img/$name "$t" && chmod 644 "$t" && mv "$t" /var/lib/labctl/images/$name; } || rm -f "$t"
+sha256sum /var/lib/labctl/images/$name
