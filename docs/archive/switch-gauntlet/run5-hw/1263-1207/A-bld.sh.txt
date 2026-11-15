@@ -1,0 +1,30 @@
+#!/bin/bash
+# bld.sh <worktree name under $W/.wt> <image name> <make target: kernel|kernel-test> [make args...]
+# Builds one image, copies ELF and PE/flat image to $S/a/img/<name>.{elf,bin}
+# and appends one record to $S/a/images.txt (sha256, sizes, banner, git head).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt
+wt=$1; name=$2; target=$3; shift 3
+mkdir -p $S/a/img $S/a/buildlogs
+dir=kernel; [ "$target" = kernel-test ] && dir=kernel-test
+log=$S/a/buildlogs/$name.log
+if ! make -C $W/$wt $target "$@" > $log 2>&1; then
+  echo "BUILD FAILED $name (see $log)"; tail -5 $log; exit 1
+fi
+elf=$W/$wt/build/$dir/slmos.elf; bin=$W/$wt/build/$dir/slmos.bin
+cp $elf $S/a/img/$name.elf; cp $bin $S/a/img/$name.bin
+head=$(git -C $W/$wt rev-parse --short=8 HEAD)
+dirty=$(git -C $W/$wt status --porcelain --untracked-files=no | wc -l)
+banner=$(strings -a $elf | grep -m1 -E 'build [0-9]{14} \(')
+sizes=$(aarch64-none-elf-size -A $elf | awk '$1==".text"||$1==".rodata"||$1==".data"||$1==".bss"{printf "%s=%s ", $1, $2}')
+{
+  echo "== $name"
+  echo "   worktree=$wt head=$head tracked-modified-files=$dirty"
+  echo "   make $target $*"
+  echo "   banner: $banner"
+  echo "   elf: sha256=$(sha256sum $elf | cut -d' ' -f1) bytes=$(stat -c %s $elf)"
+  echo "   bin: sha256=$(sha256sum $bin | cut -d' ' -f1) bytes=$(stat -c %s $bin)"
+  echo "   sections: $sizes"
+  echo "   built: $(date -u +%FT%TZ)"
+} >> $S/a/images.txt
+echo "OK $name $banner elf=$(sha256sum $elf | cut -c1-8) bin=$(sha256sum $bin | cut -c1-8)"

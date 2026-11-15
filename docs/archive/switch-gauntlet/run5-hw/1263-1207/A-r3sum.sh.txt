@@ -1,0 +1,15 @@
+#!/bin/bash
+# r3sum.sh <evidence file>... : R3 wake x1000 counts per boot, with Entry 41's
+# definitions (checked against its files: kexec-r3w-diag5-ae1399ba-x1000-boot01
+# gives 4 / 10 / 811552 and uefi-r3w-diag5-ae1399ba-x1000-boot01 gives 30 / 49 / 827300):
+#   slow finishes         = lines "swo-diag: slow finish" (finish incomplete 10 ms after the stop)
+#   prelude iterations    = lines "swo-diag prelude" (printed once per iteration that had a
+#                           schedule() prelude over 1 ms on any CPU)
+#   slowest iteration     = max= of the [FILTER] summary line, in us
+#   NOT-FINISHED          = lines containing NOT-FINISHED
+# Lines of the '#' header are excluded (the header repeats summary lines).
+for f in "$@"; do
+  body=$(grep -a -v '^#' "$f")
+  sumline=$(echo "$body" | grep -a '^\[FILTER\] \[' | tr -d '\r' | head -1)
+  echo "$(basename "$f") | $(echo "$body" | grep -a -m1 -oE 'build [0-9]{14} \([0-9a-f-]+\)') | $(echo "$body" | grep -a -m1 -o 'Boot source: [a-zA-Z ]*' | tr -d '\r') | slow finishes $(echo "$body" | grep -a -c 'swo-diag: slow finish') | slow-10ms dumps $(echo "$body" | grep -a -c 'swo-diag slow-10ms') | iterations with a prelude over 1 ms $(echo "$body" | grep -a -c 'swo-diag prelude') | lockwait lines $(echo "$body" | grep -a -c 'swo-diag lockwait') | NOT-FINISHED $(echo "$body" | grep -a -c 'NOT-FINISHED') | [ITER] PASS lines $(echo "$body" | grep -a -c '\[ITER [0-9]*/[0-9]*\]  \[PASS\]') | ${sumline:-NO FILTER SUMMARY LINE}"
+done

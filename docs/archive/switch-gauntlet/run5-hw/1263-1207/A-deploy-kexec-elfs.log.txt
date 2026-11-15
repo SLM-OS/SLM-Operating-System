@@ -1,0 +1,4 @@
+07:39:00 /root/slmos-1263-jet-r3w-U.elf sha256=3fb6febfeb06abc5 OK (synced)
+07:39:01 /root/slmos-1263-jet-r3w-P.elf sha256=bf8ebda5ccadf2b1 OK (synced)
+07:39:02 /root/slmos-1263-jet-prod-U.elf sha256=255ec63bb5a31d94 OK (synced)
+07:39:02 /root/slmos-1263-jet-prod-P.elf sha256=9787645fe5e5f378 OK (synced)

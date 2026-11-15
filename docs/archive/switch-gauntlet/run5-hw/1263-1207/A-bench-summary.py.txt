@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""(session 1263 copy: file names start A-, side is field 4; base = unpadded ae1399ba, head = padded c0612fa7)\nSummarise bench-context-<board>-<side>-*.txt raw files: per-run Mean/p50/p95, per-side stats."""
+import glob, os, re, statistics, sys
+
+d = sys.argv[1]
+out = []
+for board in ("jetson", "pi5"):
+    sides = {}
+    for f in sorted(glob.glob(os.path.join(d, f"A-bench-context-{board}-*-*.txt"))):
+        side = os.path.basename(f).split("-")[4]
+        txt = open(f, encoding="utf-8", errors="replace").read()
+        means = [int(x) for x in re.findall(r"Mean: (\d+) ns", txt)]
+        p50 = [int(x) for x in re.findall(r"p50: (\d+) ns", txt)]
+        p95 = [int(x) for x in re.findall(r"p95: (\d+) ns", txt)]
+        for m, a, b in zip(means, p50, p95):
+            sides.setdefault(side, []).append((os.path.basename(f), m, a, b))
+    if not sides:
+        continue
+    out.append(f"== {board}")
+    st = {}
+    for side in ("base", "head"):
+        rows = sides.get(side, [])
+        for r in rows:
+            out.append(f"  {side} {r[0]}: mean {r[1]} p50 {r[2]} p95 {r[3]}")
+        m = [r[1] for r in rows]
+        st[side] = (statistics.mean(m), statistics.stdev(m), len(m))
+        out.append(f"  {side}: n={len(m)} mean-of-means {statistics.mean(m):.2f} ns sd {statistics.stdev(m):.2f} "
+                   f"min {min(m)} max {max(m)}; p50 values {sorted(set(r[2] for r in rows))}; "
+                   f"p95 values {sorted(set(r[3] for r in rows))}; median of p50 {statistics.median(r[2] for r in rows)}; "
+                   f"median of p95 {statistics.median(r[3] for r in rows)}")
+    (mb, sb, nb), (mh, sh, nh) = st["base"], st["head"]
+    se = (sb**2 / nb + sh**2 / nh) ** 0.5
+    out.append(f"  delta {mh - mb:+.2f} ns ({(mh - mb) / mb * 100:+.1f}%), Welch t {(mh - mb) / se:.1f} "
+               f"(SE {se:.2f} ns); ranges overlap: {min(r for r in [st['head'][0]]) and (max(x[1] for x in sides['base']) >= min(x[1] for x in sides['head']))}")
+print("\n".join(out))

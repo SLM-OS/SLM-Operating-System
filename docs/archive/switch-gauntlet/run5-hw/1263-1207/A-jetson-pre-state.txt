@@ -1,0 +1,32 @@
+# jetson-nano-2 state: as found, Phase A1 start (2026-11-15T07:35:30Z)
+boot_id 54da2d11-9171-4b8f-82f8-01071c54047e uptime 14602.21
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+Boot000E* SLM-OS NVMe
+no BootNext
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.loHRlg0c6u/EFI/SLMOS/SLMOS.efi
+total 8668
+drwxr-xr-x 2 root root    4096 Nov  7 19:43 .
+drwxr-xr-x 4 root root    4096 Nov  8 05:40 ..
+-rwxr-xr-x 1 root root 8864840 Nov 14 18:53 SLMOS.efi
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+098f316368baf94ef117195d30cda8e1f2124fc9e66fecef7bce4c15f815d6c5  /root/slmos.elf
+/root *.elf* count: 14
+-rwxr-xr-x  1 root root   10089968 Nov  5 04:10 slmos-1079.elf
+-rwxr-xr-x  1 root root    8885392 Nov  3 14:16 slmos-1088.elf
+-rwxr-xr-x  1 root root   10220056 Nov  3 20:02 slmos-1092.elf
+-rwxr-xr-x  1 root root    8595976 Oct 29 23:10 slmos-A.elf
+-rwxr-xr-x  1 root root    8596168 Oct 29 23:10 slmos-B.elf
+-rwxr-xr-x  1 root root    8596488 Oct 29 23:22 slmos-C.elf
+-rwxr-xr-x  1 root root    7740672 May  6  2026 slmos-combined.elf
+-rwxr-xr-x  1 root root    7740520 May  6  2026 slmos-control.elf
+-rwxr-xr-x  1 root root    8596488 Oct 30 02:36 slmos-D.elf
+-rwxr-xr-x  1 root root    8602432 Oct 30 13:11 slmos-E.elf
+-rwxr-xr-x  1 root root    9796520 Oct 31 16:47 slmos.elf
+-rwxr-xr-x  1 root root    8316080 Oct 29 15:28 slmos.elf.pre-pr6
+-rwxr-xr-x  1 root root    7515528 Apr 29  2026 slmos.elf.prev
+-rwxr-xr-x  1 root root   16558408 Apr 28  2026 slmos.elf.symposium
+/root files named 1263 or 1207: 0
+/tmp slmos files: 
+/dev/mmcblk0p1  233G   42G  182G  19% /

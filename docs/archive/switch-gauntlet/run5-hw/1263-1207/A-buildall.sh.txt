@@ -1,0 +1,19 @@
+#!/bin/bash
+# buildall.sh <a|a-base> : every lab image of one side, one build at a time.
+# P = padded (fix/percpu-cacheline head), U = unpadded baseline (ae1399ba).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+wt=$1
+side=P; [ "$wt" = a-base ] && side=U
+B="bash $S/a/bld.sh $wt"
+# Jetson production first: in a clean worktree the test kernel embeds the real
+# operator library only after a Jetson production build has run (#1264).
+$B jet-prod-$side kernel PLATFORM=JETSON_ORIN_NANO || exit 1
+$B jet-r3w-$side kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_wake_during_switch_out TEST_REPEAT=1000 SWO_DIAG=ON || exit 1
+if [ "$side" = P ]; then
+  $B jet-suite-$side kernel-test PLATFORM=JETSON_ORIN_NANO || exit 1
+fi
+$B pi5-prod-$side kernel PLATFORM=RASPI5 || exit 1
+if [ "$side" = P ]; then
+  $B pi5-suite-$side kernel-test PLATFORM=RASPI5 || exit 1
+fi
+echo "ALL DONE $wt"

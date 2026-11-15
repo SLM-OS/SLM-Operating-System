@@ -1,0 +1,16 @@
+== jetson
+  base A-bench-context-jetson-base-U1-runs1-2.txt: mean 97 p50 96 p95 128
+  base A-bench-context-jetson-base-U1-runs1-2.txt: mean 96 p50 96 p95 128
+  base A-bench-context-jetson-base-U2-runs1-2.txt: mean 98 p50 96 p95 128
+  base A-bench-context-jetson-base-U2-runs1-2.txt: mean 99 p50 96 p95 128
+  base A-bench-context-jetson-base-U3-runs1-2.txt: mean 100 p50 96 p95 128
+  base A-bench-context-jetson-base-U3-runs1-2.txt: mean 91 p50 96 p95 128
+  base: n=6 mean-of-means 96.83 ns sd 3.19 min 91 max 100; p50 values [96]; p95 values [128]; median of p50 96.0; median of p95 128.0
+  head A-bench-context-jetson-head-P1-runs1-2.txt: mean 102 p50 96 p95 128
+  head A-bench-context-jetson-head-P1-runs1-2.txt: mean 96 p50 96 p95 128
+  head A-bench-context-jetson-head-P2-runs1-2.txt: mean 100 p50 96 p95 128
+  head A-bench-context-jetson-head-P2-runs1-2.txt: mean 96 p50 96 p95 128
+  head A-bench-context-jetson-head-P3-runs1-2.txt: mean 101 p50 96 p95 128
+  head A-bench-context-jetson-head-P3-runs1-2.txt: mean 96 p50 96 p95 128
+  head: n=6 mean-of-means 98.50 ns sd 2.81 min 96 max 102; p50 values [96]; p95 values [128]; median of p50 96.0; median of p95 128.0
+  delta +1.67 ns (+1.7%), Welch t 1.0 (SE 1.74 ns); ranges overlap: True

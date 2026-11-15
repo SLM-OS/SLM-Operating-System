@@ -1,0 +1,18 @@
+#!/bin/bash
+# layout-check.sh : symbol size/alignment of the per-CPU arrays and section
+# sizes, padded (P) vs unpadded (U) images; operator library symbol sizes.
+cd "$(dirname "$0")/img" || exit 1
+R='(rq_lock|steal_deque_lock|preempt_disabled|sched_diag|sched_diag_[a-z_]+|switch_in_waiting|current_task|coop_last_tick_cntpct|reschedule_pending_wb|orig_elr_wb|orig_spsr_wb|cpu_steal_deques|pmu_cache_pressure_q16_per_cpu|pmu_cp_state|swo_pc|swo_rq_owner|swo_diag_phase)'
+for i in jet-prod jet-r3w pi5-prod; do
+  for s in U P; do
+    echo "== $i-$s"
+    aarch64-none-elf-nm -S -n $i-$s.elf | grep -E " $R\$" |
+      awk '{printf "  %s size %d addr%%64=%d %s\n", $1, strtonum("0x"$2), strtonum("0x"$1)%64, $4}'
+    aarch64-none-elf-size -A $i-$s.elf |
+      awk 'NR>2 && $2>0 && $1!~/debug|comment|Total/{printf "%s=%s ", $1, $2} END{print ""}'
+  done
+done
+echo "== operator library symbols"
+for f in *.elf; do
+  echo "$f: $(aarch64-none-elf-nm -S $f | grep -i 'oplib' | grep -i 'start\|end\|size\|blob\|data' | head -4 | tr '\n' ';')"
+done

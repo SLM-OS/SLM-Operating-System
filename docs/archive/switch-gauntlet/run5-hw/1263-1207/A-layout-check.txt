@@ -1,0 +1,130 @@
+== jet-prod-U
+  0000000080870050 size 192 addr%64=16 pmu_cp_state
+  0000000080870110 size 32 addr%64=16 pmu_cache_pressure_q16_per_cpu
+  0000000080ab9178 size 64 addr%64=56 current_task
+  0000000080ac6c40 size 32 addr%64=0 sched_diag_picked
+  0000000080ac6c60 size 64 addr%64=32 switch_in_waiting
+  0000000080ac6ca0 size 32 addr%64=32 sched_diag_switch_defer
+  0000000080ac6d00 size 32 addr%64=0 rq_lock
+  0000000080ac6d40 size 32 addr%64=0 steal_deque_lock
+  0000000080ac6d60 size 3136 addr%64=32 cpu_steal_deques
+  0000000080ac7bc0 size 32 addr%64=0 sched_diag_steal_push_full
+  0000000080ac89c0 size 64 addr%64=0 coop_last_tick_cntpct
+  0000000080ac8a10 size 32 addr%64=16 sched_diag_schedule
+  0000000080ac8a30 size 32 addr%64=48 sched_diag_steal_attempts
+  0000000080ac8a50 size 32 addr%64=16 preempt_disabled
+  0000000080ac8a70 size 32 addr%64=48 sched_diag_steal_successes
+  0000000080ac8a90 size 32 addr%64=16 sched_diag_steal_stale
+  0000000080ac8ab0 size 32 addr%64=48 sched_diag_steal_empty_victim
+  0000000080ac8ad0 size 32 addr%64=16 sched_diag_idle_loops
+  0000000080ac8af0 size 32 addr%64=48 sched_diag_tick
+  0000000080cdcfc0 size 32 addr%64=0 reschedule_pending_wb
+  0000000080cdd000 size 64 addr%64=0 orig_elr_wb
+  0000000080cdd080 size 64 addr%64=0 orig_spsr_wb
+.text=2479448 .rodata=6160034 .text.user=4096 .data=148480 .bss=37429616 .stack=16384 
+== jet-prod-P
+  00000000808700c0 size 512 addr%64=0 pmu_cp_state
+  00000000808702c0 size 512 addr%64=0 pmu_cache_pressure_q16_per_cpu
+  0000000080ab91c0 size 512 addr%64=0 current_task
+  0000000080ac6e40 size 512 addr%64=0 sched_diag
+  0000000080ac7040 size 512 addr%64=0 switch_in_waiting
+  0000000080ac7280 size 512 addr%64=0 rq_lock
+  0000000080ac7480 size 512 addr%64=0 steal_deque_lock
+  0000000080ac7680 size 3584 addr%64=0 cpu_steal_deques
+  0000000080ac9480 size 512 addr%64=0 coop_last_tick_cntpct
+  0000000080ac96c0 size 512 addr%64=0 preempt_disabled
+  0000000080cddd40 size 512 addr%64=0 reschedule_pending_wb
+  0000000080cddf80 size 512 addr%64=0 orig_elr_wb
+  0000000080cde1c0 size 512 addr%64=0 orig_spsr_wb
+.text=2481144 .rodata=6160546 .text.user=4096 .data=148480 .bss=37429616 .stack=16384 
+== jet-r3w-U
+  00000000809b0050 size 192 addr%64=16 pmu_cp_state
+  00000000809b0110 size 32 addr%64=16 pmu_cache_pressure_q16_per_cpu
+  0000000080bf9178 size 64 addr%64=56 current_task
+  0000000080c06c40 size 32 addr%64=0 sched_diag_picked
+  0000000080c06c60 size 64 addr%64=32 switch_in_waiting
+  0000000080c06ca0 size 32 addr%64=32 sched_diag_switch_defer
+  0000000080c06d00 size 32 addr%64=0 rq_lock
+  0000000080c06d20 size 32 addr%64=32 swo_rq_owner
+  0000000080c06d40 size 32 addr%64=0 steal_deque_lock
+  0000000080c06d60 size 3136 addr%64=32 cpu_steal_deques
+  0000000080c07bc0 size 32 addr%64=0 sched_diag_steal_push_full
+  0000000080c089c0 size 64 addr%64=0 coop_last_tick_cntpct
+  0000000080c08a10 size 32 addr%64=16 sched_diag_schedule
+  0000000080c08a90 size 32 addr%64=16 swo_diag_phase
+  0000000080c08ad0 size 32 addr%64=16 sched_diag_steal_attempts
+  0000000080c08af0 size 32 addr%64=48 preempt_disabled
+  0000000080c08b10 size 32 addr%64=16 sched_diag_steal_successes
+  0000000080c08b50 size 32 addr%64=16 sched_diag_steal_stale
+  0000000080c08b70 size 32 addr%64=48 sched_diag_steal_empty_victim
+  0000000080c08cf0 size 32 addr%64=48 sched_diag_idle_loops
+  0000000080c08d10 size 32 addr%64=16 sched_diag_tick
+  0000000080e1dbc0 size 32 addr%64=0 reschedule_pending_wb
+  0000000080e1dc00 size 64 addr%64=0 orig_elr_wb
+  0000000080e1dc80 size 64 addr%64=0 orig_spsr_wb
+.text=2547384 .rodata=7366818 .text.user=4096 .data=148480 .bss=37447408 .stack=16384 
+== jet-r3w-P
+  00000000809b00c0 size 512 addr%64=0 pmu_cp_state
+  00000000809b02c0 size 512 addr%64=0 pmu_cache_pressure_q16_per_cpu
+  0000000080bf91c0 size 512 addr%64=0 current_task
+  0000000080c06e40 size 512 addr%64=0 sched_diag
+  0000000080c07040 size 512 addr%64=0 switch_in_waiting
+  0000000080c07280 size 512 addr%64=0 rq_lock
+  0000000080c07480 size 512 addr%64=0 swo_rq_owner
+  0000000080c07680 size 512 addr%64=0 steal_deque_lock
+  0000000080c07880 size 3584 addr%64=0 cpu_steal_deques
+  0000000080c09680 size 512 addr%64=0 coop_last_tick_cntpct
+  0000000080c098c0 size 1024 addr%64=0 swo_pc
+  0000000080c09cc0 size 512 addr%64=0 preempt_disabled
+  0000000080e1ed80 size 512 addr%64=0 reschedule_pending_wb
+  0000000080e1efc0 size 512 addr%64=0 orig_elr_wb
+  0000000080e1f200 size 512 addr%64=0 orig_spsr_wb
+.text=2549688 .rodata=7368354 .text.user=4096 .data=148480 .bss=37447408 .stack=16384 
+== pi5-prod-U
+  00000000007e0010 size 192 addr%64=16 pmu_cp_state
+  00000000007e00d0 size 32 addr%64=16 pmu_cache_pressure_q16_per_cpu
+  0000000000921178 size 64 addr%64=56 current_task
+  000000000092ec40 size 32 addr%64=0 sched_diag_picked
+  000000000092ec60 size 64 addr%64=32 switch_in_waiting
+  000000000092eca0 size 32 addr%64=32 sched_diag_switch_defer
+  000000000092ed00 size 32 addr%64=0 rq_lock
+  000000000092ed40 size 32 addr%64=0 steal_deque_lock
+  000000000092ed60 size 3136 addr%64=32 cpu_steal_deques
+  000000000092fbc0 size 32 addr%64=0 sched_diag_steal_push_full
+  00000000009309c0 size 64 addr%64=0 coop_last_tick_cntpct
+  0000000000930a10 size 32 addr%64=16 sched_diag_schedule
+  0000000000930a30 size 32 addr%64=48 sched_diag_steal_attempts
+  0000000000930a50 size 32 addr%64=16 preempt_disabled
+  0000000000930a70 size 32 addr%64=48 sched_diag_steal_successes
+  0000000000930a90 size 32 addr%64=16 sched_diag_steal_stale
+  0000000000930ab0 size 32 addr%64=48 sched_diag_steal_empty_victim
+  0000000000930ad0 size 32 addr%64=16 sched_diag_idle_loops
+  0000000000930af0 size 32 addr%64=48 sched_diag_tick
+  0000000000b44a80 size 32 addr%64=0 reschedule_pending_wb
+  0000000000b44ac0 size 64 addr%64=0 orig_elr_wb
+  0000000000b44b40 size 64 addr%64=0 orig_spsr_wb
+.text=2237432 .rodata=5291594 .text.user=4096 .data=148048 .got=48 .got.plt=24 .bss=36217456 .stack=16384 
+== pi5-prod-P
+  00000000007e0080 size 512 addr%64=0 pmu_cp_state
+  00000000007e0280 size 512 addr%64=0 pmu_cache_pressure_q16_per_cpu
+  00000000009211c0 size 512 addr%64=0 current_task
+  000000000092ee40 size 512 addr%64=0 sched_diag
+  000000000092f040 size 512 addr%64=0 switch_in_waiting
+  000000000092f280 size 512 addr%64=0 rq_lock
+  000000000092f480 size 512 addr%64=0 steal_deque_lock
+  000000000092f680 size 3584 addr%64=0 cpu_steal_deques
+  0000000000931480 size 512 addr%64=0 coop_last_tick_cntpct
+  00000000009316c0 size 512 addr%64=0 preempt_disabled
+  0000000000b45800 size 512 addr%64=0 reschedule_pending_wb
+  0000000000b45a40 size 512 addr%64=0 orig_elr_wb
+  0000000000b45c80 size 512 addr%64=0 orig_spsr_wb
+.text=2238968 .rodata=5292106 .text.user=4096 .data=148048 .got=48 .got.plt=24 .bss=36217456 .stack=16384 
+== operator library symbols
+jet-prod-P.elf: 000000008053e380 R oplib_blob_end;00000000804f2e40 R oplib_blob_start;000000008003b308 0000000000000018 T oplib_pool_blob_size;000000008003be80 0000000000000034 T oplib_weights_pool_total_size;
+jet-prod-U.elf: 000000008053dd30 R oplib_blob_end;00000000804f27f0 R oplib_blob_start;000000008003b1a8 0000000000000018 T oplib_pool_blob_size;000000008003bd20 0000000000000034 T oplib_weights_pool_total_size;
+jet-r3w-P.elf: 0000000080671720 R oplib_blob_end;00000000806261e0 R oplib_blob_start;000000008003c668 0000000000000018 T oplib_pool_blob_size;000000008003d1e0 0000000000000034 T oplib_weights_pool_total_size;
+jet-r3w-U.elf: 0000000080670b40 R oplib_blob_end;0000000080625600 R oplib_blob_start;000000008003c548 0000000000000018 T oplib_pool_blob_size;000000008003d0c0 0000000000000034 T oplib_weights_pool_total_size;
+jet-suite-P.elf: 00000000806700b0 R oplib_blob_end;0000000080624b70 R oplib_blob_start;000000008003b368 0000000000000018 T oplib_pool_blob_size;000000008003bee0 0000000000000034 T oplib_weights_pool_total_size;
+pi5-prod-P.elf: 0000000000581ea0 R oplib_blob_end;0000000000536960 R oplib_blob_start;0000000000099340 0000000000000018 T oplib_pool_blob_size;0000000000099ac8 0000000000000008 T oplib_weights_pool_total_size;
+pi5-prod-U.elf: 0000000000581850 R oplib_blob_end;0000000000536310 R oplib_blob_start;00000000000991e0 0000000000000018 T oplib_pool_blob_size;0000000000099968 0000000000000008 T oplib_weights_pool_total_size;
+pi5-suite-P.elf: 00000000006b3b30 R oplib_blob_end;00000000006685f0 R oplib_blob_start;00000000000993a0 0000000000000018 T oplib_pool_blob_size;0000000000099b28 0000000000000008 T oplib_weights_pool_total_size;

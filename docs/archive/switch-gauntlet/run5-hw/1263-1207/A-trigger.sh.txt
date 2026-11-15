@@ -1,0 +1,45 @@
+#!/bin/bash
+# Host-side, session-local trigger for labctl boot_test on jetson-nano-2
+# (run 5 close-out's loop, closeout/trigger.sh.txt, unchanged in behaviour;
+# only the temp-file directory differs).
+# For each NEW Linux boot (new boot_id):
+#   kexec: slmos-kexec <elf_k> detached (k-th elf for the k-th boot)
+#   uefi:  efibootmgr --bootnext 000E; reboot (as scripts/jetson-uefi-deploy.sh)
+# Stops after all triggers or <deadline_min> minutes. Leaves nothing on the board.
+# Usage: trigger.sh kexec <deadline_min> <elf1> [elf2 ...]
+#        trigger.sh uefi  <deadline_min> <count>
+#        trigger.sh uefistage <deadline_min> <PE image on the host>   (session 1263 addition:
+#          one boot; stages the image on the ESP with stage-esp.sh in that Linux boot, and
+#          arms BootNext and reboots only if the staged hash was verified)
+mode=$1; deadline_min=$2; shift 2
+if [ "$mode" = kexec ]; then elfs=("$@"); n=${#elfs[@]}; elif [ "$mode" = uefistage ]; then img=$1; n=1; else n=$1; fi
+HERE=$(dirname "$0")
+J=root@192.168.4.5
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2)
+TMP=$(mktemp -p /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad/a)
+end=$((SECONDS + deadline_min*60))
+seen=$("${SSH[@]}" $J cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+echo "$(date -u +%T) start mode=$mode n=$n elfs=[${elfs[*]:-}] skip_current_boot_id=${seen:-none} pid=$$"
+done_n=0
+while [ $done_n -lt $n ] && [ $SECONDS -lt $end ]; do
+  id=$("${SSH[@]}" $J cat /proc/sys/kernel/random/boot_id 2>/dev/null) || { sleep 2; continue; }
+  case " $seen " in *" $id "*) sleep 3; continue;; esac
+  seen="$seen $id"; done_n=$((done_n+1))
+  st=$("${SSH[@]}" $J 'timeout 90 systemctl is-system-running --wait; cut -d" " -f1 /proc/uptime' 2>/dev/null | tr '\n' ' ')
+  if [ "$mode" = kexec ]; then
+    elf=${elfs[$((done_n-1))]}
+    "${SSH[@]}" $J "sha256sum $elf | cut -c1-16; setsid nohup slmos-kexec $elf > /tmp/slmos-kexec.log 2>&1 < /dev/null &" > "$TMP" 2>&1
+  elif [ "$mode" = uefistage ]; then
+    elf=ESP:$(sha256sum "$img" | cut -c1-12)
+    stage=$(bash $HERE/stage-esp.sh "$img" 2>&1 | tr '\n' ' ')
+    echo "$(date -u +%T) stage: $stage"
+    case "$stage" in *"fresh ro mount verified"*) ;; *) echo "$(date -u +%T) STAGE NOT VERIFIED: no BootNext, no reboot"; continue;; esac
+    "${SSH[@]}" $J 'efibootmgr --bootnext 000E | grep -i bootnext; sync; (sleep 1; systemctl reboot) >/dev/null 2>&1 &' > "$TMP" 2>&1
+  else
+    elf=ESP
+    "${SSH[@]}" $J 'efibootmgr --bootnext 000E | grep -i bootnext; sync; (sleep 1; systemctl reboot) >/dev/null 2>&1 &' > "$TMP" 2>&1
+  fi
+  echo "$(date -u +%T) trigger $done_n/$n elf=$elf boot_id=$id state+uptime=[$st] reply=[$(tr '\n' ' ' < "$TMP")]"
+done
+rm -f "$TMP"
+echo "$(date -u +%T) end triggers=$done_n"

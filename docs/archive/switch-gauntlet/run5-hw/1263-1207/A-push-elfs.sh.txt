@@ -1,0 +1,14 @@
+#!/bin/bash
+# push-elfs.sh <name>... : scp $S/a/img/<name>.elf to /root/slmos-1263-<name>.elf on
+# jetson-nano-2, sync, and compare sha256 on the board with the host's.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+J=root@192.168.4.5
+for n in "$@"; do
+  scp -q -o BatchMode=yes $S/a/img/$n.elf $J:/root/slmos-1263-$n.elf || { echo "SCP FAILED $n"; exit 1; }
+done
+ssh -o BatchMode=yes $J sync
+for n in "$@"; do
+  want=$(sha256sum $S/a/img/$n.elf | cut -d' ' -f1)
+  got=$(ssh -o BatchMode=yes $J "sha256sum /root/slmos-1263-$n.elf" | cut -d' ' -f1)
+  [ "$want" = "$got" ] && echo "$(date -u +%T) /root/slmos-1263-$n.elf sha256=${got:0:16} OK (synced)" || echo "MISMATCH $n want=$want got=$got"
+done
