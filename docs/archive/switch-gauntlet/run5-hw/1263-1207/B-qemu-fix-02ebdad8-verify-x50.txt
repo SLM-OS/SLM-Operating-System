@@ -1,0 +1,1355 @@
+# worktree: /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b  head: 02ebdad8
+# command: make test TEST_TIMEOUT=600 TEST_FILTER=test_verify_reports_a_cleared_link,test_verify_dump_reads_only_free_heap_pages TEST_REPEAT=50   (under flock /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad/qemu.lock)
+# date: 2026-11-15T22:31:27Z  make exit code: 0
+# ---- make output (tail 40) ----
+All 24 build-signature options change their variants' signatures; AI scheduler defaults match
+check-cpu-cache-maint: OK (38 files)
+Building runtime... (cargo features: ai_eviction)
+cd runtime && SLM_DEFAULT_EVICTION_POLICY=lru  cargo build  --release --features ai_eviction
+    Finished `release` profile [optimized] target(s) in 0.09s
+Building test kernel...
+cmake --build build/kernel-test
+[  0%] Built target kprintf_float
+[  0%] Generating build_info.h
+[  0%] Built target generate_build_info
+[  0%] Built target slm_kernels_header
+[  1%] Building C object CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/src/lua_slm.c:910:66: warning: "/*" within comment [-Wcomment]
+  910 |     uint8_t wildcard;                   /* 1 if pattern ends in '/*' */
+      |                                                                   
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/src/lua_slm.c:985:44: warning: "/*" within comment [-Wcomment]
+  985 |  * Exact match OR (for patterns ending in "/*") prefix match up to the '*'. */
+      |                                             
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b/kernel/src/lua_slm.c:1081:32: warning: "/*" within comment [-Wcomment]
+ 1081 |  * messages. Topics ending in "/*" match any topic with that prefix.
+      |                                 
+[  2%] Linking C static library liblua.a
+[ 10%] Built target lua
+[ 10%] Built target slm_shell
+[ 11%] Built target slm_runner
+[ 12%] Built target nanopb
+[ 12%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+[ 12%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+[ 13%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+[ 14%] Linking C executable slmos.elf
+Creating slmos.bin
+[100%] Built target slmos.elf
+flock: getting lock took 0.000003 seconds
+flock: executing make
+Creating sparse build/kernel-test/sdhci-test.img (4G, SDHC-sized)
+Running kernel tests...
+
+Test Results:
+=============
+PASSED - All tests passed (exit code 0)
+# ---- QEMU serial (build/test-output.log) ----
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261115223122 (02ebdad8)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022e918
+  .data:   0x40760000 - 0x40784000
+  .bss:    0x40790000 - 0x420daee0
+  End:     0x420e0000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x407ec000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x407ea003 (covers VA 0x0)
+  L1[1]: 0x407eb003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x420e0000 - 0x80000000
+  Total pages:     253728 (1014912 KB)
+  Free pages:      253728 (1014912 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8416 pages (kernel)
+
+  Free list distribution:
+    Order  5 (  128 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_verify_reports_a_cleared_link,test_verify_dump_reads_only_free_heap_pages repeat=50 source=build index=2906
+
+[pmm-verify] FINDING 1 at 1196 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 1/50]  [PASS] test_verify_reports_a_cleared_link (6362 us)
+  [ITER 1/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (718 us)
+
+[pmm-verify] FINDING 2 at 1227 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 2/50]  [PASS] test_verify_reports_a_cleared_link (2745 us)
+  [ITER 2/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (177 us)
+
+[pmm-verify] FINDING 3 at 1255 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 3/50]  [PASS] test_verify_reports_a_cleared_link (3862 us)
+  [ITER 3/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (291 us)
+
+[pmm-verify] FINDING 4 at 1287 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 4/50]  [PASS] test_verify_reports_a_cleared_link (3996 us)
+  [ITER 4/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (352 us)
+
+[pmm-verify] FINDING 5 at 1318 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 5/50]  [PASS] test_verify_reports_a_cleared_link (2916 us)
+  [ITER 5/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (210 us)
+
+[pmm-verify] FINDING 6 at 1343 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 6/50]  [PASS] test_verify_reports_a_cleared_link (3277 us)
+  [ITER 6/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (260 us)
+
+[pmm-verify] FINDING 7 at 1373 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 7/50]  [PASS] test_verify_reports_a_cleared_link (3320 us)
+  [ITER 7/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (237 us)
+
+[pmm-verify] FINDING 8 at 1400 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 8/50]  [PASS] test_verify_reports_a_cleared_link (3157 us)
+  [ITER 8/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (186 us)
+
+[pmm-verify] FINDING 9 at 1428 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 9/50]  [PASS] test_verify_reports_a_cleared_link (2745 us)
+  [ITER 9/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (174 us)
+
+[pmm-verify] FINDING 10 at 1452 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 10/50]  [PASS] test_verify_reports_a_cleared_link (4090 us)
+  [ITER 10/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (272 us)
+
+[pmm-verify] FINDING 11 at 1483 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 11/50]  [PASS] test_verify_reports_a_cleared_link (2658 us)
+  [ITER 11/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (160 us)
+
+[pmm-verify] FINDING 12 at 1511 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 12/50]  [PASS] test_verify_reports_a_cleared_link (3258 us)
+  [ITER 12/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (206 us)
+
+[pmm-verify] FINDING 13 at 1547 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 13/50]  [PASS] test_verify_reports_a_cleared_link (2890 us)
+  [ITER 13/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (177 us)
+
+[pmm-verify] FINDING 14 at 1572 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 14/50]  [PASS] test_verify_reports_a_cleared_link (2916 us)
+  [ITER 14/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (228 us)
+
+[pmm-verify] FINDING 15 at 1598 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 15/50]  [PASS] test_verify_reports_a_cleared_link (2867 us)
+  [ITER 15/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (336 us)
+
+[pmm-verify] FINDING 16 at 1623 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 16/50]  [PASS] test_verify_reports_a_cleared_link (2894 us)
+  [ITER 16/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (164 us)
+
+[pmm-verify] FINDING 17 at 1651 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 17/50]  [PASS] test_verify_reports_a_cleared_link (3975 us)
+  [ITER 17/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (180 us)
+
+[pmm-verify] FINDING 18 at 1681 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 18/50]  [PASS] test_verify_reports_a_cleared_link (2757 us)
+  [ITER 18/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (178 us)
+
+[pmm-verify] FINDING 19 at 1704 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 19/50]  [PASS] test_verify_reports_a_cleared_link (2779 us)
+  [ITER 19/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (321 us)
+
+[pmm-verify] FINDING 20 at 1732 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 20/50]  [PASS] test_verify_reports_a_cleared_link (2446 us)
+  [ITER 20/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (163 us)
+
+[pmm-verify] FINDING 21 at 1755 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 21/50]  [PASS] test_verify_reports_a_cleared_link (2901 us)
+  [ITER 21/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (209 us)
+
+[pmm-verify] FINDING 22 at 1781 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 22/50]  [PASS] test_verify_reports_a_cleared_link (2779 us)
+  [ITER 22/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (255 us)
+
+[pmm-verify] FINDING 23 at 1806 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 23/50]  [PASS] test_verify_reports_a_cleared_link (2558 us)
+  [ITER 23/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (157 us)
+
+[pmm-verify] FINDING 24 at 1838 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 24/50]  [PASS] test_verify_reports_a_cleared_link (3219 us)
+  [ITER 24/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (338 us)
+
+[pmm-verify] FINDING 25 at 1864 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 25/50]  [PASS] test_verify_reports_a_cleared_link (2367 us)
+  [ITER 25/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (162 us)
+
+[pmm-verify] FINDING 26 at 1887 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 26/50]  [PASS] test_verify_reports_a_cleared_link (2551 us)
+  [ITER 26/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (161 us)
+
+[pmm-verify] FINDING 27 at 1915 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 27/50]  [PASS] test_verify_reports_a_cleared_link (3322 us)
+  [ITER 27/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (315 us)
+
+[pmm-verify] FINDING 28 at 1943 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 28/50]  [PASS] test_verify_reports_a_cleared_link (2849 us)
+  [ITER 28/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (224 us)
+
+[pmm-verify] FINDING 29 at 1967 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 29/50]  [PASS] test_verify_reports_a_cleared_link (3325 us)
+  [ITER 29/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (258 us)
+
+[pmm-verify] FINDING 30 at 2000 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 30/50]  [PASS] test_verify_reports_a_cleared_link (3410 us)
+  [ITER 30/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (294 us)
+
+[pmm-verify] FINDING 31 at 2028 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 31/50]  [PASS] test_verify_reports_a_cleared_link (3576 us)
+  [ITER 31/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (304 us)
+
+[pmm-verify] FINDING 32 at 2056 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 32/50]  [PASS] test_verify_reports_a_cleared_link (2566 us)
+  [ITER 32/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (173 us)
+
+[pmm-verify] FINDING 33 at 2080 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 33/50]  [PASS] test_verify_reports_a_cleared_link (2571 us)
+  [ITER 33/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (169 us)
+
+[pmm-verify] FINDING 34 at 2104 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 34/50]  [PASS] test_verify_reports_a_cleared_link (3393 us)
+  [ITER 34/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (234 us)
+
+[pmm-verify] FINDING 35 at 2131 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 35/50]  [PASS] test_verify_reports_a_cleared_link (2657 us)
+  [ITER 35/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (187 us)
+
+[pmm-verify] FINDING 36 at 2157 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 36/50]  [PASS] test_verify_reports_a_cleared_link (3681 us)
+  [ITER 36/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (173 us)
+
+[pmm-verify] FINDING 37 at 2186 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 37/50]  [PASS] test_verify_reports_a_cleared_link (3562 us)
+  [ITER 37/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (257 us)
+
+[pmm-verify] FINDING 38 at 2212 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 38/50]  [PASS] test_verify_reports_a_cleared_link (2737 us)
+  [ITER 38/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (178 us)
+
+[pmm-verify] FINDING 39 at 2236 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 39/50]  [PASS] test_verify_reports_a_cleared_link (2653 us)
+  [ITER 39/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (191 us)
+
+[pmm-verify] FINDING 40 at 2265 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 40/50]  [PASS] test_verify_reports_a_cleared_link (3385 us)
+  [ITER 40/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (239 us)
+
+[pmm-verify] FINDING 41 at 2294 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 41/50]  [PASS] test_verify_reports_a_cleared_link (3922 us)
+  [ITER 41/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (232 us)
+
+[pmm-verify] FINDING 42 at 2321 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 42/50]  [PASS] test_verify_reports_a_cleared_link (3192 us)
+  [ITER 42/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (209 us)
+
+[pmm-verify] FINDING 43 at 2350 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 43/50]  [PASS] test_verify_reports_a_cleared_link (3205 us)
+  [ITER 43/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (312 us)
+
+[pmm-verify] FINDING 44 at 2384 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 44/50]  [PASS] test_verify_reports_a_cleared_link (3331 us)
+  [ITER 44/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (218 us)
+
+[pmm-verify] FINDING 45 at 2414 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 45/50]  [PASS] test_verify_reports_a_cleared_link (3045 us)
+  [ITER 45/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (196 us)
+
+[pmm-verify] FINDING 46 at 2438 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 46/50]  [PASS] test_verify_reports_a_cleared_link (2739 us)
+  [ITER 46/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (166 us)
+
+[pmm-verify] FINDING 47 at 2464 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 47/50]  [PASS] test_verify_reports_a_cleared_link (3304 us)
+  [ITER 47/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (183 us)
+
+[pmm-verify] FINDING 48 at 2488 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 48/50]  [PASS] test_verify_reports_a_cleared_link (3588 us)
+  [ITER 48/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (314 us)
+
+[pmm-verify] FINDING 49 at 2517 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 49/50]  [PASS] test_verify_reports_a_cleared_link (3525 us)
+  [ITER 49/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (270 us)
+
+[pmm-verify] FINDING 50 at 2545 ms (verifier self-test: link cleared on purpose; last suite boundary: verifier self-test, before)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 3, walked 1, head 0x420e6000, bad link value 0x0, held by 0x420e6000
+  the element holding the bad link:
+  block 0x420e6000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420e6000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420e6020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420e5fc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 3 / 1 / 0x420e6000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      3: 1 / 1 / 0x420e8000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+  [ITER 50/50]  [PASS] test_verify_reports_a_cleared_link (2582 us)
+  [ITER 50/50]  [PASS] test_verify_dump_reads_only_free_heap_pages (158 us)
+
+[FILTER] Summary
+[FILTER] [PASS] test_verify_reports_a_cleared_link: runs=50 passed=50 failed=0 ignored=0 us min=2367 avg=3168 max=6362
+[FILTER] [PASS] test_verify_dump_reads_only_free_heap_pages: runs=50 passed=50 failed=0 ignored=0 us min=157 avg=235 max=718
+
+========================================
+Test Suite Summary
+========================================
+[PASS] All test suites passed!
+[INFO] Exiting via semihosting...

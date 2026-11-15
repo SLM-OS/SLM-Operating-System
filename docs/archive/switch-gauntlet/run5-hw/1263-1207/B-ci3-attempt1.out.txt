@@ -1,0 +1,5 @@
+step 1 arm64-build rc=0  7 warning lines
+step 2 x86-build rc=0  16 warning lines
+step 3 jetson-realweights rc=0  5 warning lines
+step 4 test-arm64 rc=2 FAILED - Test failures detected: 6 warning lines
+STOP at step 4

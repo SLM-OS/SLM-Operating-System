@@ -1,0 +1,29 @@
+#!/bin/bash
+# rows5.sh <head label> <ab count>: QEMU rows at the head after the review fixes, then base/head interleaved full suites.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt
+B=$W/b
+L=$1; n=$2
+C=test_coalesce_enables_larger_allocation,test_recursive_coalescing
+X=test_checkerboard_fragmentation,test_exhaustion_recovery
+NEW=test_coalesce_with_lone_free_pages,test_recursive_coalescing_with_lone_free_pages,test_add_region_leaves_out_partial_last_page,test_free_does_not_merge_with_split_buddy,test_free_rejects_range_holding_a_free_page
+VER=test_verify_reports_a_cleared_link,test_verify_dump_reads_only_free_heap_pages
+cd $B || exit 1
+for pair in "coalesce-x50:$C" "checker-exhaust-x50:$X" "newtests-x50:$NEW" "verify-x50:$VER"; do
+  name=${pair%%:*}; filt=${pair#*:}
+  make kernel-test TEST_FILTER=$filt TEST_REPEAT=50 >> $S/b/rows5-build.log 2>&1
+  $S/b/qrun.sh $B $L $S/b/B-qemu-fix-$L-$name.txt TEST_TIMEOUT=600 TEST_FILTER=$filt TEST_REPEAT=50
+done
+make kernel-test PMM_CHECK=ON >> $S/b/rows5-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-fix-$L-pmmcheck-on-fullsuite.txt PMM_CHECK=ON
+make kernel-test PLATFORM=X86_64 >> $S/b/rows5-build.log 2>&1
+$S/b/qrun.sh $B $L $S/b/B-qemu-fix-$L-x86_64-fullsuite.txt PLATFORM=X86_64
+# interleaved A/B: base 661204e6 in .wt/b-base, head in .wt/b; both built first, nothing else of this builder running
+( cd $W/b-base && make kernel-test > $S/b/ab2-build-base.log 2>&1 ) || { echo "base build failed"; exit 1; }
+( cd $B && make kernel-test > $S/b/ab2-build-fix.log 2>&1 ) || { echo "fix build failed"; exit 1; }
+for i in $(seq -w 1 $n); do
+  echo "load before pair $i: $(cut -d' ' -f1-3 /proc/loadavg)"
+  $S/b/qrun.sh $W/b-base 661204e6 $S/b/B-qemu-ab2-base-661204e6-run$i.txt
+  $S/b/qrun.sh $B $L $S/b/B-qemu-ab2-fix-$L-run$i.txt
+done
+echo "rows5 done"

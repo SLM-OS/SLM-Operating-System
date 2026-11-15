@@ -1,0 +1,307 @@
+# worktree: /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b  head: 02ebdad8+demo-patch(uncommitted)
+# command: make test TEST_FILTER=test_demo_cleared_link_then_allocate   (under flock /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad/qemu.lock)
+# date: 2026-11-15T22:24:59Z  make exit code: 2
+# ---- make output (tail 40) ----
+[ 10%] Built target lua
+[ 10%] Built target slm_shell
+[ 11%] Built target slm_runner
+[ 12%] Built target nanopb
+[ 12%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+[ 12%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+[ 13%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+[ 14%] Linking C executable slmos.elf
+Creating slmos.bin
+[100%] Built target slmos.elf
+flock: getting lock took 0.000002 seconds
+flock: executing make
+Creating sparse build/kernel-test/sdhci-test.img (4G, SDHC-sized)
+Running kernel tests...
+
+Test Results:
+=============
+TIMEOUT - Tests did not complete within 120s
+Last output:
+[cpu0]   0x4223fd80: 0x0000000000000001  "........"
+[cpu0]   0x4223fd88: 0x0000000000000000  "........"
+[cpu0]   0x4223fd90: 0x0000000000000000  "........"
+[cpu0]   0x4223fd98: 0x00000000407900f8  "..y@...."
+[cpu0]   0x4223fda0: 0x000000004223fe30  "0.#B...."
+[cpu0]   0x4223fda8: 0x000000004223fe30  "0.#B...."
+[cpu0]   0x4223fdb0: 0x000000004223fdf0  "..#B...."
+[cpu0]   0x4223fdb8: 0x00000000ffffffc8  "........"
+[cpu0]   0x4223fdc0: 0x2e2e2e2e2e2e2e2e  "........"
+[cpu0]   0x4223fdc8: 0x0000000040045100  ".Q.@...."
+[cpu0]   0x4223fdd0: 0x000000004223fe30  "0.#B...."
+[cpu0]   0x4223fdd8: 0x000000004223fe30  "0.#B...."
+[cpu0]   0x4223fde0: 0x000000004223fdf0  "..#B...."
+[cpu0]   0x4223fde8: 0x00000000ffffffc8  "........"
+[cpu0]   0x4223fdf0: 0x0000000000000080  "........"
+[cpu0]   0x4223fdf8: 0x0000000000000000  "........"
+[cpu0] 
+[cpu0] System halted.
+[cpu0] fault_dump: end, releasing the dump lock
+qemu-system-aarch64: terminating on signal 15 from pid 1483578 (/usr/bin/timeout)
+make: *** [Makefile:1725: test] Error 1
+# ---- QEMU serial (build/test-output.log) ----
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261115222257 (02ebdad8-dirty)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022ea18
+  .data:   0x40760000 - 0x40784000
+  .bss:    0x40790000 - 0x420daee0
+  End:     0x420e0000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x407ec000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x407ea003 (covers VA 0x0)
+  L1[1]: 0x407eb003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x420e0000 - 0x80000000
+  Total pages:     253728 (1014912 KB)
+  Free pages:      253728 (1014912 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8416 pages (kernel)
+
+  Free list distribution:
+    Order  5 (  128 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_demo_cleared_link_then_allocate repeat=1 source=build index=2907
+[demo] link cleared; waiting 2.5 s for the timer-tick walk
+
+[pmm-verify] FINDING 1 at 1761 ms (timer tick; last suite boundary: before the first suite)
+  order 0: list ends early: next link is NULL with blocks still counted
+  count 5, walked 1, head 0x420ee000, bad link value 0x0, held by 0x420ee000
+  the element holding the bad link:
+  block 0x420ee000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420ee000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420ee020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420edfc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 5 / 1 / 0x420ee000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      2: 1 / 1 / 0x420e4000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+[demo] allocating single pages
+
+[pmm-verify] FINDING 2 at 3261 ms (free_list_pop; last suite boundary: before the first suite)
+  order 0: head's next link is NULL with blocks still counted
+  count 5, walked 0, head 0x420ee000, bad link value 0x0, held by 0x420ee000
+  the element holding the bad link:
+  block 0x420ee000: page state 0x80, page before 0x1, page after 0x1
+  first 64 bytes at 0x420ee000: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  first 64 bytes at 0x420ee020: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+  64 bytes before, at 0x420edfc0: not in a free page of the heap, not read
+  order: count / walked length / head
+      0: 5 / 1 / 0x420ee000  <-- inconsistent
+      1: 1 / 1 / 0x420e2000
+      2: 1 / 1 / 0x420e4000
+      4: 1 / 1 / 0x420f0000
+      7: 1 / 1 / 0x42280000
+      8: 1 / 1 / 0x42300000
+     11: 1 / 1 / 0x42800000
+     12: 1 / 1 / 0x43000000
+     13: 1 / 1 / 0x46000000
+     17: 1 / 1 / 0x60000000
+[pmm-verify] end of finding
+[cpu0] 
+[cpu0] 
+[cpu0] *********************************
+[cpu0] ***      KERNEL PANIC         ***
+[cpu0] *********************************
+[cpu0] 
+[cpu0] PMM: order 0 free list head 0x420ee000 has next link 0x0 with 5 blocks counted (free-list corruption, #1207)
+[cpu0] 
+[cpu0] Task Context:
+[cpu0]   Task ID:   5
+[cpu0]   Task Name: main
+[cpu0]   CPU:       0
+[cpu0] 
+[cpu0] Register Dump:
+[cpu0]   SP:       0x4223fd40
+[cpu0]   ELR_EL1:  0x4003138c  (return address)
+[cpu0]   SPSR_EL1: 0x80000005
+[cpu0]   ESR_EL1:  0x0
+[cpu0]   EC:       0x0 (Unknown reason)
+[cpu0]   FAR_EL1:  0x0  (fault address)
+[cpu0] 
+[cpu0] Stack canary check:
+[cpu0] [canary] Task stack inventory:
+[cpu0]   id=1 name='idle' stack=[0x42100000..0x42140000)
+[cpu0]   id=2 name='idle_1' stack=[0x42140000..0x42180000)
+[cpu0]   id=3 name='idle_3' stack=[0x42180000..0x421c0000)
+[cpu0]   id=4 name='idle_2' stack=[0x421c0000..0x42200000)
+[cpu0]   id=5 name='main' stack=[0x42200000..0x42240000)
+[cpu0]   id=6 name='shell' stack=[0x42240000..0x42280000)
+[cpu0]   All task canaries intact.
+[cpu0] 
+[cpu0] Stack dump around SP=0x4223fd40:
+[cpu0]   0x4223fd00: 0x0000000000000000  "........"
+[cpu0]   0x4223fd08: 0x000000004223fd00  "..#B...."
+[cpu0]   0x4223fd10: 0x000000004223fd00  "..#B...."
+[cpu0]   0x4223fd18: 0x000000004223fdc0  "..#B...."
+[cpu0]   0x4223fd20: 0x00000000406c9b48  "H.l@...."
+[cpu0]   0x4223fd28: 0x0000000000000008  "........"
+[cpu0]   0x4223fd30: 0x0000000000000000  "........"
+[cpu0]   0x4223fd38: 0x0000000000000008  "........"
+[cpu0]   0x4223fd40: 0x000000004223fe30  "0.#B...."  <- SP
+[cpu0]   0x4223fd48: 0x0000000040015f94  "._.@...."
+[cpu0]   0x4223fd50: 0x00000000407900f8  "..y@...."
+[cpu0]   0x4223fd58: 0x0000000000000000  "........"
+[cpu0]   0x4223fd60: 0x0000000000000014  "........"
+[cpu0]   0x4223fd68: 0x00000000420ee000  "...B...."
+[cpu0]   0x4223fd70: 0x0000000000000000  "........"
+[cpu0]   0x4223fd78: 0x0000000002d4d836  "6......."
+[cpu0]   0x4223fd80: 0x0000000000000001  "........"
+[cpu0]   0x4223fd88: 0x0000000000000000  "........"
+[cpu0]   0x4223fd90: 0x0000000000000000  "........"
+[cpu0]   0x4223fd98: 0x00000000407900f8  "..y@...."
+[cpu0]   0x4223fda0: 0x000000004223fe30  "0.#B...."
+[cpu0]   0x4223fda8: 0x000000004223fe30  "0.#B...."
+[cpu0]   0x4223fdb0: 0x000000004223fdf0  "..#B...."
+[cpu0]   0x4223fdb8: 0x00000000ffffffc8  "........"
+[cpu0]   0x4223fdc0: 0x2e2e2e2e2e2e2e2e  "........"
+[cpu0]   0x4223fdc8: 0x0000000040045100  ".Q.@...."
+[cpu0]   0x4223fdd0: 0x000000004223fe30  "0.#B...."
+[cpu0]   0x4223fdd8: 0x000000004223fe30  "0.#B...."
+[cpu0]   0x4223fde0: 0x000000004223fdf0  "..#B...."
+[cpu0]   0x4223fde8: 0x00000000ffffffc8  "........"
+[cpu0]   0x4223fdf0: 0x0000000000000080  "........"
+[cpu0]   0x4223fdf8: 0x0000000000000000  "........"
+[cpu0] 
+[cpu0] System halted.
+[cpu0] fault_dump: end, releasing the dump lock
+qemu-system-aarch64: terminating on signal 15 from pid 1483578 (/usr/bin/timeout)

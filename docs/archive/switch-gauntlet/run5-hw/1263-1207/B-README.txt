@@ -80,3 +80,13 @@ Phase B1b, jetson-nano-2, kexec, head 647c2c33 (one boot per boot_test call, sam
   B-jetson-asfound-b1b.txt, B-jetson-post-state-b1b.txt
 Phase B2, pi-5-1: on gauntlet-5-hw-pi5, same directory (B-pi5-suite-647c2c33-boot01..03.txt, B-pi5-restore-check-boot01.txt,
   B-pi5-card-and-restore.txt)
+
+After the blind critic's round 1 (host only; the lab connection was down): head 02ebdad8
+  B-qemu-fix-02ebdad8-coalesce-x50.txt, -checker-exhaust-x50.txt, -newtests-x50.txt, -verify-x50.txt, -pmmcheck-on-fullsuite.txt,
+  -x86_64-fullsuite.txt                          rows at 02ebdad8 (B-rows5.sh.txt, B-rows5.out.txt)
+  B-qemu-ab2-base-661204e6-run01..15.txt, B-qemu-ab2-fix-02ebdad8-run01..15.txt   full suite, base and head interleaved, 15 pairs
+  B-qemu-verify-demo-02ebdad8.txt                the cleared-link demonstration again: free_list_pop now panics after its report
+  B-ci-02ebdad8-step01..11-*.txt, B-ci-02ebdad8-step04-test-arm64-attempt1-litmus.txt, B-ci3-attempt1.out.txt, B-ci3b.out.txt
+                                                 /ci at 02ebdad8: step 4 failed once on test_litmus_patterns_pass, rerun from step 4 passed
+  B-ivac-callers.txt                             every DC IVAC call site that can run on Jetson, and what each can reach
+  B-finding-boot04.txt                           corrected: what the boot 04 capture bounds and what it does not

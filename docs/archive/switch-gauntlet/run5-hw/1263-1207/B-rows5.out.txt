@@ -1,0 +1,52 @@
+B-qemu-fix-02ebdad8-coalesce-x50.txt rc=0 iters=100; [FILTER] [PASS] test_coalesce_enables_larger_allocation: runs=50 passed=50 failed=0 ignored=0 us min=167 avg=210 max=1042;[FILTER] [PASS] test_recursive_coalescing: runs=50 passed=50 failed=0 ignored=0 us min=156 avg=174 max=329; suites=0; [PASS] All test suites passed!
+B-qemu-fix-02ebdad8-checker-exhaust-x50.txt rc=0 iters=100; [FILTER] [PASS] test_checkerboard_fragmentation: runs=50 passed=50 failed=0 ignored=0 us min=226 avg=341 max=1139;[FILTER] [PASS] test_exhaustion_recovery: runs=50 passed=50 failed=0 ignored=0 us min=2441 avg=8743 max=269349; suites=0; [PASS] All test suites passed!
+B-qemu-fix-02ebdad8-newtests-x50.txt rc=0 iters=250; [FILTER] [PASS] test_coalesce_with_lone_free_pages: runs=50 passed=50 failed=0 ignored=0 us min=197 avg=280 max=1423;[FILTER] [PASS] test_recursive_coalescing_with_lone_free_pages: runs=50 passed=50 failed=0 ignored=0 us min=171 avg=239 max=660;[FILTER] [PASS] test_add_region_leaves_out_partial_last_page: runs=50 passed=50 failed=0 ignored=0 us min=154 avg=218 max=837;[FILTER] [PASS] test_free_doe suites=0; [PASS] All test suites passed!
+B-qemu-fix-02ebdad8-verify-x50.txt rc=0 iters=100; [FILTER] [PASS] test_verify_reports_a_cleared_link: runs=50 passed=50 failed=0 ignored=0 us min=2367 avg=3168 max=6362;[FILTER] [PASS] test_verify_dump_reads_only_free_heap_pages: runs=50 passed=50 failed=0 ignored=0 us min=157 avg=235 max=718; suites=0; [PASS] All test suites passed!
+B-qemu-fix-02ebdad8-pmmcheck-on-fullsuite.txt rc=2 iters=0;  suites=105; [FAIL] 1 total failure(s)
+B-qemu-fix-02ebdad8-x86_64-fullsuite.txt rc=0 iters=0;  suites=63; [PASS] All test suites passed!
+load before pair 01: 7.69 6.17 4.42
+B-qemu-ab2-base-661204e6-run01.txt rc=2 iters=0;  suites=105; [FAIL] 1 total failure(s)
+B-qemu-ab2-fix-02ebdad8-run01.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 02: 5.98 6.22 4.78
+B-qemu-ab2-base-661204e6-run02.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run02.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 03: 6.70 6.24 5.04
+B-qemu-ab2-base-661204e6-run03.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run03.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 04: 4.87 5.50 4.97
+B-qemu-ab2-base-661204e6-run04.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run04.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 05: 6.13 5.47 5.03
+B-qemu-ab2-base-661204e6-run05.txt rc=2 iters=0;  suites=105; [FAIL] 1 total failure(s)
+B-qemu-ab2-fix-02ebdad8-run05.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 06: 3.58 4.63 4.78
+B-qemu-ab2-base-661204e6-run06.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run06.txt rc=2 iters=0;  suites=105; [FAIL] 1 total failure(s)
+load before pair 07: 2.93 3.64 4.35
+B-qemu-ab2-base-661204e6-run07.txt rc=2 iters=0;  suites=105; [FAIL] 1 total failure(s)
+B-qemu-ab2-fix-02ebdad8-run07.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 08: 5.13 4.20 4.43
+B-qemu-ab2-base-661204e6-run08.txt rc=2 iters=0;  suites=105; [FAIL] 1 total failure(s)
+B-qemu-ab2-fix-02ebdad8-run08.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 09: 6.13 4.90 4.65
+B-qemu-ab2-base-661204e6-run09.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run09.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 10: 4.05 4.62 4.60
+B-qemu-ab2-base-661204e6-run10.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run10.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 11: 3.28 4.05 4.38
+B-qemu-ab2-base-661204e6-run11.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run11.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 12: 2.05 3.27 4.02
+B-qemu-ab2-base-661204e6-run12.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run12.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 13: 2.68 3.04 3.80
+B-qemu-ab2-base-661204e6-run13.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run13.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 14: 3.62 3.34 3.79
+B-qemu-ab2-base-661204e6-run14.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run14.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 15: 6.12 4.39 4.10
+B-qemu-ab2-base-661204e6-run15.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab2-fix-02ebdad8-run15.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+rows5 done

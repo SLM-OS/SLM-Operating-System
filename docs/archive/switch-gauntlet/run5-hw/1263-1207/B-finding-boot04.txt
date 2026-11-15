@@ -32,27 +32,35 @@ Observations
     capture does not list one by one.
  6. xhci_init printed at line 1816, more than 900 lines and many clean walks before the finding.
 
+CORRECTED after review (round 1 of the blind critic), 2026-11-16. The first version of this section said "the write
+happened during test_suite_gpu" and that this ruled out the xHCI hand-over window. Both go further than the capture.
+
 What follows from the observations
- - The block was intact after test_suite_oplib_gpu_as and damaged by the end of test_suite_gpu: the write happened during
-   test_suite_gpu. This is the first time the damage is bracketed.
- - It is not the xHCI hand-over window (that ended before the first suite, and every walk until the GPU suite was clean).
- - The data written is zeros, over at least the last 64 bytes of one 64 KB block and the first 64 of the next.
+ - The block's header read intact at the walk after test_suite_oplib_gpu_as and read zero at the walk after
+   test_suite_gpu. That bounds when the CPU's view of those bytes changed. When the bytes changed in DRAM is not bounded
+   from below: a device that does not snoop the CPU caches can write DRAM under a line the CPU still holds, and a header
+   the PMM wrote can be lost from the cache without being written back (DC IVAC discards dirty lines); in both cases
+   the walks keep reading the cached copy until the line leaves the cache, and then read DRAM.
+ - So the capture does not exclude a write before test_suite_gpu, including the window in which Linux's xHCI controller
+   is still running. It excludes that window only for a write the CPU would have seen at once.
+ - What reads zero: both links, and at least the last 64 bytes of the block before and the first 64 of this one. The
+   extent is not known beyond those 128 bytes. That the block is 64 KB at a 64 KB boundary says nothing: every order-4
+   block is.
+ - block_state[] still marked the block as a listed order-4 head, so no list operation of the allocator had taken it.
 
-Inferences (not shown)
- - The writer is the MNIST GPU path that the last tests of the suite start on the inherited channel (the bring-up line is
-   the only GPU activity in that suite's log): either the GPU writing through its own page tables into a physical page
-   that the hand-off reservation does not cover, or SLM-OS code on that path clearing a buffer whose address or length
-   comes from the hand-off page. A 64 KB-aligned 64 KB block is the size and alignment of the GA10B hand-off's own
-   buffers (both pushbufs are 65536-byte ranges at 64 KB-aligned addresses), which fits "one more buffer of the same
-   allocation family that is not in the reserve list"; not verified.
- - Whether the once-a-second tick walk runs on this board was not checked separately (the finding came from the suite
-   boundary walk); if it does, the write fell in the last second of the suite, which is where those tests are.
- - Why only some boots: the write must land on the first 16 bytes of a block that is on a free list, and a later
-   allocation must reach it; where Linux put the hand-off buffers differs every boot. Not verified.
- - The three earlier halts of this session (f55c5293 boot01 order 7, boot05 order 5; here order 4) and the older captures
-   are consistent with the same writer; only this one has the bytes.
+Candidates (none shown)
+ - The MNIST GPU path that the suite's last tests start on the inherited channel: the GPU writing into a page the
+   hand-off reservation does not cover, or SLM-OS code on that path clearing a buffer.
+ - A device left running by Linux across kexec (xHCI, GPU) that wrote the page earlier, seen when the cached line was
+   dropped.
+ - A lost header write: test_suite_gpu is also the suite that issues DC IVAC (kernel/gpu/cache.c:84-98) from three
+   tests; the call sites as written cover only the tests' own pages (B-ivac-callers.txt), so this is not shown either.
+ - Whether the once-a-second tick walk runs on this board was not checked separately; the finding came from the suite
+   boundary walk.
+ - The two earlier halts of this session (f55c5293 boot01 order 7, boot05 order 5) show a list ending after one or two
+   pops and nothing more; they have no dump.
 
-Next checks (not run)
+Next checks (not run; B-ivac-callers.txt has two more, A and B, that separate a lost write from a write of zeros)
  - Print, in ga10b_handoff_reserve.c, every reserved range and every buffer address and length the hand-off page carries,
    and compare with the damaged address in a boot that shows a finding.
  - Run the suite with the three MNIST tests skipped on kexec (or the hand-off helper not started): if the finding rate
