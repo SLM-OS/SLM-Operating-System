@@ -1,0 +1,12 @@
+step 1 arm64-build rc=0  9 warning lines
+step 2 x86-build rc=0  16 warning lines
+step 3 jetson-realweights rc=0  5 warning lines
+step 4 test-arm64 rc=0 PASSED - All tests passed (exit code 0) 7 warning lines
+step 5 test-x86 rc=0 PASSED - All tests passed (isa-debug-exit code 1 = success) 14 warning lines
+step 6 test-ai-sched rc=0 PASSED - All tests passed (exit code 0) 6 warning lines
+step 7 runtime-test rc=0  0 warning lines
+step 8 braces rc=0  0 warning lines
+step 9 build-order rc=0  0 warning lines
+step 10 jetson-layout rc=0  0 warning lines
+step 11 diff rc=0  0 warning lines
+ci done

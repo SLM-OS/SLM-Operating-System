@@ -34,3 +34,30 @@
    CMake cache: ENABLE_BOOT_TESTS:BOOL=ON OPLIB_BLOB:FILEPATH= PLATFORM:STRING=RASPI5 PMM_CHECK:BOOL=OFF TEST_FILTER:STRING= 
 == slmos-1207-chk-fix-f55c5293 operator library: oplib_blob_end - oplib_blob_start = 308544 bytes
 == slmos-1207-suite-f55c5293 operator library: oplib_blob_end - oplib_blob_start = 308544 bytes
+== slmos-1207-suite-647c2c33  (JETSON_ORIN_NANO test kernel, head 647c2c33, make kernel-test PLATFORM=JETSON_ORIN_NANO )
+   built: 2026-11-15T11:49:18Z in /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base
+   sha256 elf: 78d13867b87fcc9b874921354dad819f066896dc566481f0049f5bb1e684472c
+   banner:   SLM-OS v0.4.0 build 20261115114757 (647c2c33)
+   version strings: 12345678 000000ff 16001340 ffffffff 
+   PMM_CHECK: off (pmm-check strings: 0)
+   sections: .text=2549208 .rodata=7371938 .bss=37512944 
+   CMake cache: ENABLE_BOOT_TESTS:BOOL=ON OPLIB_BLOB:FILEPATH= PLATFORM:STRING=JETSON_ORIN_NANO PMM_CHECK:BOOL=OFF TEST_FILTER:STRING= 
+== slmos-1207-chk-fix-647c2c33  (JETSON_ORIN_NANO test kernel, head 647c2c33, make kernel-test PLATFORM=JETSON_ORIN_NANO PMM_CHECK=ON)
+   built: 2026-11-15T11:50:40Z in /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base
+   sha256 elf: 640f28dee2939de587e74f5e38c09e944e79f3abda3cd07b1d7cdd193fa84dbe
+   banner:   SLM-OS v0.4.0 build 20261115114919 (647c2c33)
+   version strings: 12345678 000000ff 16001340 ffffffff 
+   PMM_CHECK: ON (pmm-check strings: 10)
+   sections: .text=2553240 .rodata=7374242 .bss=39610096 
+   CMake cache: ENABLE_BOOT_TESTS:BOOL=ON OPLIB_BLOB:FILEPATH= PLATFORM:STRING=JETSON_ORIN_NANO PMM_CHECK:BOOL=ON TEST_FILTER:STRING= 
+== kernel_2712-1207-suite-647c2c33  (RASPI5 test kernel, head 647c2c33, make kernel-test PLATFORM=RASPI5 )
+   built: 2026-11-15T11:53:08Z in /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base
+   sha256 elf: 009991e5325712c68b4fde58263c0ed53a215672d5ad0d71c5719458a8ac43ab
+   sha256 img: a1cf8e5f95652cded4161fa102690eb1a66d732c99b83012eb8c2aa056aed278
+   banner:   SLM-OS v0.4.0 build 20261115115153 (647c2c33)
+   version strings: 12345678 000000ff 16001340 ffffffff 
+   PMM_CHECK: off (pmm-check strings: 0)
+   sections: .text=2307224 .rodata=6505482 .bss=36235184 
+   CMake cache: ENABLE_BOOT_TESTS:BOOL=ON OPLIB_BLOB:FILEPATH= PLATFORM:STRING=RASPI5 PMM_CHECK:BOOL=OFF TEST_FILTER:STRING= 
+== slmos-1207-chk-fix-647c2c33 operator library: oplib_blob_end - oplib_blob_start = 308544 bytes
+== slmos-1207-suite-647c2c33 operator library: oplib_blob_end - oplib_blob_start = 308544 bytes

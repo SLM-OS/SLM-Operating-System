@@ -1,0 +1,62 @@
+import sys
+# DEMO ONLY (not committed): leaves a cleared order-0 link in place, waits for the
+# timer-tick walk, then allocates until the pop report and the panic.
+root = sys.argv[1]
+
+
+def edit(path, old, new):
+    p = root + '/' + path
+    s = open(p).read()
+    assert s.count(old) == 1, (path, old[:50], s.count(old))
+    open(p, 'w').write(s.replace(old, new))
+
+
+edit('kernel/mm/pmm.c', '''int pmm_free_block_order(uintptr_t addr)
+{''', '''/* DEMO ONLY, not committed: clear the order-0 head's next link and leave it. */
+void pmm_demo_clear_order0_link(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    if (buddy_state.free_lists[0]) {
+        buddy_state.free_lists[0]->next = NULL;
+    }
+    spin_unlock_irqrestore(&pmm_lock, flags);
+}
+
+int pmm_free_block_order(uintptr_t addr)
+{''')
+edit('kernel/tests/test_pmm.c', '''/* ============================================================================
+ * NC Memory Allocator Tests (Pi 5 / Jetson only)
+ * ============================================================================ */
+''', '''/* DEMO ONLY, not committed: a cleared link left in place, then allocations. */
+void pmm_demo_clear_order0_link(void);
+static void test_demo_cleared_link_then_allocate(void)
+{
+    void *pages = pmm_alloc_pages(8);
+    TEST_ASSERT_NOT_NULL(pages);
+    for (int i = 0; i < 8; i += 2) {
+        pmm_free_page((uint8_t *)pages + (size_t)i * PAGE_SIZE);   /* four lone pages on order 0 */
+    }
+    pmm_demo_clear_order0_link();
+    uart_puts("[demo] link cleared; waiting 2.5 s for the timer-tick walk\\n");
+    uint64_t f = timer_get_frequency(), t0 = timer_get_count();
+    while (timer_get_count() - t0 < f * 5 / 2) {
+    }
+    uart_puts("[demo] allocating single pages\\n");
+    for (int i = 0; i < 4; i++) {
+        (void)pmm_alloc_page();
+    }
+}
+
+/* ============================================================================
+ * NC Memory Allocator Tests (Pi 5 / Jetson only)
+ * ============================================================================ */
+''')
+edit('kernel/tests/test_pmm.c', '''    RUN_TEST(test_verify_reports_a_cleared_link);
+''', '''    RUN_TEST(test_verify_reports_a_cleared_link);
+    RUN_TEST(test_demo_cleared_link_then_allocate);
+''')
+edit('kernel/tests/test_pmm.c', '''#include "../include/dtb.h"
+''', '''#include "../include/dtb.h"
+#include "../include/timer.h"
+''')
+print('ok')

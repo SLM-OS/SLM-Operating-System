@@ -61,3 +61,13 @@ B-trig1.sh.txt / B-trigger.sh.txt, saved by B-b1step.sh.txt / B-sstep.sh.txt thr
   B-kexec-suite-f55c5293-boot01..10.txt         fix head f55c5293, PMM_CHECK off, integration suite: the required row
   B-trigger-kexec-chk-oldalloc.log.txt, B-trigger-kexec-suite-fix.log.txt   trigger logs (boot_id, ELF sha256 prefix per boot)
   B-jetson-asfound-b1.txt, B-jetson-post-state-b1.txt                     /root as found and as left
+
+After B1 (interim, no lab): head 647c2c33 adds the free-list verifier (every build, no table)
+  B-qemu-verify-demo-647c2c33.txt, B-demo-patch.py.txt   an uncommitted demo patch leaves a cleared order-0 link in place:
+                                                        the timer-tick walk, free_list_pop and the panic each report it
+  B-sizes-verifier-647c2c33-vs-f55c5293.txt             Jetson suite image: .data/.bss sizes and __kernel_end unchanged
+  B-qemu-fix-647c2c33-*.txt                             filter rows x50, PMM_CHECK suite, x86-64 suite, full suite x5 (run1..5)
+  B-ci-647c2c33-step01..11-*.txt, B-ci2.out.txt          /ci at 647c2c33
+  B-candidates-writers.txt                              where the damaged blocks are and candidate writers (code reading only)
+  B-images.txt                                          now also the 647c2c33 images; B-images-b1-f55c5293.txt is the list used in B1
+  B-save-v2.sh.txt, B-b1step-v2.sh.txt                  save scripts for the next lab rows (summary lines also pick up [pmm-verify]); B1 used B-save.sh.txt / B-b1step.sh.txt

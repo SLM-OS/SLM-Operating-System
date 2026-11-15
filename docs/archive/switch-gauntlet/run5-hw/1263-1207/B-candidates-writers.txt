@@ -1,0 +1,82 @@
+#1207: where the damaged list heads are, and what on the Jetson kexec path could write there.
+Code reading and existing captures only (fix/pmm-coalesce 647c2c33). Nothing here was tested on hardware.
+"Not verified" marks what was not read in code or cannot be read from a capture.
+
+A. What the captures say about the blocks
+
+1. The two halts at f55c5293 (B-kexec-suite-f55c5293-boot01.txt, -boot05.txt): the order-7 list had 30 blocks at boot
+   and the panic count is 29; the order-5 list had 50 and the count is 48 ("Free list distribution" in the same files).
+   The list therefore ended after one pop (boot01) and after at most two (boot05): the damaged block was the head of
+   that list, or the block after it, when test_exhaustion_recovery reached it.
+2. No capture prints block addresses (the new verifier does). What can be said from the layout: free lists are LIFO and
+   pmm_init adds regions in ascending address order (kernel/mm/pmm.c, the four pmm_add_region_split calls in pmm_init),
+   so the head of a mid-order list at boot is the highest-addressed fragment of that order, and those fragments are the
+   gaps between the GA10B hand-off reservations in region 3 (0x100000000-0x240000000). The first blocks handed out show
+   it: task stacks (order 6, the list head at the time) sit among the reserves in every boot, e.g. boot01 main stack
+   0x13c240000 with the mnist hand-off page at 0x13c5ae000, pushbuf 0x13c600000, qmd_pool 0x13ca40000, channel inst
+   block 0x13caf7000; boot05 main stack 0x129e00000 with the inst block at 0x129410000.
+   Inference: the damaged heads are pages that Linux had in use shortly before kexec, next to (and interleaved with) the
+   buffers the GPU hand-off reserves. Not shown: the address of either damaged block.
+3. Why the reserve count differs between boots (189 and 190 in B-kexec-chk-oldalloc-17daedda-boot01,02.txt): the
+   channel-VM reservation coalesces adjacent pages into runs (vm_reserve_add / vm_reserve_flush,
+   kernel/gpu/nvidia/ga10b_handoff_reserve.c:808-837), and the number of runs depends on how Linux's allocator placed the
+   pages in that boot: "910 pages in 80 ranges" / "917 pages in 55 ranges" in one boot, 86 / 50 in the other; the ten
+   f55c5293 boots have 80 to 85 and 64 to 78. The page totals (910, 917, 15 and 17 gr_ctx extents) are the same in every
+   boot. Free pages at boot differ by up to 73 pages between boots (1803607 to 1803680), which is the overlap between
+   reservations varying, not shown to be anything else.
+
+B. Candidate writers, most plausible first
+
+1. The xHCI controller, left running by Linux on purpose, until SLM-OS halts it.
+   - scripts/jetson-kexec-slmos.sh keeps it alive across kexec: step [5/9] holds the xusb clocks and power gates
+     (line 1038), [6/9] pins tegra-xusb runtime PM (1091), [7/9] loads arm_smmu_noshutdown so the xusb SMMU mapping
+     stays an identity mapping (1151-1178), then stashes slot hand-off data (1183-1190).
+   - SLM-OS runs pmm_init at kernel/src/main.c:418 and xhci_init at main.c:874; the controller is first stopped in
+     xhci_init (xhci_halt, kernel/drivers/usb/xhci/xhci.c:1165, called at :2176). From kexec until then it runs with
+     Linux's DCBAA, device contexts, event ring, scratchpad buffers and any queued transfer buffers, all Linux pages that
+     the PMM has on its free lists (no pmm_user_reserve_add for any of them; the only callers are
+     ga10b_handoff_reserve.c and kernel/src/boot_models.c:117).
+   - SLM-OS itself reads Linux's DCBAA and device contexts in RAM after kexec (xhci_log_inherited_dcbaa, xhci.c:187-245),
+     and the suite captures print "stale port ... skipping reset and reusing retained slot1 state".
+   - What it would write: event TRBs into Linux's event ring, slot/endpoint state into output device contexts,
+     received data into queued IN buffers (a USB Ethernet adapter is attached: "cdc_ecm" lines in the captures), scratchpad
+     pages. A device context and an event-ring segment start at offset 0 of a page. Not verified: that any of those
+     pages is a free-list head, or what the written bytes are. Run 5's 0x0007000000000000 read as two 32-bit words is
+     0x00000000, 0x00070000; in an xHCI Slot Context the second word's bits 23:16 are the root hub port number. That is
+     a resemblance, not evidence.
+   - Fits: kexec only; only in some boots (needs an event in the window and the page at a block head); the write lands
+     any time after pmm_init, long before the PMM tests.
+2. The GPU and its firmware (FECS, PMU), also left running on purpose (step [4/9], the channel-inherit helpers, line
+   1031; [8.5/9] force-on, 1232).
+   - Reserved: channel inst blocks (ga10b_handoff_reserve.c:185, :748), the hand-off page (:314), USERD, GPFIFO, pushbuf,
+     semaphore, shader, cbuf, qmd_pool (:360-377), pipeline ops (:458), per-op shaders (:537), gr_ctx extents (:595, :617),
+     weights extents (:681, :709), every page mapped in each channel's VM (:812).
+   - Not reserved: the runlist buffer; every capture prints "runlist submit_base reads poison ... Skipping" (:285-297 is
+     the reservation that is skipped). The GPU reads a runlist; not verified whether anything writes it.
+   - Not verified: memory nvgpu allocates outside a channel VM that the GPU or PMU firmware writes (PMU queues and
+     super-surface, FECS trace buffer, MMU fault buffers, the second helper's buffers). The earlier clobber of this kind
+     was the reverse direction (#1029: unreserved GMMU tables given free-list links).
+3. SLM-OS code that writes through a stale or foreign pointer after pmm_init. Not surveyed beyond the PMM's callers:
+   the QEMU full suite with PMM_CHECK=ON shows no free over a free page and no order larger than the allocation
+   (B-qemu-fix-647c2c33-pmmcheck-on-fullsuite.txt), which covers frees, not writes after free. On hardware the two
+   PMM_CHECK boots walked the lists after every suite and found nothing (2 boots).
+
+C. Read and set aside
+
+- A reservation that starts inside a page, or free buddies left unmerged by pmm_init: both PMM_CHECK boots print
+  "0 not page-aligned", "0 unmerged buddy pair(s)", "0 region(s) not page-aligned", and no firmware /memreserve/ entry.
+- The fixed-address read at 0xBDE00000 (XHCI_SLOT3_HANDOFF_PHYS, kernel/drivers/usb/xhci/xhci_slot3_handoff.h:22;
+  xhci.c:287-305): it is the start of the NC block, which the PMM does not manage (pmm_init ends region 1 at
+  0xBDE00000), and the code only reads it.
+- kexec's own copying (segments, purgatory, relocation code): finished before SLM-OS's first instruction; cannot write
+  after pmm_init.
+- The DTB blob inside the heap (#1244): reserved since 661204e6; the halt rate did not change.
+- Camera RCE: held in reset by Linux's kexec teardown until SLM-OS starts it (project notes, #438); its buffers are
+  SLM-OS allocations. BPMP/HSP/TCU shared memory: not verified to lie outside general RAM.
+
+D. What the next image answers without any of this being assumed
+
+slmos-1207-suite-647c2c33.elf walks the lists at the end of pmm_init, before the first suite, after every suite and once
+a second, and prints the damaged block's address, its first 64 bytes, the 64 bytes before it and the time. The time
+places the write before or after xhci_init (and the GPU bring-up) in the boot log; the address says which reservation
+it sits next to; the bytes say what kind of data it is.

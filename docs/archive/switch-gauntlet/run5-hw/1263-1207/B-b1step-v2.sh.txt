@@ -1,0 +1,14 @@
+#!/bin/bash
+# b1step.sh <labctl dir name> <evidence prefix> <boot no> <trigger tag> <elf on board | -> <title...>
+# Saves run_01 of the 1-boot boot_test call just finished (save.sh, both ends checked), prints the
+# boot's PMM lines, then arms the trigger for the next boot (unless elf is -).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+dir=$1; prefix=$2; no=$3; tag=$4; elf=$5; shift 5
+f=/var/lib/labctl/output/$dir/run_01.txt
+$S/b/savebatch.sh evj /var/lib/labctl/output/$dir $prefix $no 1 - "$*" | cut -c1-220
+echo "pmm lines: $(grep -a 'pmm-check\] \(reserves\|init\|partial\)\|pmm-verify\] \(FINDING\|order\)\|PMM: \(order\|free\)\|pmm-check: ' $f | tr -d '\r' | cut -c1-200 | tr '\n' '|')"
+echo "walks ok: $(grep -a -c 'pmm-check\] .*: ok (' $f)  coalesce: $(grep -a -o '\[[A-Z]*\] test_coalesce_enables_larger_allocation' $f | tr '\n' ' ') recursive: $(grep -a -o '\[[A-Z]*\] test_recursive_coalescing$' $f | tr '\n' ' ') $(grep -a -o '\[[A-Z]*\] test_recursive_coalescing[^_]' $f | tr -d '\r' | tr '\n' ' ')"
+echo "pmm suite: $(grep -a -A80 'PMM Buddy Allocator Tests' $f | grep -a -m1 'Tests: ' | tr -d '\r')  new: $(grep -a -c 'PASS\] test_\(coalesce_with_lone\|recursive_coalescing_with_lone\|add_region_leaves\|free_does_not_merge\|free_rejects_range\)' $f)/5 pass"
+echo "end: $(grep -a -c 'PAGE FAULT' $f) page faults, $(grep -a -c 'KERNEL PANIC' $f) panics, summary: $(grep -a -m1 'total failure\|All test suites passed' $f | tr -d '\r'), fails: $(grep -a '^  \[FAIL\] test_' $f | tr -d '\r' | sed 's/^  \[FAIL\] //' | tr '\n' ',' | cut -c1-400)"
+echo "migrated-flag test: $(grep -a -o '\[[A-Z]*\] test_preempt_flag_follows_migrated_task' $f | tr '\n' ' ')  trigger: $(tail -2 $S/b/trigger-$tag.log | head -1 | cut -c1-160)"
+if [ "$elf" != - ]; then ( $S/b/trig1.sh $tag $elf > /dev/null 2>&1 & ); sleep 1; echo "armed next: $elf"; fi

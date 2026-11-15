@@ -1,0 +1,9 @@
+# Jetson kexec suite test kernel (make kernel-test PLATFORM=JETSON_ORIN_NANO, PMM_CHECK off), f55c5293 against 647c2c33 (adds the free-list verifier). Both built in .wt/b-base.
+slmos-1207-suite-f55c5293: .text=2544856 .rodata=7366818 .data=148480 .bss=37512944  __kernel_end=0x0000000082d80000 sha256=6fcf403f4e6a077f
+slmos-1207-suite-647c2c33: .text=2549208 .rodata=7371938 .data=148480 .bss=37512944  __kernel_end=0x0000000082d80000 sha256=78d13867b87fcc9b
+# New data objects in 647c2c33 (nm -S: address size type name):
+00000000809b5a08 0000000000000004 b pmm_verify_findings
+00000000809b5a10 00000000000000a0 b pmm_verify_reported
+0000000080980010 0000000000000008 d pmm_verify_where
+0000000080e1db18 0000000000000004 b ticks_since_walk.0
+# .data and .bss sizes are equal (the 176 new bytes fit in existing padding) and __kernel_end, from which the heap starts, is the same address: the verifier does not move the heap. .text grows by 4352 bytes and .rodata by 5120.
