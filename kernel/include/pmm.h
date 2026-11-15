@@ -237,4 +237,20 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
  */
 void pmm_dump_free_list(unsigned int order, size_t max_blocks);
 
+/*
+ * PMM_CHECK build option (#1207, debug only; see kernel/mm/pmm.c).
+ *
+ * pmm_check_walk() walks every free list (links, order tags, page state,
+ * list length against free_counts, the page total) and prints one
+ * `[pmm-check] <where>: ok (...)` line; the first inconsistency panics
+ * with the list state instead. PMM_CHECK_WALK() is the call for code that
+ * is also built without the option, where it expands to nothing.
+ */
+#if defined(CONFIG_PMM_CHECK)
+unsigned pmm_check_walk(const char *where);
+#define PMM_CHECK_WALK(where)   ((void)pmm_check_walk(where))
+#else
+#define PMM_CHECK_WALK(where)   ((void)0)
+#endif
+
 #endif /* PMM_H */

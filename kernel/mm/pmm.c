@@ -179,6 +179,412 @@ static inline bool is_aligned_to_order(uintptr_t addr, unsigned int order)
 }
 
 /* ==========================================================================
+ * PMM_CHECK: free-list and count assertions (#1207)
+ *
+ * Built only with `make ... PMM_CHECK=ON` (CMake -DPMM_CHECK=ON, which
+ * defines CONFIG_PMM_CHECK). With the option off nothing here is compiled
+ * and every PMM_CHK_* hook expands to nothing.
+ *
+ * With it on, each free-list operation checks its own preconditions and
+ * panics, with the list state printed, at the operation that finds them
+ * broken:
+ *  - free_list_add: the block is already listed, or the old head's prev
+ *    link is not NULL;
+ *  - free_list_remove: the count is zero, the block is not listed at that
+ *    order, or its neighbours do not link back to it;
+ *  - free_list_pop: the list is empty while the count is not zero (the
+ *    #1207 signature, reported before buddy_alloc splits from
+ *    PMM_ALLOC_FAIL), the head is not listed at that order, or its links
+ *    are not valid list elements;
+ *  - buddy_free: the buddy range is free page by page but is not one
+ *    listed block of that order;
+ *  - pmm_free_pages: a page of the range is not allocated, or the order
+ *    is larger than the order the block was allocated with (a smaller
+ *    order is printed once per caller and allowed: a partial free).
+ * pmm_check_walk() walks every list (links, order tags, page state,
+ * length against free_counts, the page total); the test harness calls it
+ * after every suite, so a link overwritten by something other than the
+ * PMM is found at the first suite boundary after the write.
+ *
+ * The checks are O(1) per operation, apart from the page-state scan of a
+ * freed range (the walk is O(free blocks) and runs only where it is
+ * called). One tag byte per page:
+ *   0             the page starts neither a listed nor an allocated block
+ *   0x80 | order  the page starts a free block listed at that order
+ *   0x40 | order  the page starts a block allocated at that order
+ * ========================================================================== */
+#if defined(CONFIG_PMM_CHECK)
+
+#define PMM_TAG_LISTED(o)   ((uint8_t)(0x80u | (o)))
+#define PMM_TAG_ALLOCED(o)  ((uint8_t)(0x40u | (o)))
+
+static uint8_t   pmm_chk_tag[MAX_BLOCKS];
+static uintptr_t pmm_chk_pc;            /* caller of the public entry point */
+static unsigned  pmm_chk_reports;
+static uintptr_t pmm_chk_partial_pcs[8];
+
+static bool pmm_chk_ptr_ok(uintptr_t a, unsigned int order)
+{
+    return a >= buddy_state.heap_start && a < buddy_state.heap_end &&
+           is_aligned_to_order(a, order);
+}
+
+static void pmm_chk_dump_list(unsigned int order)
+{
+    struct free_block *b = buddy_state.free_lists[order];
+    uart_printf("  order %u: count=%lu head=0x%lx\n", order,
+                (unsigned long)buddy_state.free_counts[order],
+                (unsigned long)(uintptr_t)b);
+    for (unsigned int i = 0; b && i < 8; i++) {
+        uintptr_t a = (uintptr_t)b;
+        if (!pmm_chk_ptr_ok(a, 0)) {
+            uart_printf("    [%u] 0x%lx (outside the heap or not page-aligned: "
+                        "not followed)\n", i, (unsigned long)a);
+            break;
+        }
+        uart_printf("    [%u] 0x%lx next=0x%lx prev=0x%lx tag=0x%x state=%u\n",
+                    i, (unsigned long)a, (unsigned long)(uintptr_t)b->next,
+                    (unsigned long)(uintptr_t)b->prev,
+                    (unsigned)pmm_chk_tag[addr_to_block_index(a)],
+                    (unsigned)block_state[addr_to_block_index(a)]);
+        b = b->next;
+    }
+}
+
+/* Report an inconsistency found at `addr` (0: none) on the order-`order`
+ * list and panic (noreturn). pmm_lock is held, so the state printed is the state at
+ * the failing operation. */
+static void pmm_chk_fail(const char *what, uintptr_t addr, unsigned int order)
+{
+    pmm_chk_reports++;
+    uart_printf("\n[pmm-check] %s\n", what);
+    uart_printf("  at 0x%lx order %u, caller pc=0x%lx\n",
+                (unsigned long)addr, order, (unsigned long)pmm_chk_pc);
+    if (addr && pmm_chk_ptr_ok(addr, 0)) {
+        const volatile uint64_t *raw = (const volatile uint64_t *)addr;
+        uart_printf("  page tag=0x%x state=%u raw[0..3]=%016lx %016lx %016lx %016lx\n",
+                    (unsigned)pmm_chk_tag[addr_to_block_index(addr)],
+                    (unsigned)block_state[addr_to_block_index(addr)],
+                    (unsigned long)raw[0], (unsigned long)raw[1],
+                    (unsigned long)raw[2], (unsigned long)raw[3]);
+    }
+    uart_puts("  free lists (first 8 elements of the failing order):\n");
+    pmm_chk_dump_list(order);
+    for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+        if (o != order && (buddy_state.free_counts[o] || buddy_state.free_lists[o])) {
+            uart_printf("  order %u: count=%lu head=0x%lx\n", o,
+                        (unsigned long)buddy_state.free_counts[o],
+                        (unsigned long)(uintptr_t)buddy_state.free_lists[o]);
+        }
+    }
+    panic("pmm-check: %s (0x%lx, order %u)", what, (unsigned long)addr, order);
+}
+
+/* A listed element: in the heap, aligned for its order, tagged as listed
+ * at that order, first page free. */
+static bool pmm_chk_listed(uintptr_t a, unsigned int order)
+{
+    return pmm_chk_ptr_ok(a, order) &&
+           pmm_chk_tag[addr_to_block_index(a)] == PMM_TAG_LISTED(order) &&
+           block_state[addr_to_block_index(a)] != BLOCK_ALLOCATED;
+}
+
+static void pmm_chk_add(uintptr_t addr, unsigned int order)
+{
+    struct free_block *head = buddy_state.free_lists[order];
+    if (!pmm_chk_ptr_ok(addr, order)) {
+        pmm_chk_fail("free_list_add: block outside the heap or misaligned",
+                     addr, order);
+        return;
+    }
+    if (pmm_chk_tag[addr_to_block_index(addr)] & 0x80u) {
+        pmm_chk_fail("free_list_add: block is already on a free list",
+                     addr, order);
+    }
+    if (head && (!pmm_chk_listed((uintptr_t)head, order) || head->prev)) {
+        pmm_chk_fail("free_list_add: list head is not a listed block of this "
+                     "order, or its prev link is not NULL",
+                     (uintptr_t)head, order);
+    }
+    if (!head && buddy_state.free_counts[order]) {
+        pmm_chk_fail("free_list_add: list empty but free_counts is not zero",
+                     addr, order);
+    }
+    pmm_chk_tag[addr_to_block_index(addr)] = PMM_TAG_LISTED(order);
+}
+
+static void pmm_chk_remove(uintptr_t addr, unsigned int order)
+{
+    struct free_block *block = (struct free_block *)addr;
+    if (buddy_state.free_counts[order] == 0) {
+        pmm_chk_fail("free_list_remove: free_counts is zero (would underflow)",
+                     addr, order);
+    }
+    if (!pmm_chk_listed(addr, order)) {
+        pmm_chk_fail("free_list_remove: block is not a listed block of this order",
+                     addr, order);
+        return;
+    }
+    if (block->prev ? (!pmm_chk_listed((uintptr_t)block->prev, order) ||
+                       block->prev->next != block)
+                    : buddy_state.free_lists[order] != block) {
+        pmm_chk_fail("free_list_remove: prev link (or the list head) does not "
+                     "lead to the block", addr, order);
+    }
+    if (block->next && (!pmm_chk_listed((uintptr_t)block->next, order) ||
+                        block->next->prev != block)) {
+        pmm_chk_fail("free_list_remove: next link does not lead back to the block",
+                     addr, order);
+    }
+    pmm_chk_tag[addr_to_block_index(addr)] = 0;
+}
+
+static void pmm_chk_pop(unsigned int order)
+{
+    struct free_block *block = buddy_state.free_lists[order];
+    if (!block) {
+        if (buddy_state.free_counts[order]) {
+            pmm_chk_fail("free_list_pop: list empty but free_counts is not zero",
+                         0, order);
+        }
+        return;
+    }
+    if (buddy_state.free_counts[order] == 0) {
+        pmm_chk_fail("free_list_pop: list not empty but free_counts is zero",
+                     (uintptr_t)block, order);
+    }
+    if (!pmm_chk_listed((uintptr_t)block, order)) {
+        pmm_chk_fail("free_list_pop: list head is not a listed block of this order",
+                     (uintptr_t)block, order);
+        return;
+    }
+    if (block->prev) {
+        pmm_chk_fail("free_list_pop: list head has a prev link",
+                     (uintptr_t)block, order);
+    }
+    if (block->next && (!pmm_chk_listed((uintptr_t)block->next, order) ||
+                        block->next->prev != block)) {
+        pmm_chk_fail("free_list_pop: head's next link is not a listed block "
+                     "that links back", (uintptr_t)block, order);
+    }
+    pmm_chk_tag[addr_to_block_index((uintptr_t)block)] = 0;
+}
+
+/* buddy_free found every page of the buddy range free. */
+static void pmm_chk_buddy(uintptr_t buddy_addr, unsigned int order)
+{
+    if (!pmm_chk_listed(buddy_addr, order)) {
+        pmm_chk_fail("buddy_free: buddy range is free but is not one listed "
+                     "block of this order", buddy_addr, order);
+    }
+}
+
+/* A block was allocated. Tags left inside it by earlier, smaller blocks
+ * are cleared, so a later partial free is not compared with one. */
+static void pmm_chk_alloced(uintptr_t addr, unsigned int order)
+{
+    if (addr != PMM_ALLOC_FAIL) {
+        size_t base = addr_to_block_index(addr);
+        size_t count = order_to_pages(order);
+        for (size_t i = 1; i < count; i++) {
+            pmm_chk_tag[base + i] = 0;
+        }
+        pmm_chk_tag[base] = PMM_TAG_ALLOCED(order);
+    }
+}
+
+/* pmm_add_region is about to list [start, end): report a boundary that is
+ * not page-aligned (pmm_init then lists, or drops, part of a page that a
+ * reservation shares). Printed for the first few, counted for all. */
+static unsigned pmm_chk_unaligned_regions;
+
+static void pmm_chk_region(uintptr_t start, uintptr_t end)
+{
+    if ((start | end) & (PAGE_SIZE - 1)) {
+        if (pmm_chk_unaligned_regions++ < 8) {
+            uart_printf("[pmm-check] region 0x%lx-0x%lx is not page-aligned\n",
+                        (unsigned long)start, (unsigned long)end);
+        }
+    }
+}
+
+/* End of pmm_init: walk the lists, then report the two states a correct
+ * initial free list never has: a free block whose buddy is a free block
+ * of the same order (never merged), and a free-page total in block_state
+ * that differs from free_pages (blocks that overlap). Both are printed,
+ * not fatal: they are what the per-operation checks then trip over. */
+static unsigned pmm_chk_walk_locked(size_t *blocks_out);
+
+static void pmm_chk_init_report(void)
+{
+    size_t blocks = 0, unmerged = 0, free_state = 0;
+
+    (void)pmm_chk_walk_locked(&blocks);
+    for (unsigned int o = 0; o < MAX_ORDER; o++) {
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+            uintptr_t buddy = get_buddy_addr((uintptr_t)b, o);
+            if (buddy > (uintptr_t)b && pmm_chk_listed(buddy, o)) {
+                if (unmerged++ < 8) {
+                    uart_printf("[pmm-check] init: free buddies 0x%lx and 0x%lx "
+                                "(order %u) are not merged\n",
+                                (unsigned long)(uintptr_t)b,
+                                (unsigned long)buddy, o);
+                }
+            }
+        }
+    }
+    for (size_t i = 0; i < buddy_state.total_pages; i++) {
+        if (block_state[i] != BLOCK_ALLOCATED) {
+            free_state++;
+        }
+    }
+    uart_printf("[pmm-check] init: %lu free blocks, %lu free pages (%lu by page "
+                "state%s), %lu unmerged buddy pair(s), %u region(s) not "
+                "page-aligned\n",
+                (unsigned long)blocks, (unsigned long)buddy_state.free_pages,
+                (unsigned long)free_state,
+                free_state == buddy_state.free_pages ? "" : ": MISMATCH",
+                (unsigned long)unmerged, pmm_chk_unaligned_regions);
+}
+
+/* pmm_free_pages, after its own argument checks, under pmm_lock. */
+static void pmm_chk_free(uintptr_t addr, unsigned int order)
+{
+    size_t base = addr_to_block_index(addr);
+    size_t count = order_to_pages(order);
+    uint8_t tag = pmm_chk_tag[base];
+
+    if (addr + order_to_size(order) > buddy_state.heap_end) {
+        pmm_chk_fail("pmm_free_pages: range runs past the heap end", addr, order);
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (block_state[base + i] != BLOCK_ALLOCATED) {
+            pmm_chk_fail("pmm_free_pages: a page of the range is not allocated "
+                         "(over-sized or overlapping free)",
+                         addr + (i << PAGE_SHIFT), order);
+            return;
+        }
+    }
+    if ((tag & 0xc0u) == 0x40u && (tag & 0x3fu) < order) {
+        pmm_chk_fail("pmm_free_pages: order is larger than the block's "
+                     "allocation order", addr, order);
+    } else if ((tag & 0xc0u) == 0x40u && (tag & 0x3fu) > order) {
+        for (unsigned int i = 0; i < 8; i++) {
+            if (pmm_chk_partial_pcs[i] == pmm_chk_pc) {
+                break;
+            }
+            if (pmm_chk_partial_pcs[i] == 0) {
+                pmm_chk_partial_pcs[i] = pmm_chk_pc;
+                uart_printf("[pmm-check] partial free: order %u at 0x%lx, "
+                            "allocated at order %u (caller pc=0x%lx; printed "
+                            "once per caller)\n", order, (unsigned long)addr,
+                            (unsigned)(tag & 0x3fu), (unsigned long)pmm_chk_pc);
+                break;
+            }
+        }
+    }
+    pmm_chk_tag[base] = 0;
+}
+
+/* Walk every free list. The first inconsistency panics, so a return is a
+ * clean walk (0). Caller holds pmm_lock or runs before any other CPU
+ * allocates. */
+static unsigned pmm_chk_walk_locked(size_t *blocks_out)
+{
+    unsigned before = pmm_chk_reports;
+    size_t pages = 0, blocks = 0;
+
+    pmm_chk_pc = 0;
+    for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+        size_t n = 0;
+        struct free_block *prev = NULL;
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+            uintptr_t a = (uintptr_t)b;
+            if (n >= buddy_state.free_counts[o]) {
+                pmm_chk_fail("walk: list longer than free_counts", a, o);
+                break;
+            }
+            if (!pmm_chk_listed(a, o)) {
+                pmm_chk_fail("walk: element is not a listed block of this order",
+                             a, o);
+                break;
+            }
+            if (b->prev != prev) {
+                pmm_chk_fail("walk: prev link does not point at the previous "
+                             "element", a, o);
+                break;
+            }
+            if (block_state[addr_to_block_index(a) + order_to_pages(o) - 1] ==
+                BLOCK_ALLOCATED) {
+                pmm_chk_fail("walk: last page of a listed block is not free",
+                             a, o);
+                break;
+            }
+            prev = b;
+            n++;
+        }
+        if (pmm_chk_reports == before && n != buddy_state.free_counts[o]) {
+            pmm_chk_fail("walk: list shorter than free_counts (chain ends early "
+                         "at this element)", (uintptr_t)prev, o);
+        }
+        pages += n << o;
+        blocks += n;
+    }
+    if (pmm_chk_reports == before && pages != buddy_state.free_pages) {
+        pmm_chk_fail("walk: pages on the lists differ from free_pages", 0, 0);
+    }
+    if (blocks_out) {
+        *blocks_out = blocks;
+    }
+    return pmm_chk_reports - before;
+}
+
+unsigned pmm_check_walk(const char *where)
+{
+    size_t blocks = 0;
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    unsigned bad = pmm_chk_walk_locked(&blocks);
+    size_t free_pages = buddy_state.free_pages;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    uart_printf("[pmm-check] %s: %s (%lu free blocks, %lu free pages)\n",
+                where, bad ? "INCONSISTENT" : "ok",
+                (unsigned long)blocks, (unsigned long)free_pages);
+    return bad;
+}
+
+#define PMM_CHK_ENTER()          (pmm_chk_pc = (uintptr_t)__builtin_return_address(0))
+#define PMM_CHK_ADD(a, o)        pmm_chk_add((a), (o))
+#define PMM_CHK_REMOVE(a, o)     pmm_chk_remove((a), (o))
+#define PMM_CHK_POP(o)           pmm_chk_pop(o)
+#define PMM_CHK_BUDDY(a, o)      pmm_chk_buddy((a), (o))
+#define PMM_CHK_ALLOCED(a, o)    pmm_chk_alloced((a), (o))
+#define PMM_CHK_FREE(a, o)       pmm_chk_free((a), (o))
+#define PMM_CHK_INIT() \
+    do { \
+        for (size_t i_ = 0; i_ < MAX_BLOCKS; i_++) { \
+            pmm_chk_tag[i_] = 0; \
+        } \
+    } while (0)
+#define PMM_CHK_REGION(s, e)     pmm_chk_region((s), (e))
+#define PMM_CHK_WALK_INIT()      pmm_chk_init_report()
+
+#else  /* !CONFIG_PMM_CHECK */
+
+#define PMM_CHK_ENTER()          ((void)0)
+#define PMM_CHK_ADD(a, o)        ((void)0)
+#define PMM_CHK_REMOVE(a, o)     ((void)0)
+#define PMM_CHK_POP(o)           ((void)0)
+#define PMM_CHK_BUDDY(a, o)      ((void)0)
+#define PMM_CHK_ALLOCED(a, o)    ((void)0)
+#define PMM_CHK_FREE(a, o)       ((void)0)
+#define PMM_CHK_INIT()           ((void)0)
+#define PMM_CHK_REGION(s, e)     ((void)0)
+#define PMM_CHK_WALK_INIT()      ((void)0)
+
+#endif /* CONFIG_PMM_CHECK */
+
+/* ==========================================================================
  * Free List Operations
  * ========================================================================== */
 
@@ -190,6 +596,7 @@ static void free_list_add(uintptr_t addr, unsigned int order)
     struct free_block *block = (struct free_block *)addr;
     struct free_block *head = buddy_state.free_lists[order];
 
+    PMM_CHK_ADD(addr, order);
     block->prev = NULL;
     block->next = head;
 
@@ -208,6 +615,7 @@ static void free_list_remove(uintptr_t addr, unsigned int order)
 {
     struct free_block *block = (struct free_block *)addr;
 
+    PMM_CHK_REMOVE(addr, order);
     if (block->prev) {
         block->prev->next = block->next;
     } else {
@@ -228,6 +636,7 @@ static uintptr_t free_list_pop(unsigned int order)
 {
     struct free_block *block = buddy_state.free_lists[order];
 
+    PMM_CHK_POP(order);
     if (!block) {
         return PMM_ALLOC_FAIL;
     }
@@ -362,6 +771,7 @@ static void buddy_free(uintptr_t addr, unsigned int order, unsigned int original
         }
 
         /* Remove buddy from its free list */
+        PMM_CHK_BUDDY(buddy_addr, order);
         free_list_remove(buddy_addr, order);
 
         /* Merge: use lower address as the merged block */
@@ -695,6 +1105,7 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 static void pmm_add_region(uintptr_t start, uintptr_t end)
 {
     uintptr_t current = PAGE_ALIGN_UP(start);
+    PMM_CHK_REGION(start, end);
     while (current < end) {
         unsigned int order = MAX_ORDER;
 
@@ -753,6 +1164,7 @@ void pmm_init(void)
     for (size_t i = 0; i < MAX_BLOCKS; i++) {
         block_state[i] = BLOCK_ALLOCATED;
     }
+    PMM_CHK_INIT();
 
     /* Initialize statistics */
     buddy_state.free_pages = 0;
@@ -876,6 +1288,7 @@ void pmm_init(void)
         }
     }
 
+    PMM_CHK_WALK_INIT();
     buddy_state.initialized = true;
 
     INFO("PMM initialized (buddy allocator)");
@@ -920,7 +1333,9 @@ void *pmm_alloc_pages(size_t count)
     }
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    PMM_CHK_ENTER();
     uintptr_t addr = buddy_alloc(order);
+    PMM_CHK_ALLOCED(addr, order);
     spin_unlock_irqrestore(&pmm_lock, flags);
 
     if (addr == PMM_ALLOC_FAIL) {
@@ -956,6 +1371,7 @@ void *pmm_alloc_pages_low(size_t count)
     }
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    PMM_CHK_ENTER();
 
     /* Linear scan: find the lowest-address block at any order >= order.
      * Can't break early after finding a match at the requested order —
@@ -999,6 +1415,7 @@ void *pmm_alloc_pages_low(size_t count)
         free_list_add(buddy, best_order);
     }
     set_block_state(best_addr, order, BLOCK_ALLOCATED);
+    PMM_CHK_ALLOCED(best_addr, order);
     buddy_state.free_pages -= order_to_pages(order);
     buddy_state.alloc_count++;
 
@@ -1057,6 +1474,7 @@ void pmm_free_pages(void *page, size_t count)
     }
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    PMM_CHK_ENTER();
 
     /* Check for double-free */
     if (get_block_state(addr) == BLOCK_FREE) {
@@ -1064,6 +1482,7 @@ void pmm_free_pages(void *page, size_t count)
         WARN("PMM: Double-free detected at 0x%lx", addr);
         return;
     }
+    PMM_CHK_FREE(addr, order);
 
     buddy_free(addr, order, order);
 
