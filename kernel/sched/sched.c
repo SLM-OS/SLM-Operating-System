@@ -154,28 +154,50 @@ static uint64_t steal_woff_bound[STEAL_WOFF_BINS - 1];
 static volatile uint64_t steal_trace_t0_cnt;
 #endif /* CONFIG_WORK_STEALING */
 
+#if defined(CONFIG_SWO_DIAG)
+/* SWO_DIAG (#1262): who holds each rq lock. (holder cpu + 1) | (source line
+ * << 8), written by the holder right after it takes the lock and cleared
+ * right before it releases it; 0 = not held, or held by a site that does
+ * not record. Read without the lock by a waiter, as a diagnostic only. */
+static volatile uint32_t swo_rq_owner[MAX_CPUS];
+#define SWO_RQ_OWN(c, line) \
+    (swo_rq_owner[(c)] = (cpu_id() + 1U) | ((uint32_t)(line) << 8))
+#define SWO_RQ_DISOWN(c)    (swo_rq_owner[(c)] = 0)
+#else
+#define SWO_RQ_OWN(c, line) ((void)0)
+#define SWO_RQ_DISOWN(c)    ((void)0)
+#endif
+
 /* Lock helpers that use the correct lock for a given CPU */
-static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
+static inline irq_flags_t rq_lock_irqsave_l(uint32_t cpu, uint32_t line)
 {
     irq_flags_t f = spin_lock_irqsave(&rq_lock[cpu]);
+    (void)line;
+    SWO_RQ_OWN(cpu, line);
     SLOT_TRACE_RQ_LOCKED(cpu);
     return f;
 }
+#define rq_lock_irqsave(cpu) rq_lock_irqsave_l((cpu), __LINE__)
 static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
 {
     SLOT_TRACE_RQ_UNLOCKING(cpu);
+    SWO_RQ_DISOWN(cpu);
     spin_unlock_irqrestore(&rq_lock[cpu], flags);
 }
 
 /* For schedule(), which masks first and then reads its CPU id (#1242). */
-static inline void rq_lock_masked(uint32_t cpu)
+static inline void rq_lock_masked_l(uint32_t cpu, uint32_t line)
 {
     spin_lock(&rq_lock[cpu]);
+    (void)line;
+    SWO_RQ_OWN(cpu, line);
     SLOT_TRACE_RQ_LOCKED(cpu);
 }
+#define rq_lock_masked(cpu) rq_lock_masked_l((cpu), __LINE__)
 static inline void rq_unlock_masked(uint32_t cpu)
 {
     SLOT_TRACE_RQ_UNLOCKING(cpu);
+    SWO_RQ_DISOWN(cpu);
     spin_unlock(&rq_lock[cpu]);
 }
 
@@ -606,6 +628,13 @@ static volatile uint32_t swo_diag_pre_max_us[MAX_CPUS];
 static volatile uint32_t swo_diag_steal_max_us[MAX_CPUS];
 static volatile uint32_t swo_diag_steal_max_probes[MAX_CPUS];
 static volatile uint32_t swo_diag_lockw_max_us[MAX_CPUS];
+/* For the longest wait: failed try-lock spins, the lock word and the
+ * recorded owner when the wait began, and the owner 1 ms into it. A long
+ * wait with few spins means the waiting CPU was not executing. */
+static volatile uint32_t swo_diag_lockw_spins[MAX_CPUS];
+static volatile uint32_t swo_diag_lockw_word0[MAX_CPUS];
+static volatile uint32_t swo_diag_lockw_own0[MAX_CPUS];
+static volatile uint32_t swo_diag_lockw_own1[MAX_CPUS];
 static volatile uint32_t swo_diag_pre_slow[MAX_CPUS];
 static volatile uint32_t swo_diag_steal_probes[MAX_CPUS];
 static inline uint32_t swo_diag_us(uint64_t t0)
@@ -1656,9 +1685,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     if (old_cpu < target_cpu) {
         flags = rq_lock_irqsave(old_cpu);
         spin_lock(&rq_lock[target_cpu]);
+        SWO_RQ_OWN(target_cpu, __LINE__);
     } else {
         flags = rq_lock_irqsave(target_cpu);
         spin_lock(&rq_lock[old_cpu]);
+        SWO_RQ_OWN(old_cpu, __LINE__);
     }
 
     /* Remove from old CPU queue if task is ready.
@@ -1700,9 +1731,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
 
     /* Unlock in reverse order */
     if (old_cpu < target_cpu) {
+        SWO_RQ_DISOWN(target_cpu);
         spin_unlock(&rq_lock[target_cpu]);
         rq_unlock_irqrestore(old_cpu, flags);
     } else {
+        SWO_RQ_DISOWN(old_cpu);
         spin_unlock(&rq_lock[old_cpu]);
         rq_unlock_irqrestore(target_cpu, flags);
     }
@@ -2607,10 +2640,32 @@ relock:
 #if defined(CONFIG_SWO_DIAG)
     {
         uint64_t swo_l0 = timer_get_count();
-        rq_lock_masked(this_cpu);
+        uint32_t spins = 0;
+        uint32_t word0 = *(volatile uint32_t *)&rq_lock[this_cpu];
+        uint32_t own0 = swo_rq_owner[this_cpu];
+        uint32_t own1 = 0;
+        bool sampled = false;
+        while (!spin_trylock(&rq_lock[this_cpu])) {
+            spins++;
+            if (!sampled && swo_diag_us(swo_l0) > 1000) {
+                own1 = swo_rq_owner[this_cpu];
+                sampled = true;
+            }
+#if defined(PLATFORM_X86_64)
+            __asm__ volatile("pause" ::: "memory");
+#else
+            __asm__ volatile("yield" ::: "memory");
+#endif
+        }
+        SWO_RQ_OWN(this_cpu, __LINE__);
+        SLOT_TRACE_RQ_LOCKED(this_cpu);
         uint32_t lw = swo_diag_us(swo_l0);
         if (lw > swo_diag_lockw_max_us[this_cpu]) {
             swo_diag_lockw_max_us[this_cpu] = lw;
+            swo_diag_lockw_spins[this_cpu] = spins;
+            swo_diag_lockw_word0[this_cpu] = word0;
+            swo_diag_lockw_own0[this_cpu] = own0;
+            swo_diag_lockw_own1[this_cpu] = own1;
         }
         if (lock_site == 1) {
             uint32_t pre = swo_diag_us(swo_t0);
@@ -3536,5 +3591,16 @@ void sched_swo_diag_prelude_report(const char *tag, uint32_t min_us)
         uart_printf(" cpu%u %u/%u(%u)/%u/%u", c, pre[c], st[c], pr[c], lw[c], sl[c]);
     }
     uart_printf("\n");
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        if (lw[c] > min_us) {
+            uint32_t o0 = swo_diag_lockw_own0[c], o1 = swo_diag_lockw_own1[c];
+            uart_printf("  swo-diag lockwait cpu%u: %u us, %u failed try-locks, "
+                        "lock word at start %u, owner at start cpu%d line %u, "
+                        "owner at 1 ms cpu%d line %u (cpu-1 = none recorded)\n",
+                        c, lw[c], swo_diag_lockw_spins[c],
+                        swo_diag_lockw_word0[c], (int)(o0 & 0xFF) - 1, o0 >> 8,
+                        (int)(o1 & 0xFF) - 1, o1 >> 8);
+        }
+    }
 }
 #endif /* CONFIG_SWO_DIAG */
