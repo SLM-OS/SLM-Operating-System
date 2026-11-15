@@ -1473,3 +1473,127 @@ host through a shared `flock`. Builders do not write this log.
 Addendum to Entry 42 (04:57 UTC, from date): the one-shot scheduled prompt
 set for 20:57 PST arrived at 20:57:05 PST (04:57 UTC), while the session
 was idle between turns. Both stand-ins for `send_later` work.
+
+## Entry 43 (written 07:40 UTC, from date): builder B phase B0 (#1207, QEMU and code); builder A woken, lab handed to A
+
+Source: builder B's B0 report and its one correction, as received. Branch
+`fix/pmm-coalesce` f650b695 (on 661204e6; commits df481476 `PMM_CHECK`
+option only, 21303db1 five new tests and two test hooks, e3c22600 allocator
+and test fix with documents, f650b695 hooks built into every image).
+Evidence: `gauntlet-5-hw-jetson` 932f4e4f, `run5-hw/1263-1207/`, 87 files
+`B-*`, index `B-README.txt`. Not yet checked by a critic.
+
+### Correction to the session brief
+
+The two coalescing tests (`test_coalesce_enables_larger_allocation`,
+`test_recursive_coalescing`) do not fail on every board. In Entry 39's
+captures (`closeout/`, 6a4cfa93) they fail in 5 of 5 Jetson kexec suite
+boots and pass in 5 of 5 Pi 5 boots and 5 of 5 Jetson UEFI-direct boots.
+
+### QEMU baseline, 661204e6 unmodified
+
+| Row | Files | Result |
+|---|---|---|
+| coalesce pair x50 | `B-qemu-base-661204e6-coalesce-x50.txt` | 50 of 50 and 50 of 50 pass |
+| checkerboard + exhaustion x50 | `B-qemu-base-661204e6-checker-exhaust-x50.txt` | 50 of 50 and 50 of 50 pass |
+| PMM group in suite order x20 | `B-qemu-base-661204e6-fullsuite-run01..20.txt` | PMM suite `Tests: 48 Passed: 45 Failed: 0 Ignored: 3` in 20 of 20. Deviation: the filter holds 16 names and the group has 48, so the whole suite ran 20 times. 4 of 20 runs failed outside the PMM: run14 `test_net_burst_8_sends_async` (#1137/#1163); run15 and run20 `test_litmus_patterns_pass` (#1230); run18 litmus, a Lua GC data abort and the 120 s timeout (new, filed as #1278, P2) |
+
+Nothing in the PMM fails in QEMU on the base.
+
+### The coalescing tests: a test defect (shown)
+
+The tests count splits and merges of single pages, which holds only when
+those pages come from one split block. A Jetson kexec boot has 104 to 132
+free single pages on the order-0 list (`closeout/kexec-suite-6a4cfa93-boot01..05.txt`,
+the `Order 0` line), Pi 5 has 1, QEMU 0, so on Jetson kexec the allocator
+hands out lone pages first: no split (`test_pmm.c:264`), nothing to merge
+(`:318`). Reproduced in QEMU by creating 8 lone free pages first, with the
+same two messages at the same lines (`B-qemu-old-7b0af7d0-newtests.txt`).
+Fix: both tests drain the order-0 list first.
+
+### The halt: mechanism shown in QEMU, hardware cause not shown
+
+Shown on the old allocator in QEMU:
+
+1. `is_buddy_free` (`kernel/mm/pmm.c:282-300` at 661204e6) tests that every
+   page of the buddy range is free; two smaller free blocks side by side
+   pass. `buddy_free` (`:365`) then calls `free_list_remove` on a block that
+   is not on that order's list, `free_counts[order]` is decremented for a
+   block the list never held (`:221`), and a later `buddy_alloc`
+   (`:314-332`) finds a count above 0 with an empty list and writes
+   `block_state[]` at an index computed from -1.
+   `B-qemu-old-7b0af7d0-halt-signature.txt`: Data Abort (WRITE), ESR
+   0x96000044, FAR 0x1000004071633f, x0 0xffffffffffffffff, the signature
+   of #1207. `B-qemu-old-7b0af7d0-pmmcheck-on.txt`: with `PMM_CHECK=ON` the
+   same run panics at the merge (`buddy_free: buddy range is free but is
+   not one listed block of this order (0x420d6000, order 1)`).
+2. `pmm_free_pages` (`:1062`) checks only the first page for a double free.
+3. `pmm_add_region` (`:695-718`): the order-0 step has no fit test, so a
+   region whose end is not page-aligned lists the page holding the end.
+
+**Not shown:** which of these, or something else, happens on jetson-nano-2.
+Mechanism 1 needs a free buddy range that is not one block; by the
+builder's code reading `pmm_init` cannot produce one when every reserve
+boundary is page-aligned, and the firmware memreserve values on Jetson are
+in no capture. The builder does not claim #1207 is root-caused on hardware.
+The d512f40b run05 capture (`next` = 0x0007000000000000 in the order-12
+list) is not explained: mechanism 1 can store a non-pointer `next`, but
+that is not shown, and a write into free memory by something other than
+the PMM is not excluded. The coalescing failures and the halt are two
+defects. #1228: same signature, not shown to be the same defect.
+
+### The change (e3c22600, f650b695)
+
+The first page of a listed free block carries `BLOCK_FREE_HEAD|order` in
+`block_state[]` and `is_buddy_free` compares that byte; `pmm_free_pages`
+rejects a range holding a page that is not allocated; `pmm_add_region`
+adds whole pages only; a count without a list panics by name; `PMM_CHECK=ON`
+(default off) adds O(1) assertions, a `pmm_init` line and a free-list walk
+after each suite. Option off (`B-text-pmmcheck-off-df481476-vs-661204e6.txt`):
+production `.text` size equal on Jetson (2479384), Pi 5 (2237304) and QEMU
+(2227160); 16 bytes differ per image, all `__LINE__` immediates in
+`pmm.c.obj`; not byte-identical.
+
+Test fails on old code: `B-qemu-old-7b0af7d0-newtests.txt`, 5 of 5 new
+tests fail on the old allocator (21303db1's tree); `B-qemu-fix-f650b695-newtests-x50.txt`,
+50 of 50 each on the fix.
+
+### QEMU rows at the fix
+
+| Row | Files | Result |
+|---|---|---|
+| coalesce pair x50 | `B-qemu-fix-f650b695-coalesce-x50.txt` | 50 of 50, 50 of 50 |
+| checkerboard + exhaustion x50 | `B-qemu-fix-f650b695-checker-exhaust-x50.txt` | 50 of 50, 50 of 50 |
+| full suite x20, e3c22600 | `B-qemu-fix-e3c22600-fullsuite-run01..20.txt` | PMM suite 53/50/0/3 in 20 of 20, 0 faults; **8 of 20** runs fail on `test_litmus_patterns_pass` only (runs 01, 02, 03, 04, 06, 07, 08, 19; the builder's corrected count) |
+| full suite x13, f650b695 | `B-qemu-fix-f650b695-fullsuite-run1..3.txt`, `-fullsuite-b-run01..10.txt` | PMM suite clean in 13 of 13; 2 of 13 fail on litmus only |
+| `make test PMM_CHECK=ON` | `B-qemu-fix-f650b695-pmmcheck-on-fullsuite.txt` | pass; 107 walks ok |
+| `make test PLATFORM=X86_64` | `B-qemu-fix-f650b695-x86_64-fullsuite.txt` | pass |
+| `make check-braces` | `B-qemu-fix-f650b695-check-braces.txt` | 0 violations |
+
+The PMM loops are at 0 failures; the full-suite rows are not, because of
+the litmus test (#1230): 8 of 20 at e3c22600 against 3 of 20 at the base.
+The builder's reading (inference): host load from its own builds. The
+orchestrator asked for an interleaved base/fix A/B at equal load.
+
+### Incidents
+
+- Builder B's 21303db1 and e3c22600 did not compile as production kernels
+  (test hooks behind `ENABLE_BOOT_TESTS`); found by its own Jetson
+  production build and `check-braces`, fixed in f650b695.
+- **Builder A lost about 1 h 40 min.** It ended its turn at 05:48 UTC to
+  wait for background image builds; they finished at 05:55 UTC
+  (`images.txt` in its scratch directory) and nothing resumed it. The
+  orchestrator noticed at 07:33 UTC when B's report arrived. The Jetson sat
+  unused for that time. Both builders now wait for their own background
+  jobs in the foreground in bounded steps.
+
+### Decisions
+
+- 07:35 UTC: lab handed to builder A for A1 (Jetson R3 wake and
+  `bench context`, padded against unpadded). A's code is at c0612fa7.
+- B1, after A1: 2 kexec suite boots of the old allocator with
+  `PMM_CHECK=ON` (`slmos-1207-chk-oldalloc-df481476.elf`), then the
+  required row (`slmos-1207-suite-f650b695.elf`, 10 boots), then report.
+- Builder B meanwhile: `/ci`, the litmus A/B, and where the Jetson reserve
+  ranges can be read.
+- #1207 stays P1 and open on the hardware evidence so far.
