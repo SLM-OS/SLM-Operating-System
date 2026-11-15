@@ -1,0 +1,37 @@
+#!/bin/bash
+# ci.sh <head label> [first step]: the /ci skill's steps in .wt/b, one log per step.
+# Steps that start QEMU run under the session QEMU lock. Stops at the first failure.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+B=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b
+L=$1; first=${2:-1}
+cd $B || exit 1
+LOCK="flock -w 540 $S/qemu.lock"
+step() { # step <n> <name> <lock|nolock> <command...>
+  n=$1; name=$2; lk=$3; shift 3
+  [ "$n" -lt "$first" ] && return 0
+  out=$S/b/B-ci-$L-step$(printf %02d $n)-$name.txt
+  echo "# /ci step $n ($name) at $L in $B; $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg)" > $out
+  echo "# command: $*   ($lk)" >> $out
+  rc=1
+  for try in 1 2 3 4 5 6; do
+    if [ $lk = lock ]; then $LOCK bash -c "echo LOCKED; $*" > $out.body 2>&1; rc=$?; grep -q '^LOCKED' $out.body && break; sleep 30
+    else bash -c "$*" > $out.body 2>&1; rc=$?; break; fi
+  done
+  { echo "# exit code: $rc"; echo "# ---- output (last 400 lines) ----"; tail -400 $out.body; } >> $out
+  if [ -f build/test-output.log ] && [ $lk = lock ]; then { echo "# ---- QEMU serial (build/test-output.log) ----"; cat build/test-output.log; } >> $out; fi
+  rm -f $out.body
+  echo "step $n $name rc=$rc $(grep -a -m1 -E 'PASSED - |FAILED - |TIMEOUT - |CRASHED' $out | tr -d '\r') $(grep -a -c 'warning:' $out) warning lines"
+  [ $rc -eq 0 ] || { echo "STOP at step $n"; exit 1; }
+}
+step 1 arm64-build nolock "make kernel-clean && make kernel PLATFORM=QEMU_VIRT"
+step 2 x86-build nolock "make kernel-clean && make kernel PLATFORM=X86_64"
+step 3 jetson-realweights nolock "make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real"
+step 4 test-arm64 lock "make test"
+step 5 test-x86 lock "make test PLATFORM=X86_64"
+step 6 test-ai-sched lock "make test AI_SCHED=ON"
+step 7 runtime-test nolock "make runtime-test"
+step 8 braces nolock "make test-check-braces && make check-braces"
+step 9 build-order lock "make test-build-order"
+step 10 jetson-layout lock "make test-jetson-uefi-layout"
+step 11 diff nolock "git diff origin/main...HEAD --stat"
+echo "ci done"

@@ -1,0 +1,23 @@
+# /ci step 11 (diff) at f55c5293 in /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b; 2026-11-15T08:41:25Z; load 2.63 2.42 2.44
+# command: git diff origin/main...HEAD --stat   (nolock)
+# exit code: 0
+# ---- output (last 400 lines) ----
+ CMakeLists.txt                    |  12 +
+ Makefile                          |   1 +
+ docs/memory-map.md                |  32 +-
+ docs/platform-abstraction.md      |  16 +
+ docs/testing.md                   |  63 +++-
+ kernel/CLAUDE.md                  |  34 +-
+ kernel/arch/arm64/boot.S          |  10 +-
+ kernel/include/dtb.h              |   9 +
+ kernel/include/pmm.h              |  23 +-
+ kernel/include/pmm_internal.h     |  40 +++
+ kernel/kernel-jetson.ld           |   5 +-
+ kernel/kernel.ld                  |   5 +-
+ kernel/mm/pmm.c                   | 734 ++++++++++++++++++++++++++++++++++++--
+ kernel/src/dtb.c                  |  15 +
+ kernel/src/dtb_x86_stub.c         |   7 +
+ kernel/tests/test_harness.c       |   9 +-
+ kernel/tests/test_pmm.c           | 417 +++++++++++++++++++++-
+ scripts/check-build-signatures.sh |   2 +-
+ 18 files changed, 1392 insertions(+), 42 deletions(-)

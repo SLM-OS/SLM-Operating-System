@@ -43,3 +43,13 @@ Build comparisons
   B-images.txt                                    hardware images built for the lab phases (sha256, banner, PMM_CHECK state)
 
 Lab scripts prepared (previous session's, paths changed): B-trigger.sh.txt, B-save.sh.txt, B-savebatch.sh.txt, B-hwimg.sh.txt
+
+Added after the B0 report (interim work, no lab)
+  679a09c7, f55c5293  PMM_CHECK prints the reserve list at pmm_init (check-option code only) + its doc line.
+                      Fix head is now f55c5293. diag/1207-check-oldalloc 17daedda = df481476 + 679a09c7
+                      (old allocator, full PMM_CHECK report): the image for the first B1 boots.
+  B-images.txt        rebuilt at 17daedda and f55c5293 (B-hw-all.sh.txt); B-images-superseded-f650b695.txt is the earlier list.
+  B-qemu-ab-base-661204e6-run01..10.txt, B-qemu-ab-fix-f55c5293-run01..10.txt
+                      full suite, base and fix interleaved (base, fix, base, fix, ...), both kernels built first,
+                      no build of this builder running (B-ab-litmus.sh.txt, B-ab-litmus.out.txt has the load before each pair)
+  B-ci-f55c5293-step01..11-*.txt   the /ci skill's steps at f55c5293 (B-ci.sh.txt, B-ci.out.txt), QEMU steps under the lock

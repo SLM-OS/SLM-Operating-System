@@ -1,0 +1,23 @@
+#!/bin/bash
+# hw-all.sh <phase: diag|fix> <head label>
+# Rebuilds the hardware images in .wt/b-base, which must already be at the head named.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+BB=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base
+phase=$1; L=$2
+cd $BB || exit 1
+make kernel PLATFORM=JETSON_ORIN_NANO > $S/b/img/build-jetson-prod-$L.log 2>&1; echo "jetson prod $L rc=$?"
+if [ $phase = diag ]; then
+  $S/b/hwimg.sh $BB $L slmos-1207-chk-oldalloc-$L JETSON_ORIN_NANO PMM_CHECK=ON
+else
+  $S/b/hwimg.sh $BB $L slmos-1207-suite-$L JETSON_ORIN_NANO
+  $S/b/hwimg.sh $BB $L slmos-1207-chk-fix-$L JETSON_ORIN_NANO PMM_CHECK=ON
+  make kernel PLATFORM=RASPI5 > $S/b/img/build-pi5-prod-$L.log 2>&1; echo "pi5 prod $L rc=$?"
+  $S/b/hwimg.sh $BB $L kernel_2712-1207-suite-$L RASPI5
+  make kernel PLATFORM=X86_64 > $S/b/img/build-x86-prod-$L.log 2>&1; echo "x86 prod $L rc=$?"
+  make kernel > $S/b/img/build-qemu-prod-$L.log 2>&1; echo "qemu prod $L rc=$?"
+fi
+for n in $(ls $S/b/img | grep -E "^slmos-1207-.*-$L.elf$" | sed 's/.elf$//'); do
+  s=$(aarch64-none-elf-nm $S/b/img/$n.elf | grep " oplib_blob_start" | cut -d' ' -f1); e=$(aarch64-none-elf-nm $S/b/img/$n.elf | grep " oplib_blob_end" | cut -d' ' -f1)
+  echo "== $n operator library: oplib_blob_end - oplib_blob_start = $((0x$e - 0x$s)) bytes" >> $S/b/images.txt
+done
+echo "hw-all $phase $L done"

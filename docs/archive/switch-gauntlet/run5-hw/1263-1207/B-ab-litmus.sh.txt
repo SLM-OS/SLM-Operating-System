@@ -1,0 +1,15 @@
+#!/bin/bash
+# ab-litmus.sh <n> : n full-suite QEMU runs each of base (661204e6, .wt/b-base) and fix
+# (f55c5293, .wt/b), interleaved base, fix, base, fix, ..., both test kernels built before
+# the first run and nothing else of this builder running. One flock per run.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt
+n=$1
+( cd $W/b-base && make kernel-test > $S/b/ab-build-base.log 2>&1 ) || { echo "base build failed"; exit 1; }
+( cd $W/b && make kernel-test > $S/b/ab-build-fix.log 2>&1 ) || { echo "fix build failed"; exit 1; }
+for i in $(seq -w 1 $n); do
+  echo "load before pair $i: $(cut -d' ' -f1-3 /proc/loadavg)"
+  $S/b/qrun.sh $W/b-base 661204e6 $S/b/B-qemu-ab-base-661204e6-run$i.txt
+  $S/b/qrun.sh $W/b f55c5293 $S/b/B-qemu-ab-fix-f55c5293-run$i.txt
+done
+echo "ab done"

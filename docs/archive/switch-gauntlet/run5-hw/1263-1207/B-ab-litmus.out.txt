@@ -1,0 +1,31 @@
+load before pair 01: 4.57 4.11 3.93
+B-qemu-ab-base-661204e6-run01.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run01.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 02: 1.80 2.92 3.49
+B-qemu-ab-base-661204e6-run02.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run02.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 03: 3.07 2.98 3.41
+B-qemu-ab-base-661204e6-run03.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run03.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 04: 4.61 3.48 3.51
+B-qemu-ab-base-661204e6-run04.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run04.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 05: 4.11 3.78 3.62
+B-qemu-ab-base-661204e6-run05.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run05.txt rc=2 iters=0;  suites=105; [FAIL] 1 total failure(s)
+load before pair 06: 3.84 3.54 3.54
+B-qemu-ab-base-661204e6-run06.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run06.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 07: 2.30 2.98 3.33
+B-qemu-ab-base-661204e6-run07.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run07.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 08: 4.17 3.38 3.40
+B-qemu-ab-base-661204e6-run08.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run08.txt rc=2 iters=0;  suites=105; [FAIL] 1 total failure(s)
+load before pair 09: 2.42 3.01 3.26
+B-qemu-ab-base-661204e6-run09.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run09.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+load before pair 10: 2.04 2.43 2.98
+B-qemu-ab-base-661204e6-run10.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+B-qemu-ab-fix-f55c5293-run10.txt rc=0 iters=0;  suites=105; [PASS] All test suites passed!
+ab done
