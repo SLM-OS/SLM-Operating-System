@@ -1,0 +1,6 @@
+#!/bin/bash
+# trig1.sh <tag> <elf on the board> : one kexec trigger for the next NEW Linux boot (15 min deadline),
+# log appended to $S/b/trigger-<tag>.log. Run in the background right before a 1-boot boot_test call.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+tag=$1; elf=$2
+bash $S/b/trigger.sh kexec 15 "$elf" >> $S/b/trigger-$tag.log 2>&1

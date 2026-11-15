@@ -1,0 +1,6 @@
+09:51:14 start mode=kexec n=1 elfs=[/root/slmos-1207-chk-oldalloc-17daedda.elf] skip_current_boot_id=976f3e2b-bc11-48d9-86e8-e4270c430836 pid=2089012
+09:52:41 trigger 1/1 elf=/root/slmos-1207-chk-oldalloc-17daedda.elf boot_id=882880e5-ee40-4d2b-bead-1720c9953b93 state+uptime=[running 25.25 ] reply=[2fae83679500c703 ]
+09:52:41 end triggers=1
+09:58:16 start mode=kexec n=1 elfs=[/root/slmos-1207-chk-oldalloc-17daedda.elf] skip_current_boot_id=none pid=2110414
+09:59:46 trigger 1/1 elf=/root/slmos-1207-chk-oldalloc-17daedda.elf boot_id=77ae65e0-6f59-4b58-b33d-11afcd3d528f state+uptime=[running 23.68 ] reply=[2fae83679500c703 ]
+09:59:46 end triggers=1

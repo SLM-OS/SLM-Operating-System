@@ -54,3 +54,10 @@ Added after the B0 report (interim work, no lab)
                       no build of this builder running (B-ab-litmus.sh.txt, B-ab-litmus.out.txt has the load before each pair)
   B-ci-f55c5293-step01..11-*.txt   the /ci skill's steps at f55c5293 (B-ci.sh.txt, B-ci.out.txt), QEMU steps under the lock
   B-qemu-fix-f55c5293-{coalesce-x50,checker-exhaust-x50,newtests-x50,pmmcheck-on-fullsuite,x86_64-fullsuite}.txt   the filter rows again at f55c5293 (check-braces at this head is /ci step 8)
+
+Phase B1, jetson-nano-2, kexec (one boot per boot_test call, pattern "Task 'main' \(id=\d+\) exiting", host-side trigger
+B-trig1.sh.txt / B-trigger.sh.txt, saved by B-b1step.sh.txt / B-sstep.sh.txt through B-save.sh.txt)
+  B-kexec-chk-oldalloc-17daedda-boot01,02.txt   old allocator + PMM_CHECK=ON (diag/1207-check-oldalloc 17daedda), integration suite
+  B-kexec-suite-f55c5293-boot01..10.txt         fix head f55c5293, PMM_CHECK off, integration suite: the required row
+  B-trigger-kexec-chk-oldalloc.log.txt, B-trigger-kexec-suite-fix.log.txt   trigger logs (boot_id, ELF sha256 prefix per boot)
+  B-jetson-asfound-b1.txt, B-jetson-post-state-b1.txt                     /root as found and as left

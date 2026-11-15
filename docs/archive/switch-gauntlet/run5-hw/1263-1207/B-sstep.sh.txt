@@ -1,0 +1,7 @@
+#!/bin/bash
+# sstep.sh <boot no> [last]: b1step.sh for the fix-head suite row, short output.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/564b3ef4-5b80-47c5-8d15-6720773a806c/scratchpad
+no=$1; elf=/root/slmos-1207-suite-f55c5293.elf; [ "$2" = last ] && elf=-
+$S/b/b1step.sh b1207-suite-fix-$(printf %02d $no) B-kexec-suite-f55c5293 $no kexec-suite-fix $elf "$(cat $S/b/title-suite.txt)" | cut -c1-330
+f=/var/lib/labctl/output/b1207-suite-fix-$(printf %02d $no)/run_01.txt
+grep -a -n "KERNEL PANIC" -A6 $f | grep -a "PMM\|panic\|Task Name\|EC:" | cut -c1-140 | head -4
