@@ -1,0 +1,183 @@
+== closeout/pi5-bench-base-dc51107c-B1-boot01.txt | build 20261114181830 (dc51107c) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== closeout/pi5-bench-base-dc51107c-B2-boot01.txt | build 20261114181830 (dc51107c) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== closeout/pi5-bench-base-dc51107c-B3-boot01.txt | build 20261114181830 (dc51107c) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== closeout/pi5-bench-head-6a4cfa93-H1-boot01.txt | build 20261114182501 (6a4cfa93) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== closeout/pi5-bench-head-6a4cfa93-H2-boot01.txt | build 20261114182501 (6a4cfa93) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== closeout/pi5-bench-head-6a4cfa93-H3-boot01.txt | build 20261114182501 (6a4cfa93) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== closeout/pi5-suite-6a4cfa93-boot01.txt | build 20261114182612 (6a4cfa93) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:971 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:710 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:614 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:570 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:538 - re
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1690 - c
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1551
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1484
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1453
+== closeout/pi5-suite-6a4cfa93-boot02.txt | build 20261114182612 (6a4cfa93) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:971 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:710 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:614 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:570 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:538 - re
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1690 - c
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1551
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1484
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1453
+== closeout/pi5-suite-6a4cfa93-boot03.txt | build 20261114182612 (6a4cfa93) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:971 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:710 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:614 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:570 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:538 - re
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1690 - c
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1551
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1484
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1453
+== closeout/pi5-suite-6a4cfa93-boot04.txt | build 20261114182612 (6a4cfa93) | activated lines: 21 | eviction cacheus_config x1; eviction xgboost x8; sched config x2; sched rebalance x5; sched thresholds x5; 
+   test results: 24 pass, 0 fail
+         2   blob_autoload.conf/
+         1 [WARN] blob_autoload: identity mismatch eviction xgboost path=/mnt/files/autoload/eviction-xgboost.blob expected=90/H actual=32/H
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c
+         1   blob_autoload.conf  (157 bytes)
+== closeout/pi5-suite-6a4cfa93-boot05.txt | build 20261114182612 (6a4cfa93) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:971 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:710 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:614 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:570 - st
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:538 - re
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1690 - c
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1551
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1484
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Gauntlet-5-Wrap-Up/kernel/tests/test_blob_autoload.c:1453
+== closeout/pi5-restore-check-b42b2c1d.txt | build 20261022005058 (b42b2c1d) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1262-1244/pi5-prod-661204e6-boot01.txt | build 20261114234703 (661204e6) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1262-1244/pi5-prod-661204e6-boot02.txt | build 20261114234703 (661204e6) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1262-1244/pi5-restore-check-b42b2c1d.txt | build 20261022005058 (b42b2c1d) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-bench-P-c0612fa7-P1-boot.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-bench-P-c0612fa7-P2-boot.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-bench-P-c0612fa7-P3-boot.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-bench-U-ae1399ba-U1-boot.txt | build 20261115055106 (ae1399ba) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-bench-U-ae1399ba-U2-boot.txt | build 20261115055106 (ae1399ba) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-bench-U-ae1399ba-U3-boot.txt | build 20261115055106 (ae1399ba) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot01.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot02.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot03.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot04.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot05.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot06.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot07.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot08.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot09.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-prod-c0612fa7-boot10.txt | build 20261115055230 (c0612fa7) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-restore-check-boot01.txt | build 20261022005058 (b42b2c1d) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/A-pi5-suite-c0612fa7-boot01.txt | build 20261115055356 (c0612fa7) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:971 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:710 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:614 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:570 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:538 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1690
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1551
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1484
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1453
+== 1263-1207/A-pi5-suite-c0612fa7-boot02.txt | build 20261115055356 (c0612fa7) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:971 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:710 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:614 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:570 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:538 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1690
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1551
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1484
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1453
+== 1263-1207/A-pi5-suite-c0612fa7-boot03.txt | build 20261115055356 (c0612fa7) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:971 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:710 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:614 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:570 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:538 
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1690
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1551
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1484
+         1     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a/kernel/tests/test_blob_autoload.c:1453
+== 1263-1207/B-pi5-restore-check-boot01.txt | build 20261022005058 (b42b2c1d) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/B-pi5-restore-check-boot02.txt | build 20261022005058 (b42b2c1d) | activated lines: 3 | eviction cacheus_config x1; eviction mlp x1; eviction xgboost x1; 
+   test results: 0 pass, 0 fail
+== 1263-1207/B-pi5-suite-647c2c33-boot01.txt | build 20261115115153 (647c2c33) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+        14     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base/kernel/tests/test_blob_autoload.c
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1   blob_autoload.conf  (157 bytes)
+== 1263-1207/B-pi5-suite-647c2c33-boot02.txt | build 20261115115153 (647c2c33) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+        14     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base/kernel/tests/test_blob_autoload.c
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1   blob_autoload.conf  (157 bytes)
+== 1263-1207/B-pi5-suite-647c2c33-boot03.txt | build 20261115115153 (647c2c33) | activated lines: 24 | eviction cacheus_config x4; eviction mlp x4; eviction xgboost x7; sched config x1; sched rebalance x4; sched thresholds x4; 
+   test results: 11 pass, 13 fail
+        14     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base/kernel/tests/test_blob_autoload.c
+         2   blob_autoload.conf/
+         1 [TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-base/kernel/tests/test_blob_autoload.c
+         1 Set eviction autoload xgboost -> 0:/slmstore/autoload/eviction-xgboost.blob
+         1   blob_autoload.conf  (157 bytes)

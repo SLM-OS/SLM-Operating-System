@@ -1,0 +1,67 @@
+pi-5-1 SD card, 0:/slmstore/ after this session's Pi 5 suite boots (builder A's three and builder B's three).
+Recorded by builder B, 2026-11-15 about 22:24 to 22:27 UTC, board powered off, labctl only. The card was not modified.
+INCOMPLETE: the labctl MCP connection of this agent closed during the read of files.lfs ("Connection closed" on that
+call and the next one), so two files were not fetched. See "Not fetched".
+
+Listing (sdwire_ls partition 1 path /slmstore recursive), with sha256 of the bytes fetched by sdwire_cat (base64 or hex,
+decoded on the host; sizes of the decoded files equal the listed sizes):
+  path                                             size     mtime                 sha256
+  /slmstore/files.lfs.tmp                          0        2026-04-27T09:25:48Z  (empty)
+  /slmstore/files.lfs                              8388608  2026-04-25T00:00:00Z  NOT FETCHED
+  /slmstore/files.lfs.delta.tmp                    0        2026-04-25T00:00:00Z  (empty)
+  /slmstore/files.lfs.delta                        6209568  2026-04-25T00:00:00Z  be716569a7e3b85c44f644ab884803e7168ff288e1bfbac5077c648787bbaab5
+  /slmstore/autoload/                              dir      2026-04-27T09:25:48Z
+  /slmstore/blob_autoload.conf                     382      2026-04-25T00:00:00Z  d37ecf936800ad7759ead7ba13ce8ce676efb7f7638896a4f4844d886dfa7f9c
+  /slmstore/autoload/eviction-xgboost.blob         90       2026-04-25T00:00:00Z  2cd29947398ce0525c178dc9b8ed359fd2751a97b4f9677c62eff8bbe7dc44e3
+  /slmstore/autoload/eviction-mlp.blob             17700    2026-04-25T00:00:00Z  NOT FETCHED
+  /slmstore/autoload/eviction-cacheus_config.blob  48       2026-04-25T00:00:00Z  74670f63771e45d2d223ab33eac536ec94acc472268432b9cc591d3b04354a91
+Byte-exact copies of the three small fetched files are in B-pi5-slmstore-files/ (same relative paths). files.lfs.delta is
+kept on the host only ($S/b/slmstore-now/files.lfs.delta in the session scratch directory; sha256 above).
+
+blob_autoload.conf (text):
+  # Runtime blob autoload config
+  # Format: <domain> <kind> <absolute-path> <size-bytes> <checksum-hex>
+  # Entries listed here are staged and activated at boot.
+  eviction xgboost 0:/slmstore/autoload/eviction-xgboost.blob 90 72f6b10e
+  eviction mlp 0:/slmstore/autoload/eviction-mlp.blob 17700 d678b5d0
+  eviction cacheus_config 0:/slmstore/autoload/eviction-cacheus_config.blob 48 e570580f
+It names three blobs, the three files in autoload/, with the sizes the listing shows. No sched entry.
+
+Not fetched: files.lfs (8388608 bytes) and autoload/eviction-mlp.blob (17700 bytes). sdwire_cat with encoding=base64 is
+byte-exact and a large result is saved by the harness to a file (that is how files.lfs.delta, 6.2 MB, was taken); the
+call for files.lfs (max_bytes 9000000) returned "Connection closed", and so did the next call. After that the labctl
+tools were gone from this agent's session. A read-only look at the host showed no leftover mount.
+
+What the mtimes mean: SLM-OS builds FatFs with no clock. kernel/lib/fatfs/ffconf.h:111-114 sets FF_FS_NORTC 1 and
+FF_NORTC_YEAR/MON/MDAY 2026/4/25, and kernel/lib/fatfs/ff.c:274 builds every timestamp from those (get_fattime in
+kernel/lib/fatfs/diskio.c:203 is never called in that mode, :197-198). Every file SLM-OS creates or rewrites is therefore
+stamped 2026-04-25T00:00:00Z, at any boot. The mtimes cannot show whether a file was written today. Files stamped
+2026-04-27T09:25:48Z were written by something with a clock (the host, when the card was prepared).
+
+Blob lines in the captures (B-pi5-blob-lines-per-capture.txt, made by B-blobscan.sh.txt from the 40 Pi 5 boot captures on
+this branch: earlier sessions' closeout/ and 1262-1244/, and this session's A-* and B-* files; header lines excluded):
+ - Every production, bench and restore-check boot, 29 captures in all (closeout bench B1-B3 and H1-H3 and restore check;
+   1262-1244 prod boot01-02 and restore check; this session A-pi5-prod boot01-10, A-pi5-bench P1-P3 and U1-U3, A's
+   restore check, B's two restore checks) has exactly three "blob_autoload: activated" lines: eviction xgboost, eviction mlp,
+   eviction cacheus_config, each "from 0:/slmstore/autoload/eviction-*.blob". The set did not change from the earlier
+   sessions through this session, before or after either builder's suite boots.
+ - The 11 suite boots (closeout/pi5-suite-6a4cfa93-boot01..05, A-pi5-suite-c0612fa7-boot01..03, B-pi5-suite-647c2c33-boot01..03)
+   have 24 activated lines each (21 in closeout boot04), all inside the blob_autoload tests, none before the first test:
+   eviction xgboost x7, mlp x4, cacheus_config x4, sched config x1, sched thresholds x4, sched rebalance x4, from
+   "0:/slmstore/autoload/..." except one "/mnt/files/autoload/eviction-xgboost.blob". The blob lines of A's three suite boots
+   are identical to each other, and so are B's three (compared with timings removed).
+ - The three sched blobs: suite boots print "activated sched config|thresholds|rebalance from 0:/slmstore/autoload/sched-*.blob".
+   No production boot ever activates a sched blob, the card's conf has no sched entry, and autoload/ on the card holds no
+   sched-*.blob now. The blob_autoload tests create their own FAT volume on a RAM disk for "0:"
+   (kernel/tests/test_blob_autoload.c:333-367, make_boot_media_fat_volume / ramdisk_create "autoload_fat") and write the
+   files they then activate (write_boot_media_fat_file, :427-445). So the "0:/slmstore/autoload/sched-*.blob" paths in suite
+   captures are written by the tests; whether, on Pi 5, "0:" in those tests is the RAM disk or the real card is NOT
+   established by any capture (no line names the device), and I did not trace the mount override in the code.
+   closeout boot04 activates sched blobs "from /mnt/files/autoload/sched-*.blob", i.e. from the LittleFS volume, inside the
+   tests as well.
+ - Lines that show a write: the suite captures have "Wrote N bytes to /mnt/files/..." and "XPUT ok ... path=/mnt/files/..."
+   lines from the shell and transfer tests (LittleFS paths). No capture has a line that says a file under 0:/slmstore was
+   stored, committed, renamed or deleted; the blob code does such operations without printing (kernel/src/blob_autoload.c:593-679).
+   Whether /mnt/files in a Pi 5 test kernel is backed by the card's files.lfs / files.lfs.delta was not traced.
+So the captures neither show nor exclude a write to the card's slmstore by the suite boots. What they do show is that the
+card's autoload state as seen by every later production boot is unchanged: three eviction blobs.

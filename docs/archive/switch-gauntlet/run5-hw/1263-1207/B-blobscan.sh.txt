@@ -1,0 +1,18 @@
+#!/bin/bash
+# blobscan.sh: per Pi 5 capture on gauntlet-5-hw-pi5, the lines that name 0:/slmstore or blob_autoload.
+# Header lines of the saved files (starting with '#') are excluded.
+R=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/b-evp/docs/archive/switch-gauntlet/run5-hw
+cd $R || exit 1
+files="closeout/pi5-bench-base-dc51107c-B1-boot01.txt closeout/pi5-bench-base-dc51107c-B2-boot01.txt closeout/pi5-bench-base-dc51107c-B3-boot01.txt closeout/pi5-bench-head-6a4cfa93-H1-boot01.txt closeout/pi5-bench-head-6a4cfa93-H2-boot01.txt closeout/pi5-bench-head-6a4cfa93-H3-boot01.txt closeout/pi5-suite-6a4cfa93-boot01.txt closeout/pi5-suite-6a4cfa93-boot02.txt closeout/pi5-suite-6a4cfa93-boot03.txt closeout/pi5-suite-6a4cfa93-boot04.txt closeout/pi5-suite-6a4cfa93-boot05.txt closeout/pi5-restore-check-b42b2c1d.txt 1262-1244/pi5-prod-661204e6-boot01.txt 1262-1244/pi5-prod-661204e6-boot02.txt 1262-1244/pi5-restore-check-b42b2c1d.txt"
+for f in $(ls 1263-1207/A-pi5-prod-*.txt 1263-1207/A-pi5-bench-*.txt 1263-1207/A-pi5-suite-c0612fa7-boot0*.txt 1263-1207/A-pi5-restore-check-boot01.txt 1263-1207/B-pi5-suite-647c2c33-boot0*.txt 1263-1207/B-pi5-restore-check-boot0*.txt); do files="$files $f"; done
+for f in $files; do
+  [ -f "$f" ] || { echo "== $f: MISSING"; continue; }
+  body() { grep -a -v '^#' "$f" | tr -d '\r'; }
+  banner=$(body | grep -a -m1 -o 'build [0-9]* ([0-9a-f-]*)')
+  act=$(body | grep -a 'blob_autoload: activated' | sed 's/.*activated //; s/ from .*//' | sort | uniq -c | awk '{printf "%s %s x%s; ", $2, $3, $1}')
+  nact=$(body | grep -a -c 'blob_autoload: activated')
+  other=$(body | grep -a -i 'blob_autoload\|slmstore' | grep -a -v 'blob_autoload: activated\|\[PASS\] test_blob_autoload\|\[FAIL\] test_blob_autoload' | sed 's/[0-9a-f]\{8,\}/H/g' | cut -c1-150 | sort | uniq -c | sort -rn | head -12)
+  echo "== $f | $banner | activated lines: $nact | $act"
+  echo "   test results: $(body | grep -a -c '\[PASS\] test_blob_autoload') pass, $(body | grep -a -c '\[FAIL\] test_blob_autoload') fail"
+  [ -n "$other" ] && echo "$other" | sed 's/^/   /'
+done
