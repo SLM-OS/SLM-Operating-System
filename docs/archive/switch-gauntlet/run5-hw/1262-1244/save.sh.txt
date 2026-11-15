@@ -1,0 +1,26 @@
+#!/bin/bash
+# save.sh <labctl run file> <dest evidence file> <title...>
+# Copies one labctl boot_test run file (this session's own output) verbatim
+# under a header, and checks both ends: the first lines must be the power-on
+# banner (MB1 for Jetson, or the given START regex), the SLM-OS banner must be
+# present, and the end is reported as found. Prints a one-line verdict.
+src=$1; dst=$2; shift 2; title="$*"
+START=${START:-'MB1 \(version|Boot-mode|RPi: BOOTSYS|NOTICE:  BL31'}
+[ -s "$src" ] || { echo "MISSING $src"; exit 1; }
+banner=$(grep -a -m1 -oE 'SLM-OS v[0-9.]+ build [0-9]{14} \([0-9a-f]+(-dirty)?\)' "$src")
+first=$(head -c 2000 "$src" | grep -a -m1 -E "$START")
+last=$(tail -n 1 "$src" | tr -d '\r' | cut -c1-120)
+lines=$(wc -l < "$src")
+{
+  echo "# $title"
+  echo "# source: $src (labctl output of this session, copied verbatim below the header)"
+  echo "# banner: ${banner:-NOT FOUND}"
+  echo "# power-on line (within first 2000 bytes): ${first:-NOT FOUND}"
+  echo "# last line: $last"
+  echo "# lines: $lines"
+  grep -a -E '^\[FILTER\]|\[FAIL\] test_|NOT-FINISHED|swo-diag: |total failure|All test suites passed|System halted|KERNEL PANIC|PAGE FAULT|PMM: |Boot source' "$src" | tr -d '\r' | cut -c1-220 | sed 's/^/# summary: /' | head -60
+  echo "# ---- serial ----"
+  cat "$src"
+} > "$dst"
+ok=OK; [ -z "$banner" ] && ok=NO-BANNER; [ -z "$first" ] && ok="$ok/NO-POWER-ON-LINE"
+echo "$(basename "$dst") | $ok | ${banner:-none} | lines=$lines | last=[$last]"
