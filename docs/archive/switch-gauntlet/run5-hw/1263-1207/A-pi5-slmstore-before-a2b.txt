@@ -1,0 +1,18 @@
+# pi-5-1 /slmstore before Phase A2b (board powered off, before any A2b boot)
+# source: labctl sdwire_ls (partition 1, /slmstore, recursive) and sdwire_cat (base64) results of this session, from the agent transcript
+# listing taken 2026-11-15T23:46:59.042Z; written 2026-11-15T23:47:38Z
+# files.lfs and files.lfs.delta are listed only (not read: an 8 MB sdwire_cat disconnected labctl earlier in the session)
+LIST truncated=False
+ENTRY /slmstore/autoload type=dir size=16384 mtime=2026-04-27T09:25:48Z
+ENTRY /slmstore/autoload/eviction-cacheus_config.blob type=file size=48 mtime=2026-04-25T00:00:00Z
+ENTRY /slmstore/autoload/eviction-mlp.blob type=file size=17700 mtime=2026-04-25T00:00:00Z
+ENTRY /slmstore/autoload/eviction-xgboost.blob type=file size=90 mtime=2026-04-25T00:00:00Z
+ENTRY /slmstore/blob_autoload.conf type=file size=382 mtime=2026-04-25T00:00:00Z
+ENTRY /slmstore/files.lfs type=file size=8388608 mtime=2026-04-25T00:00:00Z
+ENTRY /slmstore/files.lfs.delta type=file size=6209568 mtime=2026-04-25T00:00:00Z
+ENTRY /slmstore/files.lfs.delta.tmp type=file size=0 mtime=2026-04-25T00:00:00Z
+ENTRY /slmstore/files.lfs.tmp type=file size=0 mtime=2026-04-27T09:25:48Z
+HASH /slmstore/autoload/eviction-cacheus_config.blob size=48 decoded=48 sha256=74670f63771e45d2d223ab33eac536ec94acc472268432b9cc591d3b04354a91 (read ?)
+HASH /slmstore/autoload/eviction-mlp.blob size=17700 decoded=17700 sha256=4f5c1b026027831a453b4758aaa04ab5e5ef6fc0061da7dac4e8d5516d30bc02 (read ?)
+HASH /slmstore/autoload/eviction-xgboost.blob size=90 decoded=90 sha256=2cd29947398ce0525c178dc9b8ed359fd2751a97b4f9677c62eff8bbe7dc44e3 (read ?)
+HASH /slmstore/blob_autoload.conf size=382 decoded=382 sha256=d37ecf936800ad7759ead7ba13ce8ce676efb7f7638896a4f4844d886dfa7f9c (read ?)

@@ -1,0 +1,57 @@
+A-pi5-pdmdiag-P-6247f73a-x200-boot01.txt | build 20261115135130 (6247f73a) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=49719 avg=58362 max=69983
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 6 x moved=5; 65 x moved=6; 113 x moved=7; 16 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 176; 6-10: 24; 
+   steals: total 364 over 200 iterations, iterations with steals=0: 31
+   wake-ups per CPU, worker a: cpu0=0 cpu1=399 cpu2=355 cpu3=179 cpu4=0 cpu5=0  | worker b: cpu0=0 cpu1=308 cpu2=377 cpu3=250 cpu4=0 cpu5=0 
+A-pi5-pdmdiag-P-6247f73a-x200-boot02.txt | build 20261115135130 (6247f73a) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 180 | [ITER] FAIL 20 | [FILTER] [FAIL] test_preempt_flag_follows_migrated_task: runs=200 passed=180 failed=20 ignored=0 us min=49200 avg=332079 max=1029758
+   moved=0: 20 | moved<5: 31 | bad!=0: 0 | halts: 0
+   moved distribution: 20 x moved=0; 1 x moved=1; 5 x moved=2; 1 x moved=3; 4 x moved=4; 71 x moved=5; 80 x moved=6; 17 x moved=7; 1 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 12; 6-10: 107; 11-25: 10; 26-50: 14; 51-99: 25; 100+: 32; 
+   steals: total 8145 over 200 iterations, iterations with steals=0: 0
+   wake-ups per CPU, worker a: cpu0=0 cpu1=6065 cpu2=92 cpu3=245 cpu4=0 cpu5=0  | worker b: cpu0=0 cpu1=6106 cpu2=52 cpu3=237 cpu4=0 cpu5=0 
+A-pi5-pdmdiag-P-6247f73a-x200-boot03.txt | build 20261115135130 (6247f73a) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=49719 avg=57163 max=89894
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 8 x moved=5; 65 x moved=6; 100 x moved=7; 27 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 171; 6-10: 29; 
+   steals: total 300 over 200 iterations, iterations with steals=0: 45
+   wake-ups per CPU, worker a: cpu0=0 cpu1=353 cpu2=273 cpu3=291 cpu4=0 cpu5=0  | worker b: cpu0=0 cpu1=254 cpu2=345 cpu3=318 cpu4=0 cpu5=0 
+A-pi5-pdmdiag-U-6439476f-x200-boot01.txt | build 20261115135128 (6439476f) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=39759 avg=63401 max=110193
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 30 x moved=5; 82 x moved=6; 81 x moved=7; 7 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 119; 6-10: 81; 
+   steals: total 716 over 200 iterations, iterations with steals=0: 3
+   wake-ups per CPU, worker a: cpu0=0 cpu1=555 cpu2=201 cpu3=286 cpu4=0 cpu5=0  | worker b: cpu0=0 cpu1=598 cpu2=214 cpu3=221 cpu4=0 cpu5=0 
+A-pi5-pdmdiag-U-6439476f-x200-boot02.txt | build 20261115135128 (6439476f) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=49726 avg=63452 max=99923
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 31 x moved=5; 94 x moved=6; 67 x moved=7; 8 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 122; 6-10: 78; 
+   steals: total 743 over 200 iterations, iterations with steals=0: 2
+   wake-ups per CPU, worker a: cpu0=0 cpu1=565 cpu2=187 cpu3=280 cpu4=0 cpu5=0  | worker b: cpu0=0 cpu1=597 cpu2=225 cpu3=217 cpu4=0 cpu5=0 
+A-pi5-pdmdiag-U-6439476f-x200-boot03.txt | build 20261115135128 (6439476f) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=49687 avg=62503 max=89938
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 31 x moved=5; 71 x moved=6; 92 x moved=7; 6 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 123; 6-10: 77; 
+   steals: total 658 over 200 iterations, iterations with steals=0: 3
+   wake-ups per CPU, worker a: cpu0=0 cpu1=504 cpu2=211 cpu3=293 cpu4=0 cpu5=0  | worker b: cpu0=0 cpu1=575 cpu2=227 cpu3=216 cpu4=0 cpu5=0 
+A-pi5-pdmnew-d09b063b-x200-boot01.txt | build 20261115141827 (d09b063b) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=39800 avg=48726 max=59973
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 3 x moved=5; 83 x moved=6; 108 x moved=7; 6 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 200; 
+A-pi5-pdmnew-d09b063b-x200-boot02.txt | build 20261115141827 (d09b063b) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=39889 avg=61228 max=69893
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 69 x moved=5; 88 x moved=6; 42 x moved=7; 1 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 79; 6-10: 121; 
+A-pi5-pdmnew-d09b063b-x200-boot03.txt | build 20261115141827 (d09b063b) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=39803 avg=48628 max=59892
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 3 x moved=5; 91 x moved=6; 99 x moved=7; 7 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 200; 

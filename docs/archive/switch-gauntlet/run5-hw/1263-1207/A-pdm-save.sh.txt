@@ -1,0 +1,19 @@
+#!/bin/bash
+# pdm-save.sh <pi5|jetson> <U|P> <n> <slot> [trigger log] : save one x200 diag boot of
+# test_preempt_flag_follows_migrated_task and print its pdmsum.
+S=$(dirname "$0")
+board=$1; side=$2; n=$3; slot=$4; trig=${5:--}
+if [ $side = U ]; then head=6439476f; word="UNPADDED diag/1263-pdm-U 6439476f (ae1399ba + test-only print)"; else head=6247f73a; word="PADDED diag/1263-pdm-P 6247f73a (c0612fa7 + the same test-only print)"; fi
+if [ $board = pi5 ]; then
+  E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a-evp/docs/archive/switch-gauntlet/run5-hw/1263-1207
+  dir=a1263-pi5-pdmdiag-$side$n; pre=A-pi5-pdmdiag-$side-$head-x200
+  where="pi-5-1 (kernel_2712.img = kernel_2712-1263-pdmdiag-$side.img, deployed by this boot_test call)"
+else
+  E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a-evj/docs/archive/switch-gauntlet/run5-hw/1263-1207
+  dir=a1263-uefi-pdmdiag-$side$n; pre=A-uefi-pdmdiag-$side-$head-x200
+  where="jetson-nano-2 UEFI-direct (capture from power-on: SD Linux, the trigger stages jet-pdmdiag-$side.bin on the NVMe ESP, arms BootNext 000E and reboots)"
+fi
+bash $S/savemany.sh $board $dir $pre $n 1 $trig "$where, diag test kernel $word, TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200, alternation slot $slot of 6 (U,P,U,P,U,P)" | cut -c1-200
+F=$E/$pre-boot0$n.txt
+bash $S/pdmsum.sh $F
+echo "   blob/slmstore lines in the capture: $(grep -a -v '^#' $F | grep -a -c -E 'blob_autoload|0:/slmstore|test_blob')"
