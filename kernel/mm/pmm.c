@@ -640,11 +640,11 @@ unsigned pmm_check_walk(const char *where)
  * a listed order-4 block read all zero across its start (both links, its
  * first 64 bytes and the 64 bytes before it) while block_state[] still
  * marked it as a listed head, so no list operation had taken it. What
- * makes the bytes read zero is not known: a write by something other than
- * this file, or a header write of this file that was lost from the cache
- * (DC IVAC discards dirty lines). This code exists to catch such a block
- * with its contents. It keeps no table: about 200 bytes of data (the
- * per-order "last reported" addresses, a counter and a label pointer).
+ * makes the bytes read zero is not known. One candidate: a device writing
+ * DRAM under a line this CPU holds. A header write lost to DC IVAC is
+ * ruled out on A76 / A78AE if mmu.S's note holds (run as DC CIVAC). This
+ * code exists to catch such a block with its contents. No table: about
+ * 200 bytes (per-order "last reported" addresses, a counter, a label).
  *
  * pmm_verify_free_lists(where) walks every list: each element inside the
  * heap, aligned for its order, marked as the head of a listed block of

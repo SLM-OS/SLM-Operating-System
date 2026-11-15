@@ -825,8 +825,10 @@ kernels call it at each suite boundary and once a second from CPU 0's
 tick. **#1207 is still open on Jetson kexec:** 1 to 2 suite boots in 10
 end with a count without a list. In the one boot captured, a listed
 order-4 block read all zero across its start (both links, 64 bytes each
-side of the block boundary) after `test_suite_gpu`; whether something
-wrote those bytes or a header write was lost from the cache is not known.
+side of the block boundary) after `test_suite_gpu`. When DRAM changed is
+not known (a non-snooping device can write under a line the CPU holds).
+A header write lost to DC IVAC is excluded on these cores if the note in
+`kernel/arch/arm64/mmu.S` holds: A76 and A78AE execute it as DC CIVAC.
 
 **Statistics API:**
 ```c

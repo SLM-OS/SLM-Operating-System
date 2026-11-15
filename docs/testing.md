@@ -377,7 +377,7 @@ It runs at the end of `pmm_init`; in a test kernel also before the first
 suite, after every suite, and once a second from CPU 0's timer tick on
 ARM64 (`timer_handler`, try-lock only, silent unless it finds something).
 `free_list_pop` makes the same report when it takes a head whose `next`
-is NULL while more blocks are counted, or is not a block address, before
+is NULL while more blocks are counted, or is not a listed block of that order, before
 it clears the block's header, and then panics (the blocks left behind
 would still point at a block that is about to be handed out). The "count
 without a list" panic prints every order's count against its walked

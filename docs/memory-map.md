@@ -346,8 +346,8 @@ a block on a free list carries `BLOCK_FREE_HEAD | order`, written only by
   panics with `PMM: order N free list is empty but its count is M` instead
   of splitting from the sentinel, `free_list_remove` panics on a zero
   count, and `free_list_pop` panics, after printing the block, when the
-  head's next link is NULL with blocks still counted or is not a block
-  address.
+  head's next link is NULL with blocks still counted or is not a listed
+  block of this order.
 
 `pmm_verify_free_lists()` walks the lists in any build and prints a
 `[pmm-verify] FINDING` block with the damaged block's contents
@@ -362,8 +362,13 @@ captured with the verifier, a listed order-4 block read all zero across
 its start (both links, its first 64 bytes and the 64 bytes before it)
 after `test_suite_gpu`, having read intact after the suite before, and
 `block_state[]` still marked it as a listed head. When the bytes changed
-in DRAM, and whether anything wrote them at all (a header write lost from
-the cache would look the same), is not known.
+in DRAM is not known: a device that does not snoop the CPU caches can
+write DRAM under a line the CPU holds, and the CPU sees it only when the
+line leaves the cache. A header write lost to a cache discard would look
+the same and is architecturally possible, but the tree records that
+Cortex-A76 and A78AE execute DC IVAC as DC CIVAC and DC ISW as a local
+clean and invalidate (`kernel/arch/arm64/mmu.S`, `smp_boot.S`,
+`kernel/sched/smp.c`), which excludes it on these boards if that holds.
 
 ### Interface
 
