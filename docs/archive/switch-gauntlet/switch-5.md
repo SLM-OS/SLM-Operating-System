@@ -2083,3 +2083,134 @@ d09b063b ran to step 12 by 14:40 UTC in its scratch directory (not yet
 read). 6.5 hours lost. The 20-minute check-in was cancelled (its prompts
 had queued up during the stop). Builder B was resumed at 20:57 UTC to
 finish boots 06 to 10 and the Pi 5 suite.
+
+## Entry 48 (written 22:02 UTC, from date): builder B phases B1b and B2 (#1207: the damaged block caught and bracketed to `test_suite_gpu`; Pi 5 suite); the user's `slmstore` rule missed; labctl lost
+
+Sources: builder B's combined B1b and B2 report and its two follow-up
+reports, as received; not yet checked by a critic. Branch
+`fix/pmm-coalesce` 647c2c33 (unchanged). Evidence `gauntlet-5-hw-jetson`
+99bfde86 and `gauntlet-5-hw-pi5` 848b52b9, `run5-hw/1263-1207/`.
+
+### B1b: jetson-nano-2, kexec suite, 647c2c33 (verifier build, `PMM_CHECK` off)
+
+`B-kexec-suite-647c2c33-boot01..10.txt`, `B-trigger-kexec-suite-ver.log.txt`
+(10 triggers, ELF 78d13867). Boots 01 to 05 ran before the usage-limit
+stop and were already saved; 06 to 10 ran from 21:05 UTC.
+
+| Outcome | Boots | Count |
+|---|---|---|
+| **PMM halt** (`order 4 free list is empty but its count is 61`) | 04 | **1** |
+| Complete, `[FAIL] 12 total failure(s)` | 03, 05, 07, 08, 09 | 5 |
+| Lost after the PMM suite to the #1238 family | 01, 02, 06, 10 | 4 |
+
+Both coalescing tests pass in 10 of 10. Verifier findings other than the
+self-test: none in 9 boots, two in boot 04.
+
+**Boot 04** (`B-finding-boot04.txt`; line numbers of
+`B-kexec-suite-647c2c33-boot04.txt`). Observations:
+
+- No finding at the end of `pmm_init`, before the first suite, or after
+  any suite up to `test_suite_oplib_gpu_as`.
+- Line 2709 `[TEST] GPU Tests`; line 2755 `[gpu-kind=0] channel bring-up:
+  inherit 2072 us ...`, followed by the suite's last four tests (the
+  `slm_gpu_run_mnist` / `set_mnist_input` tests, which on kexec run on the
+  inherited MNIST channel).
+- Line 2768: `[pmm-verify] FINDING 1 at 168048 ms (after test_suite_gpu;
+  last suite boundary: after test_suite_oplib_gpu_as)`, order 4, count 64,
+  walked 2. The block at 0x139580000 (page state: listed order-4 head) has
+  its first 64 bytes all zero, and the 64 bytes before it (0x13957ffc0)
+  are all zero.
+- Line 5596: FINDING 2 at 178019 ms from `free_list_pop` in
+  `test_exhaustion_recovery`, the same block; line 5652 the panic.
+- 0x139580000 is in none of the reserved ranges the capture prints (it is
+  0x120000 above the MNIST pushbuf at 0x139460000, 65536 bytes). The
+  channel-VM pages (84 + 65 ranges) are not printed one by one.
+- `xhci_init` printed at line 1816, with many clean walks after it.
+
+So the block was intact after `test_suite_oplib_gpu_as` and damaged by the
+end of `test_suite_gpu`: the write happened during `test_suite_gpu`. That
+rules out the xHCI hand-over window for this occurrence and is the first
+bracket #1207 has had. **Inference, not shown:** the writer is the MNIST
+GPU path on the inherited channel (the GPU writing through its page tables
+into a page the hand-off reservation does not cover, or SLM-OS code on
+that path clearing a buffer whose address or length comes from the
+hand-off page). One occurrence; the three earlier halts of this session
+have no bytes.
+
+**Halt counts this session, Jetson kexec suite:** 0 of 2 (old allocator,
+`PMM_CHECK` on), 2 of 10 (f55c5293), 1 of 10 (647c2c33). The change does
+not fix #1207; 1 in 10 against 2 in 10 is no evidence of a change.
+
+### B2: pi-5-1 suite, 647c2c33
+
+`B-pi5-suite-647c2c33-boot01..03.txt` (`gauntlet-5-hw-pi5`): 3 of 3
+complete, `[FAIL] 18 total failure(s)` each, the 18 names of Entry 39's
+`closeout/pi5-suite-6a4cfa93-boot01.txt`; PMM suite 59 / 58 / 0 / 1; both
+coalescing tests and the new tests pass; no finding other than the
+self-test. The Pi 5 firmware prints nothing on this UART, so each capture
+starts at the kernel banner. Card: original renamed aside in its own call,
+restored, `B-pi5-card-and-restore.txt`; restore-check boots
+`B-pi5-restore-check-boot01.txt` and `-boot02.txt`, banner b42b2c1d.
+
+### The user's `0:/slmstore/` rule was not met
+
+At about 21:25 UTC the user instructed: before any Pi 5 suite boot, record
+a listing and checksums of `0:/slmstore/` on the pi-5-1 card (the
+blob-autoload tests write to the real card, #1274), and restore it exactly
+afterwards. **Six Pi 5 suite boots ran this session without that record:**
+builder A's three (about 12:30 to 13:30 UTC, before the instruction) and
+builder B's three (after it: the orchestrator's message reached builder B
+only when its turn ended, after B2 had run; the orchestrator knew that
+messages are delivered at turn end and should have stopped the builder
+first). No before-record exists and nothing in `0:/slmstore/` was
+restored.
+
+What was recorded afterwards, through labctl with the board off, card not
+modified (`B-pi5-slmstore-after-suite.txt`, `B-pi5-slmstore-after-session-suites.txt`,
+`B-pi5-slmstore-files/`, `B-pi5-blob-lines-per-capture.txt`):
+
+| File | Size | sha256 |
+|---|---|---|
+| `files.lfs` | 8388608 | not fetched (the read closed the labctl connection) |
+| `files.lfs.delta` | 6209568 | be716569a7e3b85c44f644ab884803e7168ff288e1bfbac5077c648787bbaab5 |
+| `files.lfs.tmp`, `files.lfs.delta.tmp` | 0 | empty |
+| `blob_autoload.conf` | 382 | d37ecf936800ad7759ead7ba13ce8ce676efb7f7638896a4f4844d886dfa7f9c |
+| `autoload/eviction-xgboost.blob` | 90 | 2cd29947398ce0525c178dc9b8ed359fd2751a97b4f9677c62eff8bbe7dc44e3 |
+| `autoload/eviction-mlp.blob` | 17700 | not fetched |
+| `autoload/eviction-cacheus_config.blob` | 48 | 74670f63771e45d2d223ab33eac536ec94acc472268432b9cc591d3b04354a91 |
+
+- The mtimes (2026-04-25T00:00:00Z on seven entries) are a fixed stamp:
+  `kernel/lib/fatfs/ffconf.h:111-114` (`FF_FS_NORTC 1`, 2026/4/25). They
+  cannot show whether a file was written today.
+- The conf names three blobs (eviction xgboost, mlp, cacheus_config), the
+  three files in `autoload/`.
+- From 40 Pi 5 captures on the branch: all 29 production, bench and
+  restore-check boots, from the earlier sessions through this one, before
+  and after both builders' suite boots, have exactly three
+  `blob_autoload: activated` lines (eviction xgboost, mlp, cacheus_config).
+  The 11 suite boots have 24 such lines each (21 in close-out boot 04),
+  all inside the blob-autoload tests; builder A's three have identical
+  blob lines, and so do builder B's three. No capture has a line for a
+  store, rename or delete under `0:/slmstore` (the blob code does those
+  without printing, `kernel/src/blob_autoload.c:593-679`).
+- **Net: the captures neither show nor exclude a write to the card's
+  `slmstore` by this session's suite boots. They do show that what a
+  production boot loads from it is the same three blobs before and after.**
+
+### labctl lost
+
+Builder B's `sdwire_cat` of `/slmstore/files.lfs` (base64, 8.4 MB)
+returned `Connection closed`; since then the labctl MCP server is
+disconnected for the whole session (orchestrator included, checked 21:58
+UTC). The 6.2 MB file had been read the same way. State at 22:00 UTC,
+from SSH and a host listing only: jetson-nano-2 on SD Linux, BootCurrent
+0001, no BootNext, `/root/slmos.elf` 098f3163, 14 `*.elf*` files, nothing
+of the session in `/tmp`; pi-5-1 powered **off** (builder B powered it off
+for the read), original `kernel_2712.img` in place per the restore-check
+boots; a 29.1 GB SD card is visible to the host as `sdb`, not mounted,
+which may be the pi-5-1 card left on the host side of its SDWire by the
+interrupted read (not verified; nothing was done to it). The session's
+claims cannot be checked or released; a session hold whose server stopped
+expires 30 minutes later. Nothing on the lab can be done from this session
+until the server is reconnected: builder A's deciding experiment (A2b),
+powering pi-5-1 on, and the release are blocked.
