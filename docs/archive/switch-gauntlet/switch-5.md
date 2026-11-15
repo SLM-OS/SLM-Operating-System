@@ -1171,3 +1171,254 @@ user's choice of list. pi-5-1: released, powered on, original
 ## Entry 40 (written 22:42 UTC, from date): Jetson /root cleanup
 
 On the user's choice (48 `*.elf*` found, not 68): deleted the 34 ELFs dated 2026-11-08 to 11-11 (runs 3 and 4: `slmos-1193*` x10, `slmos-1194*` x3, `slmos-main85f5-test`, `slmos-r3-*` x8, `slmos-closeout-*` x3, `slmos-fixc-*` x4, `slmos-l4-*` x5). Kept `/root/slmos.elf` (098f3163) and the 13 older files. Both boards released and powered on.
+
+## Entry 41 (written 03:51 UTC, from date): follow-up session for #1262 and #1244
+
+Single-agent session (2026-11-14 22:55 UTC to 2026-11-15 03:51 UTC), the
+user's follow-up request after Entry 39: #1262 (R3 wake NOT-FINISHED at the
+#1234 fix head) and #1244 (kexec DTB inside the PMM heap). Boards one at a
+time. Evidence: `gauntlet-5-hw-jetson` 47993ea4 and `gauntlet-5-hw-pi5`
+5cff7385, `docs/archive/switch-gauntlet/run5-hw/1262-1244/`, one file per
+boot, each from power-on with the banner in the header, written from this
+session's own labctl output. Every Jetson boot used the host-side trigger
+loop (`trigger.sh.txt`), 1 to 3 boots per `boot_test` call.
+
+The user recorded up front that the context-switch cost at the fix head
+(+9 ns; +10.6% Jetson, +8.3% Pi 5) is accepted; the 10% bar of the brief no
+longer blocks.
+
+### Heads
+
+| Branch | Head | What |
+|---|---|---|
+| `c2/switch-window-r2` | ae1399ba | 6a4cfa93 + the `SWO_DIAG` build option (5 commits: 29d58c22 dump, a6c65318 slow-finish dump, 6a0192d9 beacon and reap timing, 1441f690 prelude timing, ae1399ba rq-lock owner and counted try-lock) + documents (scheduler.md, kernel/CLAUDE.md, the cost ledger `docs/perf/context-switch.md`). No kernel change with the option off: `.text` is 2,479,448 bytes (Jetson production) and 2,541,752 bytes (Jetson R3 test kernel) at both ae1399ba and 6a4cfa93, no `swo-diag` string in the image (`textsize-swo-diag-off-ae1399ba.txt`; the same at 29d58c22, `textsize-swo-diag-off.txt`). |
+| `fix/kexec-dtb-reserve` | 661204e6 | main dc51107c + the #1244 change |
+| `diag/1244-check-on-main` | 665fb18e | main dc51107c + the #1244 boot-time check only; local, evidence only |
+| `diag/1262-padded-locks` | 741497c7 | ae1399ba + one cache line per `rq_lock` / `steal_deque_lock` element; local, experiment only |
+
+### Part A rows: R3 wake (`test_wake_during_switch_out`), jetson-nano-2
+
+| Row | Files | Result |
+|---|---|---|
+| UEFI-direct, x200, 10 boots, `SWO_DIAG` (29d58c22) | `uefi-r3w-diag-29d58c22-boot01..10.txt` | 2000 of 2000; no NOT-FINISHED, no dump |
+| UEFI-direct, x200, 5 more boots (a6c65318, adds a dump at 30 ms into the finish) | `uefi-r3w-diag2-a6c65318-boot11..15.txt` | 1000 of 1000; no NOT-FINISHED; no 30 ms dump (2 to 7 finishes of 16 to 27 ms per boot, printed without a dump) |
+| kexec, x200, 5 boots (a6c65318) | `kexec-r3w-diag2-a6c65318-boot01..05.txt` | 1000 of 1000; one 30 ms dump (boot 05, iteration 53) |
+| kexec, x1000, 2 boots (6a0192d9: beacon, dump at 10 ms) | `kexec-r3w-diag3-6a0192d9-x1000-boot01,02.txt` | 2000 of 2000; 6 and 14 slow finishes |
+| kexec, x1000, 2 boots (1441f690: prelude timing) | `kexec-r3w-diag4-1441f690-x1000-boot01,02.txt` | 2000 of 2000; 13 and 3 slow finishes; 17 and 4 iterations with a `schedule()` prelude over 1 ms, all on CPUs 4 and 5 |
+| kexec, x1000, 1 boot (ae1399ba: lock owner, counted try-lock) | `kexec-r3w-diag5-ae1399ba-x1000-boot01.txt` | 1000 of 1000; 4 slow finishes; 10 such iterations; all 14 reported own-lock waits began with the lock word 0 and no owner recorded |
+| UEFI-direct, x1000, 1 boot (ae1399ba) | `uefi-r3w-diag5-ae1399ba-x1000-boot01.txt` | 1000 of 1000; 30 slow finishes, 49 iterations with a prelude over 1 ms, all on CPUs 4 and 5; all 83 reported own-lock waits began with the lock word 0 and no owner recorded |
+| **Experiment**, kexec, x1000, 2 boots (741497c7, padded locks) | `kexec-r3w-padlocks-741497c7-x1000-boot01,02.txt` | 2000 of 2000; **0 slow finishes, 0 preludes over 1 ms**, slowest iteration 315 ms (unpadded boots: 754 to 812 ms) |
+
+**Rate of #1262 (NOT-FINISHED, a 2 s stall).** This session: 0 in 3000
+iterations on UEFI-direct at x200 (15 boots) and 0 in 1000 on kexec at x200
+(5 boots); 0 in the x1000 boots as well (1000 on UEFI-direct,
+5000 on kexec, unpadded). With Entry 39 (1 in 600 on UEFI-direct): 1 in
+3600 at x200 on UEFI-direct (1 in 4600 counting the x1000 boot), 0 in 6000
+on kexec this session. The failure was not
+reproduced, so no dump of the 2 s case exists.
+
+Disclosures. (0) A UEFI-direct capture starts at power-on, boots SD Linux,
+and the trigger reboots into SLM-OS through BootNext: SLM-OS starts after a
+warm reset, inside a capture that begins at power-on (the method of Entry
+39). (1) The first image (29d58c22, UEFI boots 1 to 10) embedded a
+32-byte stub operator library instead of the 308 KB one: `kernel-test` in a
+clean worktree packs the library only after a Jetson production build has
+generated its inputs. Scheduler and test code are the same; `.rodata` is
+308 KB smaller. Boots 11 to 15 and every later image carry the full
+library. (2) The 6a0192d9 banner says `-dirty`: the tree had uncommitted
+documentation only. (3) The diagnostics changed between rows as shown; the
+failure condition of the test did not.
+
+### What the dumps show
+
+**Facts** (counts checked by the critic).
+
+- 71 dumps of slow finishes on the unpadded kernels (kexec: 1 at 30 ms and
+  40 at 10 ms, 486 per-CPU lines, 93 task lines; UEFI-direct: 30 at 10 ms,
+  360 per-CPU lines, 94 task lines). `switch_in_waiting[]` is NULL in all
+  846 per-CPU lines and no task line names a waiting CPU. Each dump is one
+  snapshot at the 10 or 30 ms mark; a deferral earlier in the wait would
+  not appear.
+- `preempt_disabled[]` is 1 only on CPUs 4 and 5 (47 kexec lines, 30
+  UEFI-direct lines). `resched_trampoline` sets it before it calls
+  `schedule()` (`kernel/arch/arm64/vectors.S:593`), so a CPU inside a
+  tick-driven `schedule()` shows 1, and thieves skip it for that long
+  (`sched_try_steal`'s `preempt_disabled[victim]` early-out).
+- The unfinished work is on CPUs 4 and 5 (the second cluster). The prelude
+  timing (three kexec boots and the UEFI-direct boot) has 140 per-CPU
+  preludes over 1 ms, all on CPUs 4 and 5, 1.06 to 6.64 ms from entering
+  `schedule()` to holding the CPU's own `rq_lock`, tick masked (ADR 0008
+  part 1 masks from entry). 121 of the 140 spent that time waiting for the
+  CPU's own `rq_lock`; 17 spent it in the steal attempt, whose locks are
+  not instrumented; 2 in neither alone. The duration is often the same on
+  CPU 4 and CPU 5 in one iteration (6256/6256, 2415/2416, 4092/4093 us).
+  **No wait is longer than 6.64 ms** on either path.
+- The counted try-lock (ae1399ba) reports 97 own-lock waits (14 kexec, 83
+  UEFI-direct, 1.1 to 6.6 ms). In all 97 the lock word was 0 when the wait
+  began and no owner was recorded then or 1 ms later; the failed try-locks
+  number up to 14,989, and six waits of 1.1 to 3.0 ms have only 2 to 8.
+  The counter does not split "saw the lock held" from "the exclusive store
+  failed", and the lock word is sampled once.
+- 26 first-dump lines of CPU 4 or 5 show the CPU still before its lock
+  (phase 1) with the lock word reading 1, so the lock is at times held
+  (by another CPU, or just taken by this one) during a wait.
+- One dump as an example (`kexec-r3w-diag3-6a0192d9-x1000-boot02.txt`,
+  t=272834009): CPUs 4 and 5 each have idle as current and two READY
+  workers queued, `preempt_disabled` 1 on both; CPU 5 entered `schedule()`
+  4757 us earlier and is at phase 1 with its lock word reading 1; CPU 4 is
+  at phase 3 (lock held). About half of the first-dump CPU 4/5 lines look
+  like this (idle current, flag 1); the rest show a worker still current.
+- Diagnostic artefact: `age=554189327 us` or `...328 us` on 43 per-CPU
+  lines. Explanation, not an observation: an unsigned wrap, the phase stamp
+  being newer than the snapshot's start; read it as about 0.
+
+`SPINLOCK_ARRAY` (`kernel/include/spinlock.h:104`) aligns the array, not
+its elements: all `rq_lock[]` words share one 64-byte line, and so do all
+`steal_deque_lock[]` words.
+
+**Experiment, one variable** (741497c7: the same kernel with each element
+of both arrays on its own cache line): 2000 iterations on kexec with no
+slow finish, no prelude over 1 ms and no iteration over 320 ms (slowest
+315 ms). The five unpadded x1000 kexec boots had 6, 14, 13, 3 and 4 slow
+finishes (40 in 5000) and 6, 14, 17, 5 and 10 iterations over 320 ms; the
+three that time the prelude had 17, 4 and 10 iterations with one over
+1 ms; slowest iterations 754 to 812 ms (UEFI-direct: 30, 49, 827 ms). Two
+boots, one image, kexec only; no padded UEFI-direct run.
+
+**Inferences, and how far the evidence carries them** (the critic rated
+both "partly supported").
+
+1. *The slow finishes are not the fix's deferral path.* Supported for the
+   71 dumped stalls. Not shown for #1262 itself, which was never captured.
+   "Predates the fix" has no control run: main cannot run R3 wake (it hangs
+   at iteration 1), so no pre-fix kernel was measured with these
+   diagnostics.
+2. *The millisecond stalls come from the lock words sharing a cache line.*
+   The experiment implicates the shared lines: padding removes the stalls.
+   That the mechanism is the `stxr` of the `ldaxr`/`stxr` lock losing its
+   reservation to writes of neighbouring lock words is inferred (lock word
+   0 at the start, no owner, thousands of failed try-locks), not observed
+   directly; which writer does it is source reasoning (the test's task on
+   CPU 0 calls `yield()` in a tight loop during the finish wait and takes
+   `rq_lock[0]` each time). Not excluded: another hot word in those lines;
+   a cluster-wide stall would also give equal durations on CPUs 4 and 5,
+   and the six waits with under 10 failed try-locks fit neither a spinning
+   CPU nor a held lock.
+
+**Decision for step 3.** The dumps do not put the failure in the fix's
+deferral path, and they do not show the 2 s case at all. **Hypothesis, not
+shown by a dump:** the 2 s NOT-FINISHED of Entry 39 is the same starvation
+at full length, with the READY workers not stolen because CPU 5 was inside
+a tick-driven `schedule()` with `preempt_disabled` set. For it: Entry 39's
+capture has three READY workers assigned to CPU 5 with `on_cpu` 0, neither
+run nor stolen, which is the state of the dumps above. **Against it: every
+measured wait, dumped or not, ended within 6.64 ms**, so something ends
+these waits that the hypothesis would need to have been absent for 2 s,
+and nothing here says what. The cause of #1262 remains not established.
+Per step 5 the branch's kernel code is left as is; the findings are on
+#1262 and the lock layout is filed as #1263.
+
+### Part B rows: #1244, `fix/kexec-dtb-reserve` 661204e6
+
+Change: the PMM reserves the DTB blob's own range (address and
+`totalsize`, page-aligned) on every boot path; `pmm_init` ends with a
+free-list walk that prints `PMM: DTB at ... is clear of every free block`
+or a WARN; the arm64 header's `image_size` is `__kernel_end - _start`
+(`.bss` and boot stack included). UEFI-direct does not read that field
+(`SizeOfImage` and `_kernel_file_size` are unchanged). The header change
+cannot keep the blob out of the heap, which starts at `__kernel_end`; the
+reservation is the fix.
+
+| Row | Files | Result |
+|---|---|---|
+| main + check only (665fb18e), Jetson kexec, 1 boot | `kexec-maincheck-665fb18e-boot01.txt` | `[WARN] PMM: 2 free block(s) overlap the DTB at 0x82c27000-0x82c65000 (250972 bytes; first block 0x82c30000 order 4; heap starts 0x82c30000)` |
+| 661204e6 production, Jetson kexec, `boot_test` x10 | `kexec-prod-661204e6-boot01..10.txt` | 10 of 10 to the shell; `DTB at 0x82c40000-0x82c7e000 ... is clear of every free block` on all 10; 0 halts |
+| 661204e6 production, Jetson UEFI-direct, 1 boot | `uefi-prod-661204e6-boot01.txt` | shell; `DTB at 0x2679df000-0x267ad3000 (997852 bytes) is clear of every free block` |
+| 661204e6 suite, Jetson kexec, 10 boots | `kexec-suite-661204e6-boot01..10.txt` | **2 PMM halts** (boots 04, 07: #1207's signature, data abort on CPU 0 right after `test_checkerboard_fragmentation` passes, where `test_exhaustion_recovery` runs next; ESR 0x96000044, FAR 0x1000008094addf / 0x1000008094adcf, ELR 0x80024e88 / 0x80024eec, both in `pmm_alloc_pages` by `addr2line` on the image). 5 boots lost to `test_preempt_flag_follows_migrated_task` (#1238, which main has): 01 and 02 panic on CPU 5 (EC 0xe) right after the preceding test, capture cut; 06 and 09 panic in that test's tasks (`pdm_a` on CPU 2, `pdm_b` on CPU 3, EC 0xe), that CPU halts, the test is reported FAIL, the suite runs on and hangs in the coherency litmus at the halted CPU; 08 stalls silently at that test. 3 complete (03, 05, 10) with the same 14 failures, all on the #1109 list, which includes the PMM tests `test_coalesce_enables_larger_allocation` and `test_recursive_coalescing` (they fail the same way in Entry 39's suites without this change). The five new tests (`test_dtb_reserve_range_page_aligns`, `test_carve_dtb_straddling_heap_start`, `test_collect_reserves_includes_live_dtb`, `test_no_free_block_overlaps_live_dtb`, `test_free_overlap_count_sees_a_free_page`) pass in the 8 boots that reached them; boots 04 and 07 halted first. |
+| 661204e6 production, Pi 5, 2 boots (`gauntlet-5-hw-pi5`) | `pi5-prod-661204e6-boot01,02.txt` | 2 of 2 to the shell; `DTB at 0x2efec000-0x2f000000 (79954 bytes) is clear of every free block (heap starts 0x2a6f000)`: on Pi 5 the firmware's blob is inside the heap as well |
+| QEMU | `make test`, `make test PLATFORM=X86_64` at 661204e6 | pass; `check-braces` 0 violations |
+
+**PMM halt count: 2 in 10 with the DTB reserved** (run 4b: 1 in 10
+without). The overlap of #1244 is real and is fixed; it is not the cause of
+#1207. Boots 01 and 02 of the suite row were captured with a pattern that
+matched the words `KERNEL PANIC` and are cut inside the dump (file names
+say so).
+
+### Part C
+
+Condition: no failure in at least 5x the iterations in which #1262 was
+seen (1 in 600 on UEFI-direct, so 3000). Met: 3000 of 3000 at x200 on
+UEFI-direct, the path and count the brief set (10 boots, then 5 more). The
+kernel code is unchanged from 6a4cfa93, so this says the failure is rarer
+than 1 in 600, not that it is gone; #1262 stays open and the PR says so.
+
+**PR #1266**, `c2/switch-window-r2` ae1399ba against main, ready for
+review. Closes #1234, #1238, #1242 (checked: `closingIssuesReferences` =
+1234, 1238, 1242). It carries ADR 0008 as accepted, run 5's tables (Entries
+8 and 34), Entry 39's rows, this entry's rows, the bench numbers with the
+accepted cost, and the critic's verdict. Added on the user's instruction
+during the session: `docs/perf/context-switch.md` (baseline Jetson kexec
+88.0 ns and Pi 5 100.7 ns at dc51107c; the rule that every PR touching
+`kernel/sched/`, the context switch or the task lifecycle adds a row with
+`bench context` before and after on both boards, at least 5 raw runs per
+side, files linked, the delta, who accepted it and why; this PR as the
+first row, +9.3 ns / +10.6% Jetson and +8.3 ns / +8.3% Pi 5, accepted by
+the user; the running total) and one line in `kernel/CLAUDE.md`.
+
+**PR #1265**, `fix/kexec-dtb-reserve` 661204e6 against main, ready for
+review. Closes #1244 (checked), references #1207 without closing it, and
+states the halt count: 2 in 10. Comment on #1207 posted with the count.
+
+Nothing merged.
+
+### Critic
+
+Fable 5.2, blind, this session's rows only, two rounds
+(`critic-5-followup.md`, this commit). **Round 1: FAIL**, narrowly: every
+count, address, banner and pass total matched, but the suite row
+misdescribed boots 06 and 09, the example-dump sentence contradicted the
+dump, and both inferences were rated "partly supported". The rows and the
+section above are the corrected text. **Round 2: PASS**: every row matches
+the captures and both inferences are "stated no more strongly than the
+evidence allows"; its one remaining discrepancy (the artefact count, 43 not
+38) is corrected above. Not checkable from the captures, per the critic:
+the `addr2line` symbol, #1109 membership, the Entry 39 comparisons, that
+main hangs at R3 wake iteration 1, and the QEMU row.
+
+### Tracker
+
+Opened: #1263 (P1: `rq_lock[]` and `steal_deque_lock[]` share one cache
+line each), #1264 (P3: stub operator library in a clean worktree's test
+kernel). Comments: #1262 (rate, dumps, classification, hypothesis and the
+point against it), #1207 (halt count 2 in 10 with the DTB reserved, and an
+untested reading of the signature: `free_counts[]` underflow in
+`free_list_remove` when the buddy range is free but is not one block of
+that order). Still open: #1262, #1207, #1260.
+
+### Incidents
+
+- Suite boots 01 and 02 truncated by this session's own capture pattern
+  (above); pattern changed for boots 03 to 10.
+- Two ESP staging attempts made right after a power cycle exited without
+  output and wrote nothing (the second was the final restore); each rerun
+  staged and verified (`deploy-uefi-1244-prod-661204e6.log.txt`,
+  `jetson-post-state.txt`). Cause not captured.
+- A first `sdwire_update` plan for pi-5-1 would have overwritten the
+  original `kernel_2712.img`; it was not confirmed. The original was
+  renamed aside first, then the test image copied in.
+- `kernel-test` in a clean worktree embeds the stub operator library until
+  a Jetson production build has run there (disclosure 1); filed as #1264.
+
+### Lab end state
+
+jetson-nano-2: released, powered on, SD Linux (BootCurrent 0001), no
+BootNext, ESP `SLMOS.efi` 789cba62 (fresh read-only mount, `fsck.vfat -n`:
+6 files, 2196/130892 clusters, as found), `/root/slmos.elf` 098f3163, 14
+`*.elf*` files as found, this session's files deleted. pi-5-1: released,
+powered on, original `kernel_2712.img` renamed back and booted (banner
+b42b2c1d, `pi5-restore-check-b42b2c1d.txt`). No claims held.
+
+Local only, not pushed: branches `diag/1244-check-on-main` (665fb18e),
+`diag/1262-padded-locks` (741497c7), `s1262/diag` (= origin
+`c2/switch-window-r2`), and worktrees under
+`.claude/worktrees/Issues-1262-and-1244/.wt/`.
