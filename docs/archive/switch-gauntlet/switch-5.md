@@ -1748,3 +1748,92 @@ check report; not for merge). Evidence `gauntlet-5-hw-jetson` c3935e18.
   `slmos-1207-suite-f55c5293.elf`.
 - Builder A meanwhile, host only: `/ci`, the two option rows at the
   committed head, the section itemisation, the counter issue, Pi 5 images.
+
+## Entry 45 (written 11:40 UTC, from date): builder B phase B1 (#1207, Jetson kexec suite): the halt is not fixed; builder A interim; lab to builder A
+
+Sources: builder B's B1 report and builder A's interim report, as
+received; not yet checked by a critic.
+
+### Part B, jetson-nano-2, kexec suite (`gauntlet-5-hw-jetson` d239340e, files `B-kexec-*`, `B-trigger-kexec-*`, `B-jetson-*`)
+
+One boot per `boot_test` call, pattern `Task 'main' \(id=\d+\) exiting`
+only, host-side trigger; all 12 files pass the both-ends check.
+
+**Row 1, old allocator with `PMM_CHECK=ON`** (17daedda, ELF 2fae8367),
+`B-kexec-chk-oldalloc-17daedda-boot01,02.txt`: both boots ran the whole
+suite (`[FAIL] 14 total failure(s)`, Entry 41's 14), no halt, no assertion,
+107 free-list walks ok in each. `[pmm-check] reserves: 189 in all (0
+firmware /memreserve/ ...), 0 not page-aligned` (boot02: 190) and
+`[pmm-check] init: 533 free blocks, 1803154 free pages (1803154 by page
+state), 0 unmerged buddy pair(s), 0 region(s) not page-aligned` (boot02:
+610 blocks, 1803081 pages, 0, 0). So `pmm_init` leaves no split free range
+and no shared page on this board: mechanisms 1 and 3 of Entry 43 have no
+source at boot here. Both coalescing tests fail in both boots (old tests).
+
+**Row 2, the required row, fix head f55c5293, `PMM_CHECK` off** (ELF
+6fcf403f), `B-kexec-suite-f55c5293-boot01..10.txt`:
+
+| Outcome | Boots | Count |
+|---|---|---|
+| **PMM halt** in `test_exhaustion_recovery`, right after `[PASS] test_checkerboard_fragmentation` | 01, 05 | **2** |
+| Complete, `[FAIL] 12 total failure(s)` | 03, 06, 09, 10 | 4 |
+| Lost after the PMM suite at `test_preempt_flag_follows_migrated_task` (the #1238 family; this base lacks #1266) | 02, 04, 07, 08 | 4 |
+
+**2 PMM halts in 10 at the fix head, the same count as before the change
+(2 in 10 at 661204e6, Entry 41). #1207 is not fixed.** The halts are now
+the named panic: boot01 `PMM: order 7 free list is empty but its count is
+29 (free-list corruption, #1207)`, boot05 `PMM: order 5 free list is empty
+but its count is 48`. Fact from the same files: the boot-time lists held
+30 order-7 blocks (boot01) and 50 order-5 blocks (boot05), so the list
+ended after one pop, or at most two, with 29 and 48 blocks still counted: a
+block at or next to the head had a NULL `next`. Inference, not shown:
+something other than the free-list code cleared the first word of a listed
+free block. `PMM_CHECK` was off in these boots, so there is no dump of the
+block. 0 in 2 with the option on against 2 in 10 with it off says nothing
+about the option's effect.
+
+The two coalescing tests pass in 10 of 10 boots at the fix head; the five
+new tests pass in the 8 boots that got through the PMM suite. The 12
+failures of the complete boots are Entry 41's 14 minus the two coalescing
+tests (compared against `1262-1244/kexec-suite-661204e6-boot03.txt`).
+
+Board as left (`B-jetson-post-state-b1.txt`): SD Linux, BootCurrent 0001,
+no BootNext, `/root/slmos.elf` 098f3163, 14 `*.elf*` files as found, ESP
+not touched.
+
+### Decisions (orchestrator)
+
+- The Part B PR will not close #1207 or #1228. It carries the
+  coalescing-test fix, three allocator defects shown in QEMU with failing
+  then passing tests, the named panic and `PMM_CHECK`, and states that
+  e3c22600's commit message overstates (the merge defect reproduces the
+  signature in QEMU; it is not what halts the board). Pushed history is
+  not rewritten because the evidence banners name those commits.
+- Further diagnosis, built by builder B while builder A holds the lab: the
+  option-off panic dumps the bad block and its neighbours at no layout
+  cost, and a light free-list walk (no extra `.bss`) runs at the end of
+  `pmm_init`, before the first suite and after each suite, so a cleared
+  link is bracketed and its content captured. Hypothesis to test, not
+  shown: a writer outside the PMM (for example a device left doing DMA by
+  Linux across kexec). A second Jetson row with that image follows A2.
+
+### Part A interim (host only, `gauntlet-5-hw-jetson` 99b4be10)
+
+- `/ci` at c0612fa7: steps 1 to 11 pass, plus an extra `make test
+  SECONDARY_PREEMPT=ON WORK_STEALING=ON SWO_DIAG=ON` (`A-ci-c0612fa7-step01..12-*.txt`,
+  `A-ci.out.txt`); banners read c0612fa7 without `-dirty`. This replaces
+  the two "precommit" rows of Entry 44.
+- Section deltas itemised (`A-layout-note.txt`, `A-secdiff-jet-prod.txt`,
+  `A-rodiff-jet-prod.txt`): `.bss` symbols grow by 5816 bytes and padding
+  between symbols shrinks by 5816; `.text` +1696 (the new test +1408,
+  `schedule()` +148, `scheduler_tick` +32, `resched_trampoline` +16);
+  `.rodata` +512, of which strings net +365 (including -660 from shorter
+  build-directory paths) and 147 bytes of string-section padding are not
+  itemised further.
+- Issue #1279 filed (P3, Backlog): global scheduler counters written by
+  every CPU on every switch and tick.
+- Correction to Entry 44: A1 produced 18 boot captures (12 R3 wake and 6
+  bench boots), not 24; all 18 saved with verdict OK.
+
+11:36 UTC: lab to builder A for A2 (Pi 5 `bench context`, then the
+regression rows on both boards).
