@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""secdiff.py <U.elf> <P.elf> [section ...]
+Itemises the size difference of sections between two ELF images from their
+symbol tables: per source file (the STT_FILE symbol that precedes a local
+symbol in readelf -s order; globals are listed by name), the sum of object /
+function sizes in the section, and the alignment padding (section size minus
+the sum of symbol sizes, and per-symbol gaps for .bss)."""
+import subprocess, sys, collections
+
+RE = 'aarch64-none-elf-readelf'
+
+
+def load(elf):
+    secs = {}
+    for l in subprocess.run([RE, '-SW', elf], capture_output=True, text=True).stdout.splitlines():
+        l = l.strip()
+        if not l.startswith('['):
+            continue
+        body = l[l.index(']') + 1:].split()
+        if len(body) < 5 or not body[0].startswith('.'):
+            continue
+        idx = int(l[1:l.index(']')])
+        secs[idx] = (body[0], int(body[2], 16), int(body[4], 16))
+    syms = []
+    cur = '?'
+    for l in subprocess.run([RE, '-sW', elf], capture_output=True, text=True).stdout.splitlines():
+        p = l.split()
+        if len(p) < 8 or not p[0].endswith(':') or not p[0][:-1].isdigit():
+            continue
+        val, size, typ, bind, ndx, name = int(p[1], 16), p[2], p[3], p[4], p[6], p[7]
+        size = int(size, 16) if size.startswith('0x') else int(size)
+        if typ == 'FILE':
+            cur = name
+            continue
+        if not ndx.isdigit() or typ not in ('OBJECT', 'FUNC'):
+            continue
+        owner = cur if bind == 'LOCAL' else 'GLOBAL'
+        syms.append((int(ndx), val, size, owner, name))
+    return secs, syms
+
+
+def summarise(elf, want):
+    secs, syms = load(elf)
+    out = {}
+    for idx, (name, addr, size) in secs.items():
+        if name not in want:
+            continue
+        per = collections.Counter()
+        spans = []
+        for ndx, val, sz, owner, sname in syms:
+            if ndx == idx and sz:
+                key = owner if owner != 'GLOBAL' else 'GLOBAL:' + sname
+                per[key] += sz
+                spans.append((val, sz))
+        # bytes covered by at least one symbol (aliases counted once)
+        spans.sort()
+        covered = 0
+        end = addr
+        for v, s in spans:
+            if v + s > end:
+                covered += v + s - max(v, end)
+                end = v + s
+        out[name] = (size, per, covered)
+    return out
+
+
+u, p = sys.argv[1], sys.argv[2]
+want = sys.argv[3:] or ['.text', '.rodata', '.data', '.bss']
+su, sp = summarise(u, want), summarise(p, want)
+for sec in want:
+    if sec not in su or sec not in sp:
+        continue
+    (zu, pu, cu), (zp, pp, cp) = su[sec], sp[sec]
+    print('== %s: U %d -> P %d (%+d); bytes covered by symbols U %d -> P %d (%+d); '
+          'not covered (padding, unnamed data) U %d -> P %d (%+d)'
+          % (sec, zu, zp, zp - zu, cu, cp, cp - cu, zu - cu, zp - cp, (zp - cp) - (zu - cu)))
+    rows = []
+    for k in set(pu) | set(pp):
+        d = pp.get(k, 0) - pu.get(k, 0)
+        if d:
+            rows.append((k, pu.get(k, 0), pp.get(k, 0), d))
+    tot = 0
+    for k, a, b, d in sorted(rows, key=lambda r: (-abs(r[3]), r[0])):
+        tot += d
+        print('   %-48s %8d -> %8d  %+d' % (k, a, b, d))
+    print('   sum of per-owner symbol-size changes: %+d' % tot)

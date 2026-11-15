@@ -1,0 +1,47 @@
+# Section differences, padded (P, c0612fa7) vs unpadded (U, ae1399ba), Jetson production images
+# Sources: A-images.txt (section sizes), secdiff.py on jet-prod-U.elf / jet-prod-P.elf (per-file
+# symbol sizes from readelf -s), rodiff.py (strings in .rodata, gaps between .bss symbols).
+# Raw outputs: A-secdiff-jet-prod.txt, A-rodiff-jet-prod.txt.
+
+.data   148480 -> 148480   no change; no symbol changed size.
+
+.bss    37429616 -> 37429616   total unchanged, contents changed:
+  symbol bytes  +5816:
+     sched.c statics        +2304  (rq_lock 32->512, steal_deque_lock 32->512, switch_in_waiting 64->512,
+                                    coop_last_tick_cntpct 64->512, cpu_steal_deques 3136->3584)
+     preempt.c statics      +1376  (reschedule_pending_wb 32->512, orig_elr_wb 64->512, orig_spsr_wb 64->512)
+     pmu.c statics           +800  (pmu_cp_state 192->512, pmu_cache_pressure_q16_per_cpu 32->512)
+     sched_diag (global)     +512  and the ten sched_diag_* globals -320 (10 x 32)
+     preempt_disabled        +480  (32->512)
+     task.c statics          +448  (current_task 64->512)
+     test_percpu_layout.c    +160  (the new test's static arrays; test files are linked into the production kernel)
+     test_steal_deque.c       +56  (its static steal_deque_t, 392->448)
+  bytes between symbols (alignment padding)  -5816 (97442 -> 91626):
+     the gap in front of the 64 KB-aligned object at 0x81710000 (mock_register_irq_calls) shrinks
+     27516 -> 22540 (-4976); the gap in front of the page-aligned object at 0x81e99000 shrinks
+     3360 -> 3144 (-216); the remaining -624 is spread over smaller gaps (353 gaps in P, 352 in U).
+  So the growth of the padded arrays is taken out of alignment padding that already existed, and the
+  section ends at the same size.
+
+.rodata 6160034 -> 6160546   +512; no named symbol changed size (symbol bytes 1361601 on both sides):
+  strings (NUL-terminated, 4+ printable characters) present on one side only: U 17894 bytes, P 18259
+  bytes, net +365:
+     __FILE__ path strings: 132 in U, 133 in P. Each common path is 5 bytes shorter in P (the worktree
+       directory is ".wt/a" instead of ".wt/a-base"), -660; the 133rd is the new test file's path.
+     build stamp / commit strings: same lengths on both sides.
+     new strings of kernel/tests/test_percpu_layout.c (test names, two printf formats, assert messages).
+  the remaining +147 bytes are not itemised: they are padding between merged string sections and
+  aligned read-only objects (rodiff.py counts string bytes, not the padding after them).
+  Note: the -660 from the path strings is an artefact of the two build directories, not of the change;
+  built in directories of equal length the .rodata delta would be about +1170.
+
+.text   2479448 -> 2481144   +1696 (Pi 5 production +1536), itemised in A-secdiff-jet-prod.txt:
+  symbol bytes +1560, bytes between functions (alignment) +136. Largest items:
+     test_percpu_layout.c statics +1208 and test_suite_percpu_layout +200 (the new test, linked into
+       the production kernel like every other test file)
+     schedule() +148 (3448 -> 3596, 37 instructions), scheduler_tick +32, sched.c statics +36,
+       scheduler_terminate_task +20, resched_trampoline +16 (4 instructions: the two flag stores and the
+       two orig_elr / orig_spsr loads each gain an add)
+     readers of the counters got smaller: shell_sys.c statics -68, admin_telemetry_periodic_pump -64,
+       cmd_cpu -36, cmd_bench -32, maybe_arm_resched_trampoline_on -12
+  The remaining entries are within +/-20 bytes each (full list in the file).

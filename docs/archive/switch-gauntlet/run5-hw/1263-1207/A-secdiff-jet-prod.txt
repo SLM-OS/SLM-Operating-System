@@ -1,0 +1,56 @@
+== .text: U 2479448 -> P 2481144 (+1696); bytes covered by symbols U 2377236 -> P 2378796 (+1560); not covered (padding, unnamed data) U 102212 -> P 102348 (+136)
+   test_percpu_layout.c                                    0 ->     1208  +1208
+   GLOBAL:test_suite_percpu_layout                         0 ->      200  +200
+   GLOBAL:schedule                                      3448 ->     3596  +148
+   shell_sys.c                                         20164 ->    20096  -68
+   GLOBAL:admin_telemetry_periodic_pump                 1412 ->     1348  -64
+   GLOBAL:cmd_cpu                                       1280 ->     1244  -36
+   sched.c                                              1940 ->     1976  +36
+   GLOBAL:cmd_bench                                    11756 ->    11724  -32
+   GLOBAL:scheduler_tick                                 632 ->      664  +32
+   test_harness.c                                       4992 ->     5024  +32
+   GLOBAL:scheduler_terminate_task                       472 ->      492  +20
+   test_scheduler.c                                    60004 ->    60024  +20
+   GLOBAL:resched_trampoline                             324 ->      340  +16
+   GLOBAL:maybe_arm_resched_trampoline_on                212 ->      200  -12
+   GLOBAL:sched_migrate_task                             668 ->      656  -12
+   GLOBAL:scheduler_start                                512 ->      524  +12
+   GLOBAL:sched_ai_record_completion                     200 ->      208  +8
+   GLOBAL:scheduler_init                                 328 ->      336  +8
+   test_integration.c                                  11688 ->    11696  +8
+   GLOBAL:sched_ai_get_deadline_miss_raw                  36 ->       40  +4
+   GLOBAL:sched_ai_get_latency_raw                        28 ->       32  +4
+   GLOBAL:sched_ai_get_top_tasks                         112 ->      108  -4
+   GLOBAL:sched_drain_cpu_runqueue                       184 ->      188  +4
+   GLOBAL:sched_rebalance_tick                           504 ->      508  +4
+   GLOBAL:scheduler_init_secondary                       308 ->      312  +4
+   GLOBAL:scheduler_remove_task                          248 ->      252  +4
+   GLOBAL:task_current                                    68 ->       72  +4
+   GLOBAL:task_current_on_cpu                             36 ->       40  +4
+   lua_slm.c                                           33132 ->    33136  +4
+   task.c                                               1240 ->     1244  +4
+   sum of per-owner symbol-size changes: +1560
+== .rodata: U 6160034 -> P 6160546 (+512); bytes covered by symbols U 1361601 -> P 1361601 (+0); not covered (padding, unnamed data) U 4798433 -> P 4798945 (+512)
+   sum of per-owner symbol-size changes: +0
+== .data: U 148480 -> P 148480 (+0); bytes covered by symbols U 148033 -> P 148033 (+0); not covered (padding, unnamed data) U 447 -> P 447 (+0)
+   sum of per-owner symbol-size changes: +0
+== .bss: U 37429616 -> P 37429616 (+0); bytes covered by symbols U 37332174 -> P 37337990 (+5816); not covered (padding, unnamed data) U 97442 -> P 91626 (-5816)
+   sched.c                                             18712 ->    21016  +2304
+   preempt.c                                             164 ->     1540  +1376
+   pmu.c                                                 232 ->     1032  +800
+   GLOBAL:sched_diag                                       0 ->      512  +512
+   GLOBAL:preempt_disabled                                32 ->      512  +480
+   task.c                                              55372 ->    55820  +448
+   test_percpu_layout.c                                    0 ->      160  +160
+   test_steal_deque.c                                  56204 ->    56260  +56
+   GLOBAL:sched_diag_idle_loops                           32 ->        0  -32
+   GLOBAL:sched_diag_picked                               32 ->        0  -32
+   GLOBAL:sched_diag_schedule                             32 ->        0  -32
+   GLOBAL:sched_diag_steal_attempts                       32 ->        0  -32
+   GLOBAL:sched_diag_steal_empty_victim                   32 ->        0  -32
+   GLOBAL:sched_diag_steal_push_full                      32 ->        0  -32
+   GLOBAL:sched_diag_steal_stale                          32 ->        0  -32
+   GLOBAL:sched_diag_steal_successes                      32 ->        0  -32
+   GLOBAL:sched_diag_switch_defer                         32 ->        0  -32
+   GLOBAL:sched_diag_tick                                 32 ->        0  -32
+   sum of per-owner symbol-size changes: +5816

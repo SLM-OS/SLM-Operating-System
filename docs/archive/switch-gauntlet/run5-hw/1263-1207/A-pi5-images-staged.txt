@@ -1,0 +1,3 @@
+8aa647e5bff85ef6a04ff5543f4df796502840326333dd3e49e346fe7274d21e  /var/lib/labctl/images/kernel_2712-1263-prod-P.img
+c316319be8a701182eefbc20fe33f8db04f90fd2d4b1101ca1be075ec65363b0  /var/lib/labctl/images/kernel_2712-1263-prod-U.img
+e08cf339720e002f14b3ac6b53005112e0f1c227ad529791d6678d3251f7e8e6  /var/lib/labctl/images/kernel_2712-1263-suite-P.img

@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""rodiff.py <U.elf> <P.elf>
+(1) NUL-terminated printable strings (4+ chars) present in one image's .rodata
+    and not the other's, with their byte cost (length + 1).
+(2) The largest gaps between consecutive symbols in .bss of each image, to
+    show where the growth of the padded arrays is absorbed."""
+import subprocess, sys, re, collections, tempfile, os
+
+OC = 'aarch64-none-elf-objcopy'
+RE = 'aarch64-none-elf-readelf'
+
+
+def rodata(elf):
+    with tempfile.NamedTemporaryFile(delete=False) as t:
+        name = t.name
+    subprocess.run([OC, '-O', 'binary', '-j', '.rodata', elf, name], check=True)
+    data = open(name, 'rb').read()
+    os.unlink(name)
+    return data
+
+
+def strs(data):
+    return collections.Counter(m.group(1) for m in re.finditer(rb'([\x20-\x7e\t\n\r]{4,})\x00', data))
+
+
+u, p = sys.argv[1], sys.argv[2]
+du, dp = rodata(u), rodata(p)
+su, sp = strs(du), strs(dp)
+only_u = su - sp
+only_p = sp - su
+cu = sum((len(s) + 1) * n for s, n in only_u.items())
+cp = sum((len(s) + 1) * n for s, n in only_p.items())
+print('.rodata bytes: U %d P %d (%+d)' % (len(du), len(dp), len(dp) - len(du)))
+print('strings only in U: %d, %d bytes; only in P: %d, %d bytes; net %+d bytes'
+      % (sum(only_u.values()), cu, sum(only_p.values()), cp, cp - cu))
+for tag, c in (('U', only_u), ('P', only_p)):
+    for s, n in sorted(c.items(), key=lambda kv: -len(kv[0]))[:400]:
+        print('  only in %s x%d (%d B): %s' % (tag, n, len(s) + 1, s[:110].decode('ascii', 'replace').replace('\n', '\\n')))
+
+
+def gaps(elf):
+    secs = {}
+    for l in subprocess.run([RE, '-SW', elf], capture_output=True, text=True).stdout.splitlines():
+        l = l.strip()
+        if l.startswith('[') and '.bss' in l:
+            b = l[l.index(']') + 1:].split()
+            idx = int(l[1:l.index(']')])
+            secs = (idx, int(b[2], 16), int(b[4], 16))
+    idx, addr, size = secs
+    syms = []
+    for l in subprocess.run([RE, '-sW', elf], capture_output=True, text=True).stdout.splitlines():
+        q = l.split()
+        if len(q) < 8 or not q[0].endswith(':') or q[6] != str(idx) or q[3] != 'OBJECT':
+            continue
+        sz = int(q[2], 16) if q[2].startswith('0x') else int(q[2])
+        syms.append((int(q[1], 16), sz, q[7]))
+    syms.sort()
+    out = []
+    end = addr
+    prev = '(section start)'
+    for v, s, n in syms:
+        if v > end:
+            out.append((v - end, prev, n, v))
+        if v + s > end:
+            end = v + s
+            prev = n
+    if addr + size > end:
+        out.append((addr + size - end, prev, '(section end)', addr + size))
+    return sorted(out, reverse=True)
+
+
+for tag, elf in (('U', u), ('P', p)):
+    g = gaps(elf)
+    print('.bss gaps in %s: total %d bytes in %d gaps; largest:' % (tag, sum(x[0] for x in g), len(g)))
+    for sz, a, b, v in g[:6]:
+        print('   %7d bytes between %s and %s (next symbol at %#x, address %% 65536 = %d, %% 4096 = %d)' % (sz, a, b, v, v % 65536, v % 4096))
