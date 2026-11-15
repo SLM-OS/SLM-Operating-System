@@ -79,4 +79,14 @@ int pmm_collect_reserves(dtb_memreserve_t *out, int max);
 void pmm_test_add_region(uintptr_t start, uintptr_t end);
 int pmm_free_block_order(uintptr_t addr);
 
+/*
+ * Test hook for the free-list verifier: under pmm_lock, clear the next
+ * link of the head of the lowest order that has two listed blocks, verify
+ * twice, put the link back and verify again. Returns that order (-1: no
+ * such order) and the three results (orders with an inconsistency). The
+ * lock is held throughout, so no allocation ever sees the cleared link.
+ */
+int pmm_test_verify_cleared_link(unsigned int *first, unsigned int *second,
+                                 unsigned int *restored);
+
 #endif /* PMM_INTERNAL_H */

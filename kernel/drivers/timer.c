@@ -11,6 +11,7 @@
 #include "uart.h"
 #include "debug.h"
 #include "platform.h"
+#include "pmm.h"        /* pmm_verify_tick (test kernels, #1207) */
 
 /*
  * Timer selection.
@@ -188,6 +189,21 @@ void timer_handler(void)
 
     /* Call scheduler tick handler */
     scheduler_tick();
+
+#if defined(ENABLE_BOOT_TESTS)
+    /* Test kernels: CPU 0 walks the PMM free lists once a second, so a
+     * link cleared by something other than the allocator is reported
+     * within a second of the write instead of at the next deep
+     * allocation (#1207). Try-lock only; silent unless it finds
+     * something. */
+    if (cpu_id() == 0) {
+        static uint32_t ticks_since_walk;   /* CPU 0 only */
+        if (++ticks_since_walk >= TIMER_HZ) {
+            ticks_since_walk = 0;
+            pmm_verify_tick();
+        }
+    }
+#endif
 }
 
 /*

@@ -131,6 +131,7 @@ static int test_harness_finish(int total_failures);
     do { \
         if (harness_suite_selected(#fn)) { \
             total_failures += fn(); PMM_CHECK_WALK("after " #fn); \
+            (void)pmm_verify_free_lists("after " #fn); \
         } \
     } while (0)
 
@@ -195,6 +196,7 @@ static int harness_run_suites(void)
      * a corrupt list is reported at the first suite boundary after it was
      * damaged (#1207). Nothing without the option. */
     PMM_CHECK_WALK("before the first suite");
+    (void)pmm_verify_free_lists("before the first suite");
 
     /* Run model_mem smoke test FIRST so an init regression (e.g.
      * silent PMM oversubscribe on a tight-RAM platform) surfaces
@@ -210,6 +212,7 @@ static int harness_run_suites(void)
             uart_puts("[INFO] IPC tests passed\n");
         }
         PMM_CHECK_WALK("after test_suite_ipc");
+        (void)pmm_verify_free_lists("after test_suite_ipc");
     }
 
     RUN_SUITE(test_suite_pi_mutex);

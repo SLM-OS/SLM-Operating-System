@@ -22,6 +22,7 @@
 #include "debug.h"
 #include "spinlock.h"
 #include "dtb.h"
+#include "timer.h"
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "camrtc_layout.h"   /* CAMRTC_FRAME_BUFFER_PHYS / _END */
 #endif
@@ -632,6 +633,226 @@ unsigned pmm_check_walk(const char *where)
 #endif /* CONFIG_PMM_CHECK */
 
 /* ==========================================================================
+ * Free-list verification and evidence dumps (#1207), in every build
+ *
+ * On jetson-nano-2 after kexec a listed free block has been found with a
+ * cleared `next` link (the list then ends early and a later allocation
+ * meets a count without a list). The allocator's own operations cannot do
+ * that any more, so the writer is somewhere else; this code exists to
+ * catch the damaged block with its contents. It keeps no table: about 200
+ * bytes of .bss (the per-order "last reported" addresses and three
+ * counters).
+ *
+ * pmm_verify_free_lists(where) walks every list: each element inside the
+ * heap, aligned for its order, marked as the head of a listed block of
+ * that order in block_state[], linked back to the element before it, and
+ * the length equal to free_counts[]. A finding prints the time, `where`,
+ * the list, the element that holds the bad link with its first 64 bytes,
+ * the 64 bytes before it and the page states around it, then every
+ * order's count against its walked length. It does not stop the kernel,
+ * and the same finding is printed once. free_list_pop makes the same
+ * report at the moment it takes a block whose `next` is NULL while more
+ * blocks are counted, before it clears the block's header.
+ * ========================================================================== */
+
+struct pmm_finding {
+    const char *what;
+    unsigned int order;
+    size_t walked;
+    uintptr_t holder;       /* element that holds the bad link; 0: the list head */
+    uintptr_t link;         /* the bad link's value */
+};
+
+static uintptr_t pmm_verify_reported[MAX_ORDER + 1];
+static unsigned  pmm_verify_findings;
+static const char *pmm_verify_where = "boot";   /* last suite boundary */
+
+static uint64_t pmm_now_ms(void)
+{
+    uint64_t freq = timer_get_frequency();
+    return freq >= 1000 ? timer_get_count() / (freq / 1000) : 0;
+}
+
+static bool pmm_block_ptr_ok(uintptr_t a, unsigned int order)
+{
+    return a >= buddy_state.heap_start && a < buddy_state.heap_end &&
+           is_aligned_to_order(a, order);
+}
+
+/* Eight 64-bit words starting at `a`, when the range is inside the heap. */
+static void pmm_dump_words(const char *label, uintptr_t a)
+{
+    if (a < buddy_state.heap_start || a + 64 > buddy_state.heap_end) {
+        uart_printf("  %s 0x%lx: outside the heap, not read\n", label,
+                    (unsigned long)a);
+        return;
+    }
+    const volatile uint64_t *w = (const volatile uint64_t *)a;
+    uart_printf("  %s 0x%lx: %016lx %016lx %016lx %016lx\n", label,
+                (unsigned long)a, (unsigned long)w[0], (unsigned long)w[1],
+                (unsigned long)w[2], (unsigned long)w[3]);
+    uart_printf("  %s 0x%lx: %016lx %016lx %016lx %016lx\n", label,
+                (unsigned long)(a + 32), (unsigned long)w[4],
+                (unsigned long)w[5], (unsigned long)w[6], (unsigned long)w[7]);
+}
+
+/* The block at `a`: its first 64 bytes, the 64 bytes before it, and the
+ * page state of its first page and of the pages on either side. */
+static void pmm_dump_block(uintptr_t a)
+{
+    if (!pmm_block_ptr_ok(a, 0)) {
+        uart_printf("  block 0x%lx: outside the heap or not page-aligned\n",
+                    (unsigned long)a);
+        return;
+    }
+    size_t idx = addr_to_block_index(a);
+    uart_printf("  block 0x%lx: page state 0x%x, page before 0x%x, page after 0x%x\n",
+                (unsigned long)a, (unsigned)block_state[idx],
+                idx ? (unsigned)block_state[idx - 1] : 0xffu,
+                idx + 1 < MAX_BLOCKS ? (unsigned)block_state[idx + 1] : 0xffu);
+    pmm_dump_words("first 64 bytes at", a);
+    pmm_dump_words("64 bytes before, at", a - 64);
+}
+
+/* Walk one list. Returns its length; fills *f and returns early on the
+ * first inconsistency (f->what stays NULL on a clean list). */
+static size_t pmm_walk_list(unsigned int o, struct pmm_finding *f)
+{
+    size_t n = 0;
+    uintptr_t prev = 0;
+    uintptr_t a = (uintptr_t)buddy_state.free_lists[o];
+
+    f->what = NULL;
+    f->order = o;
+    while (a) {
+        if (!pmm_block_ptr_ok(a, o)) {
+            f->what = "link points outside the heap or is misaligned for the order";
+        } else if (block_state[addr_to_block_index(a)] !=
+                   (uint8_t)(BLOCK_FREE_HEAD | o)) {
+            f->what = "element is not marked as a listed free block of this order";
+        } else if ((uintptr_t)((struct free_block *)a)->prev != prev) {
+            f->what = "element's prev link is not the element before it";
+        } else if (n >= buddy_state.free_counts[o]) {
+            f->what = "list is longer than its count";
+        }
+        if (f->what) {
+            f->walked = n;
+            f->holder = prev;
+            f->link = a;
+            return n;
+        }
+        prev = a;
+        a = (uintptr_t)((struct free_block *)a)->next;
+        n++;
+    }
+    if (n != buddy_state.free_counts[o]) {
+        f->what = "list ends early: next link is NULL with blocks still counted";
+        f->walked = n;
+        f->holder = prev;
+        f->link = 0;
+    }
+    return n;
+}
+
+/* Count against walked length for every order that has either. */
+static void pmm_dump_all_orders(void)
+{
+    uart_puts("  order: count / walked length / head\n");
+    for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+        struct pmm_finding f;
+        size_t n = pmm_walk_list(o, &f);
+        if (buddy_state.free_counts[o] || buddy_state.free_lists[o]) {
+            uart_printf("  %5u: %lu / %lu / 0x%lx%s\n", o,
+                        (unsigned long)buddy_state.free_counts[o],
+                        (unsigned long)n,
+                        (unsigned long)(uintptr_t)buddy_state.free_lists[o],
+                        f.what ? "  <-- inconsistent" : "");
+        }
+    }
+}
+
+/* Print one finding. Caller holds pmm_lock. */
+static void pmm_report_finding(const char *where, const struct pmm_finding *f)
+{
+    pmm_verify_findings++;
+    uart_printf("\n[pmm-verify] FINDING %u at %lu ms (%s; last suite boundary: %s)\n",
+                pmm_verify_findings, (unsigned long)pmm_now_ms(), where,
+                pmm_verify_where);
+    uart_printf("  order %u: %s\n", f->order, f->what);
+    uart_printf("  count %lu, walked %lu, head 0x%lx, bad link value 0x%lx, "
+                "held by 0x%lx%s\n",
+                (unsigned long)buddy_state.free_counts[f->order],
+                (unsigned long)f->walked,
+                (unsigned long)(uintptr_t)buddy_state.free_lists[f->order],
+                (unsigned long)f->link, (unsigned long)f->holder,
+                f->holder ? "" : " (the list head)");
+    if (f->holder) {
+        uart_puts("  the element holding the bad link:\n");
+        pmm_dump_block(f->holder);
+    }
+    if (f->link && f->link != f->holder && pmm_block_ptr_ok(f->link, 0)) {
+        uart_puts("  the element the link points at:\n");
+        pmm_dump_block(f->link);
+    }
+    pmm_dump_all_orders();
+    uart_puts("[pmm-verify] end of finding\n");
+}
+
+/* Walk every list and report each order's finding once. Caller holds
+ * pmm_lock. Returns the number of orders with a finding. */
+static unsigned pmm_verify_locked(const char *where)
+{
+    unsigned bad = 0;
+
+    for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+        struct pmm_finding f;
+        (void)pmm_walk_list(o, &f);
+        if (!f.what) {
+            continue;
+        }
+        bad++;
+        /* The same finding again (same holder): already printed. */
+        uintptr_t key = f.holder ? f.holder : (uintptr_t)1;
+        if (pmm_verify_reported[o] != key) {
+            pmm_verify_reported[o] = key;
+            pmm_report_finding(where, &f);
+        }
+    }
+    return bad;
+}
+
+unsigned pmm_verify_free_lists(const char *where)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    unsigned bad = pmm_verify_locked(where);
+    if (where) {
+        pmm_verify_where = where;
+    }
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return bad;
+}
+
+/* From the timer tick: walk the lists if pmm_lock is free. Never waits,
+ * prints only on a new finding. */
+void pmm_verify_tick(void)
+{
+    if (!buddy_state.initialized) {
+        return;
+    }
+    irq_flags_t flags = irq_save();
+    if (spin_trylock(&pmm_lock)) {
+        (void)pmm_verify_locked("timer tick");
+        spin_unlock(&pmm_lock);
+    }
+    irq_restore(flags);
+}
+
+unsigned pmm_verify_finding_count(void)
+{
+    return pmm_verify_findings;
+}
+
+/* ==========================================================================
  * Free List Operations
  *
  * Callers mark every page of the block free (set_block_state) before
@@ -698,6 +919,30 @@ static uintptr_t free_list_pop(unsigned int order)
     PMM_CHK_POP(order);
     if (!block) {
         return PMM_ALLOC_FAIL;
+    }
+
+    /* The head's next link must be another listed block, or NULL on the
+     * last one. Anything else was not written by this file (#1207): report
+     * the block as it is now, before its header is cleared below. A NULL
+     * link with blocks still counted loses the rest of the list; the
+     * allocation that later finds the count without a list panics. A link
+     * that is not a block address cannot be followed at all. */
+    uintptr_t next = (uintptr_t)block->next;
+    if (next ? !pmm_block_ptr_ok(next, order)
+             : buddy_state.free_counts[order] > 1) {
+        struct pmm_finding f = {
+            .what = next ? "head's next link is not a block address"
+                         : "head's next link is NULL with blocks still counted",
+            .order = order, .walked = 0,
+            .holder = (uintptr_t)block, .link = next,
+        };
+        pmm_verify_reported[order] = (uintptr_t)block;
+        pmm_report_finding("free_list_pop", &f);
+        if (next) {
+            panic("PMM: order %u free list head 0x%lx has next link 0x%lx, "
+                  "not a block address (free-list corruption, #1207)", order,
+                  (unsigned long)(uintptr_t)block, (unsigned long)next);
+        }
     }
 
     buddy_state.free_lists[order] = block->next;
@@ -813,6 +1058,13 @@ static uintptr_t buddy_alloc(unsigned int order)
                 /* A count without a list. Splitting from the sentinel
                  * would write block_state[] at a wild index (the #1207
                  * data abort); stop with the cause named instead. */
+                uart_printf("\n[pmm-verify] order %u: count %lu without a list "
+                            "at %lu ms (%u finding(s) reported before this; "
+                            "last suite boundary: %s)\n", o,
+                            (unsigned long)buddy_state.free_counts[o],
+                            (unsigned long)pmm_now_ms(), pmm_verify_findings,
+                            pmm_verify_where);
+                pmm_dump_all_orders();
                 panic("PMM: order %u free list is empty but its count is "
                       "%lu (free-list corruption, #1207)", o,
                       (unsigned long)buddy_state.free_counts[o]);
@@ -1248,6 +1500,31 @@ void pmm_test_add_region(uintptr_t start, uintptr_t end)
     spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
+int pmm_test_verify_cleared_link(unsigned int *first, unsigned int *second,
+                                 unsigned int *restored)
+{
+    int order = -1;
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    for (unsigned int o = 0; o <= MAX_ORDER && order < 0; o++) {
+        if (buddy_state.free_counts[o] >= 2 && buddy_state.free_lists[o] &&
+            buddy_state.free_lists[o]->next) {
+            order = (int)o;
+        }
+    }
+    if (order >= 0) {
+        struct free_block *head = buddy_state.free_lists[order];
+        struct free_block *old = head->next;
+        head->next = NULL;
+        *first = pmm_verify_locked("verifier self-test: link cleared on purpose");
+        *second = pmm_verify_locked("verifier self-test: second walk");
+        head->next = old;
+        pmm_verify_reported[order] = 0;
+        *restored = pmm_verify_locked("verifier self-test: link restored");
+    }
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return order;
+}
+
 int pmm_free_block_order(uintptr_t addr)
 {
     int found = -1;
@@ -1426,6 +1703,7 @@ void pmm_init(void)
     }
 
     PMM_CHK_WALK_INIT();
+    (void)pmm_verify_locked("end of pmm_init");
     buddy_state.initialized = true;
 
     INFO("PMM initialized (buddy allocator)");

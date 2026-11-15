@@ -350,6 +350,40 @@ prints within 1 s. The harness runs only those two tests, because CPUs 1 to
 3 stay halted. With `SLOT_TRACE=ON` as well, the first fault goes through
 `slot_trace_dump()`, which ends the run through semihosting.
 
+### PMM Free-List Verification (every build)
+
+`pmm_verify_free_lists(where)` (`kernel/mm/pmm.c`, #1207) walks every
+free list: each link inside the heap and aligned for its order, each
+element marked in `block_state[]` as the head of a listed block of that
+order, prev links, and the length against `free_counts[]`. It keeps no
+table (about 200 bytes of `.bss`), so it does not move the heap the way
+`PMM_CHECK` does. An inconsistency is printed once and the kernel keeps
+running:
+
+```
+[pmm-verify] FINDING 1 at 13489 ms (after test_suite_x; last suite boundary: after test_suite_w)
+  order 5: list ends early: next link is NULL with blocks still counted
+  count 48, walked 1, head 0x..., bad link value 0x0, held by 0x...
+  the element holding the bad link:
+  block 0x...: page state 0x85, page before 0x1, page after 0x0
+  first 64 bytes at 0x...: <8 words>
+  64 bytes before, at 0x...: <8 words>
+  order: count / walked length / head
+  ...
+[pmm-verify] end of finding
+```
+
+It runs at the end of `pmm_init`; in a test kernel also before the first
+suite, after every suite, and once a second from CPU 0's timer tick on
+ARM64 (`timer_handler`, try-lock only, silent unless it finds something).
+`free_list_pop` makes the same report when it takes a head whose `next`
+is NULL while more blocks are counted, before it clears the block's
+header, and the "count without a list" panic prints every order's count
+against its walked length first. `test_verify_reports_a_cleared_link`
+clears a link under the lock, checks that it is reported exactly once,
+and restores it; the `FINDING` block labelled `verifier self-test` in
+every suite log is that test's.
+
 ### PMM_CHECK (Free-List Assertions)
 
 `make kernel PMM_CHECK=ON` (also `kernel-test` and `test`; CMake
@@ -748,7 +782,7 @@ Validates the GPU platform abstraction layer. Since QEMU has no GPU hardware, th
 
 ### PMM Tests (`kernel/tests/test_pmm.c`)
 
-Comprehensive validation of the buddy allocator physical memory manager. Tests run via Unity framework (58 tests in the suite on Pi 5 and Jetson, 53 in QEMU, which has no NC allocator; the count includes the reserve-carving, DTB-reservation, NC-allocator and user-reserve tests that are not listed below).
+Comprehensive validation of the buddy allocator physical memory manager. Tests run via Unity framework (59 tests in the suite on Pi 5 and Jetson, 54 in QEMU, which has no NC allocator; the count includes the reserve-carving, DTB-reservation, NC-allocator and user-reserve tests that are not listed below).
 
 These tests verify actual buddy allocator behavior, not just page counts. Key tests prove coalescing works by allocating larger blocks after freeing smaller ones.
 
@@ -856,6 +890,7 @@ Pi 5 and after a Jetson UEFI-direct boot until #1207. The
 | test_add_region_leaves_out_partial_last_page | A region whose end is not page-aligned does not list the page holding the end |
 | test_free_does_not_merge_with_split_buddy | A free does not merge with a buddy range that is free page by page but is two smaller blocks |
 | test_free_rejects_range_holding_a_free_page | A free whose range holds an already-free page is rejected |
+| test_verify_reports_a_cleared_link | The free-list verifier reports a cleared next link once, and nothing once it is restored |
 
 On the allocator before #1207's fix, the second test followed by a run of
 single-page allocations reproduces the #1207 halt in QEMU (data abort,

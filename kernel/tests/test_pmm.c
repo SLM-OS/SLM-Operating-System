@@ -1161,6 +1161,39 @@ static void test_free_rejects_range_holding_a_free_page(void)
     TEST_ASSERT_EQUAL_UINT64(free_start, pmm_get_free_pages());
 }
 
+/*
+ * Test: the free-list verifier reports a cleared next link, once, and
+ * reports nothing on consistent lists (#1207). The link of a list head
+ * that has a successor is set to NULL, as found on jetson-nano-2, then put
+ * back. The FINDING block this prints is the test's own.
+ */
+static void test_verify_reports_a_cleared_link(void)
+{
+    TEST_ASSERT_EQUAL_UINT(0, pmm_verify_free_lists("verifier self-test, before"));
+
+    /* Two single pages whose buddies stay allocated: the order-0 list
+     * then holds at least two blocks. */
+    void *pages = pmm_alloc_pages(4);
+    TEST_ASSERT_NOT_NULL(pages);
+    pmm_free_page(pages);
+    pmm_free_page((uint8_t *)pages + 2 * PAGE_SIZE);
+
+    unsigned findings_before = pmm_verify_finding_count();
+    unsigned first = 0, second = 0, restored = 1;
+    int order = pmm_test_verify_cleared_link(&first, &second, &restored);
+    unsigned printed = pmm_verify_finding_count() - findings_before;
+
+    pmm_free_page((uint8_t *)pages + PAGE_SIZE);
+    pmm_free_page((uint8_t *)pages + 3 * PAGE_SIZE);
+
+    TEST_ASSERT_MESSAGE(order >= 0, "no order with two free blocks to test on");
+    TEST_ASSERT_EQUAL_UINT(1, first);
+    TEST_ASSERT_EQUAL_UINT(1, second);
+    TEST_ASSERT_MESSAGE(printed == 1, "the finding was not printed exactly once");
+    TEST_ASSERT_EQUAL_UINT(0, restored);
+    TEST_ASSERT_EQUAL_UINT(0, pmm_verify_free_lists("verifier self-test, after"));
+}
+
 /* ============================================================================
  * NC Memory Allocator Tests (Pi 5 / Jetson only)
  * ============================================================================ */
@@ -1614,6 +1647,7 @@ int test_suite_pmm(void)
     RUN_TEST(test_add_region_leaves_out_partial_last_page);
     RUN_TEST(test_free_does_not_merge_with_split_buddy);
     RUN_TEST(test_free_rejects_range_holding_a_free_page);
+    RUN_TEST(test_verify_reports_a_cleared_link);
 
     /* /memreserve/ carve helper */
     RUN_TEST(test_carve_no_reserves_returns_full_region);

@@ -345,8 +345,18 @@ a block on a free list carries `BLOCK_FREE_HEAD | order`, written only by
   of splitting from the sentinel, and `free_list_remove` panics on a zero
   count.
 
-The `PMM_CHECK=ON` build option adds per-operation assertions and a
-free-list walk after every test suite (`docs/testing.md`, "PMM_CHECK").
+`pmm_verify_free_lists()` walks the lists in any build and prints a
+`[pmm-verify] FINDING` block with the damaged block's contents
+(`docs/testing.md`, "PMM Free-List Verification"); test kernels call it at
+every suite boundary and once a second. The `PMM_CHECK=ON` build option
+adds per-operation assertions (`docs/testing.md`, "PMM_CHECK").
+
+**Open on hardware (#1207).** On jetson-nano-2 after kexec, about one
+suite boot in five still ends with a count without a list: a listed free
+block near the head of a list has a NULL next link although `pmm_init`
+left consistent lists. The merge rule above does not prevent it, so the
+link is cleared by something other than the free-list code; the verifier
+exists to capture that block.
 
 ### Interface
 

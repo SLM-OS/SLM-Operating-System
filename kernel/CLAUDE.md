@@ -817,6 +817,12 @@ is written only by `free_list_add` and cleared by `free_list_remove` /
 whole pages only (start up, end down). A count without a list now panics
 by name. `PMM_CHECK=ON` (debug option, `docs/testing.md`) asserts all of
 this per operation and walks the lists after every test suite.
+`pmm_verify_free_lists()` (every build, no table) walks the lists and
+prints a `[pmm-verify] FINDING` with the damaged block's bytes; test
+kernels call it at each suite boundary and once a second from CPU 0's
+tick. **#1207 is still open on Jetson kexec:** a listed free block's
+next link is found NULL about one suite boot in five, cleared by
+something other than this file.
 
 **Statistics API:**
 ```c

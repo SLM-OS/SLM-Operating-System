@@ -243,6 +243,26 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
 void pmm_dump_free_list(unsigned int order, size_t max_blocks);
 
 /*
+ * Free-list verification (#1207), in every build; no table, no cost
+ * unless called.
+ *
+ * pmm_verify_free_lists() walks every free list (links inside the heap
+ * and aligned, each element marked as a listed block of its order, prev
+ * links, length against the count). Each inconsistency is printed once as
+ * a `[pmm-verify] FINDING` block (time, `where`, the element holding the
+ * bad link with its first 64 bytes and the 64 bytes before it, every
+ * order's count against its walked length); the kernel keeps running.
+ * Returns the number of orders with an inconsistency. `where` is also
+ * remembered as the last suite boundary for later reports.
+ * pmm_verify_tick() is the same walk for a timer tick: it try-locks,
+ * never waits, and prints only on a new finding.
+ * pmm_verify_finding_count() is the number of findings printed so far.
+ */
+unsigned pmm_verify_free_lists(const char *where);
+void pmm_verify_tick(void);
+unsigned pmm_verify_finding_count(void);
+
+/*
  * PMM_CHECK build option (#1207, debug only; see kernel/mm/pmm.c).
  *
  * pmm_check_walk() walks every free list (links, order tags, page state,
