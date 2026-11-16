@@ -2274,7 +2274,9 @@ static void test_task_slot_reuse_under_switch(void)
  *
  * Workers:
  *   pdm_a, pdm_b  unpinned. The policy's placement and work stealing decide
- *                 where each wake-up lands, on any CPU. They are the only
+ *                 where each wake-up lands; no affinity restricts them, but
+ *                 in every capture so far they woke on CPUs other than 0
+ *                 only (see the limits below). They are the only
  *                 workers that can resume after a steal. Whether they change
  *                 CPU at all depends on timing: in some boots every wake-up
  *                 of both lands on one CPU (#1263), so they do not carry the
@@ -2296,6 +2298,17 @@ static void test_task_slot_reuse_under_switch(void)
  * half of #1229), and a wrong flag that another pass through schedule() on
  * the same CPU has already corrected before the task reads it.
  *
+ * Further limits:
+ *   - CPU 0 is not covered. pdm_c excludes it by construction, and in every
+ *     capture taken for #1263 (Pi 5, Jetson UEFI-direct and kexec, QEMU;
+ *     about 25,000 wake-ups of pdm_a and pdm_b) no unpinned wake-up landed
+ *     on CPU 0. The flag check has never run on CPU 0.
+ *   - irq_save() masks IRQ only. In a PI5_FIQ_TIMER build (default off) the
+ *     tick is an FIQ, so the pair read is not atomic there; schedule() uses
+ *     sched_irq_save() for that case and this test does not.
+ *   - With fewer than 4 CPUs the test returns a pass without running (not
+ *     an IGNORE), so a pass on such a machine says nothing.
+ *
  * The run ends after PDM_C_WAKEUPS wake-ups of pdm_c (or 1 s), so the
  * unpinned workers get about that many resumes each per run. The coverage
  * condition is that pdm_c changed CPU; the printed per-worker lines show
@@ -2306,8 +2319,9 @@ static void test_task_slot_reuse_under_switch(void)
  * "migrated" the blocked task with sched_migrate_task(), which for a
  * BLOCKED task only rewrites assigned_cpu; the wake path does not read it.
  * With the per-CPU cache-line layout a woken task came back to its previous
- * CPU far more often (in 4 of 7 hardware boots nearly every wake-up of both
- * workers was on one CPU), failing the old coverage condition with bad=0.
+ * CPU far more often (in 4 of 7 hardware boots 88 to 95% of the wake-ups of
+ * both workers were on one CPU), failing the old coverage condition with
+ * bad=0.
  * The migration loop is gone because it never steered a wake-up.
  * ============================================================================ */
 

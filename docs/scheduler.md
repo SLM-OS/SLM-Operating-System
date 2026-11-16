@@ -1287,10 +1287,19 @@ repeats per boot, plus a test-only print of steals and wake-up CPUs),
 the padded kernel woke both tasks on one CPU for long stretches in 4 of 7
 boots (88 to 95% of all wake-ups on one CPU in those boots; 3 of 3 on
 Jetson UEFI-direct, 1 of 3 on Pi 5, 0 of 1 on Jetson kexec), and the
-unpadded kernel in 0 of 7 (at most 56%). Steals per wake-up did not rise
-by multiples (0.79 to 0.85 against 0.64 to 0.76 on Jetson UEFI-direct;
-two of three padded Pi 5 boots stole less per wake-up than any unpadded
-one). The same one-CPU regime is in the archive on unpadded kernels from
+unpadded kernel in 0 of 7 (at most 56%). Steals per wake-up rose by at
+most about 2 times: on Pi 5, in the one padded boot in the regime, 0.64
+against 0.32 to 0.36 unpadded (1.8 to 2.0 times; the other two padded
+Pi 5 boots, outside the regime, stole less per wake-up than any unpadded
+one, 0.19 and 0.16); on Jetson 1.0 to 1.3 times (UEFI-direct 0.79 to
+0.85 against 0.64 to 0.76, kexec 0.77 against 0.65). The raw steal
+totals per boot differ far more (3.3 to 5.9 times on Jetson UEFI-direct,
+11 to 12 times in that Pi 5 boot), mainly because the boots in the
+regime ran more wake-ups (counts from the `pdm:` and `pdm-diag:` lines
+of the `A-*-pdmdiag-{U,P}-*-x200-boot*.txt` captures,
+`docs/archive/switch-gauntlet/run5-hw/1263-1207/` on the branches
+`gauntlet-5-hw-jetson` and `gauntlet-5-hw-pi5`). The same one-CPU regime
+is in the archive on unpadded kernels from
 before the #1234 change and absent in 822 runs after it, so it is not new
 with the padding; it follows the layout in this pair of kernels. The
 mechanism is inferred (with a line per lock, one CPU reliably wins each
