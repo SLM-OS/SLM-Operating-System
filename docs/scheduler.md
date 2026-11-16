@@ -1279,6 +1279,30 @@ array. The trampoline's indexing runs only on Pi 5 and Jetson
 (`SECONDARY_PREEMPT` is not built for QEMU), where every preemption goes
 through it.
 
+**Observed effect on where a woken task runs.** The padding changes no
+scheduling code, but in this pair of kernels it changed a scheduling
+outcome. In a test with two unpinned tasks that sleep 1 ms in a loop
+(`test_preempt_flag_follows_migrated_task` as it stood at #1266, 200
+repeats per boot, plus a test-only print of steals and wake-up CPUs),
+the padded kernel woke both tasks on one CPU for long stretches in 4 of 7
+boots (88 to 95% of all wake-ups on one CPU in those boots; 3 of 3 on
+Jetson UEFI-direct, 1 of 3 on Pi 5, 0 of 1 on Jetson kexec), and the
+unpadded kernel in 0 of 7 (at most 56%). Steals per wake-up did not rise
+by multiples (0.79 to 0.85 against 0.64 to 0.76 on Jetson UEFI-direct;
+two of three padded Pi 5 boots stole less per wake-up than any unpadded
+one). The same one-CPU regime is in the archive on unpadded kernels from
+before the #1234 change and absent in 822 runs after it, so it is not new
+with the padding; it follows the layout in this pair of kernels. The
+mechanism is inferred (with a line per lock, one CPU reliably wins each
+freshly woken task, by placement or by stealing it); which CPU steals is
+not recorded. `bench stealing --sustain 2500 --assert-shares` passes 20
+of 20 on both kernels on both Jetson paths, but that check measures how
+evenly thieves share tasks stolen from one supplying CPU, not where a
+sleeping task wakes; no latency or throughput measurement compares a boot
+in the one-CPU regime with one outside it. The regression test for #1229
+was reworked for this reason (see the test's header comment for what it
+can and cannot see).
+
 **Audit** (every per-CPU array found on those paths, and the per-CPU
 arrays next to them, at the commit that introduced the rule):
 
