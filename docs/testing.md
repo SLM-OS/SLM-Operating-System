@@ -208,9 +208,19 @@ path under `scripts/hw-suite/`:
 
 | File | Boot path | Tests |
 |------|-----------|-------|
-| `known-failures-jetson-1109.txt` | Jetson, kexec | 14 |
-| `known-failures-jetson-uefi-1109-1231.txt` | Jetson, UEFI-direct | 21 |
-| `known-failures-pi5-1109.txt` | Pi 5 | 18 (3 when the SD card does not probe, #1280) |
+| `known-failures-jetson-1109.txt` | Jetson, kexec | 10 (11 in the `test_slm_uptime_us` window, #1124) |
+| `known-failures-jetson-uefi-1109-1231.txt` | Jetson, UEFI-direct | 15 (16 in that window) |
+| `known-failures-pi5-1109.txt` | Pi 5 | 3, whether or not the SD card probes |
+
+`test_slm_uptime_us` fails only when it runs 36 to 72 minutes after power-on
+(and in every later second half of a 71.6-minute cycle): Lua is built with
+`LUA_32BITS`, so `slm.uptime_us()` wraps (#1124).
+
+Suites that must not touch the board's boot media turn on
+`boot_media_test_set_no_device()` around their tests (`kernel/include/boot_media.h`);
+`boot_media_acquire()` then returns only a device installed with
+`boot_media_test_set_device()`. The blob_autoload suite does this (#1274), so
+its tests use RAM disks and never the real SD card.
 
 Each entry is `<test name><TAB>#<issue>`. A `check:<text><TAB>#<issue>` entry
 names a `[FAIL]` line that a listed test prints as a sub-check; it is not a
