@@ -465,9 +465,79 @@ static void test_chosen_long_bootloader_version_truncated(void)
     TEST_ASSERT_TRUE(out_len > 0);
 }
 
+/* ============================================================================
+ * dtb_get_blob_range (#1244) and leaving the boot blob in place
+ *
+ * dtb_parse() makes its argument the blob every getter reports, so each test
+ * above leaves g_dtb_blob pointing at g_test_dtb. test_suite_dtb saves the
+ * boot blob first and re-parses it last, so suites that run after this one
+ * (and the PMM live-blob tests, wherever they are ordered) see the real blob.
+ * ============================================================================ */
+
+static const void *g_boot_blob;
+
+static void set_test_totalsize(uint32_t total)
+{
+    struct fdt_header *hdr = (struct fdt_header *)g_test_dtb;
+    hdr->totalsize = cpu_to_be32(total);
+}
+
+static void test_blob_range_reports_parsed_blob(void)
+{
+    struct test_dtb_spec spec = {0};
+    uint32_t total = make_test_dtb(g_test_dtb, sizeof(g_test_dtb), &spec);
+    fdt_info_t info = {0};
+    TEST_ASSERT_EQUAL_INT(FDT_OK, dtb_parse(g_test_dtb, &info));
+
+    uint64_t addr = 0, size = 0;
+    TEST_ASSERT_TRUE(dtb_get_blob_range(&addr, &size));
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)g_test_dtb, addr);
+    TEST_ASSERT_EQUAL_UINT64(total, size);
+    TEST_ASSERT_FALSE(dtb_get_blob_range(NULL, &size));
+    TEST_ASSERT_FALSE(dtb_get_blob_range(&addr, NULL));
+}
+
+/* A corrupt totalsize must not become a reservation of up to 4 GB. The
+ * header still validates (the struct block fits inside the claimed size). */
+static void test_blob_range_rejects_oversized_totalsize(void)
+{
+    struct test_dtb_spec spec = {0};
+    uint32_t real_total = make_test_dtb(g_test_dtb, sizeof(g_test_dtb), &spec);
+    fdt_info_t info = {0};
+
+    set_test_totalsize(DTB_MAX_BLOB_SIZE);
+    TEST_ASSERT_EQUAL_INT(FDT_OK, dtb_parse(g_test_dtb, &info));
+    uint64_t addr = 0, size = 0;
+    TEST_ASSERT_TRUE(dtb_get_blob_range(&addr, &size));
+    TEST_ASSERT_EQUAL_UINT64(DTB_MAX_BLOB_SIZE, size);
+
+    set_test_totalsize(DTB_MAX_BLOB_SIZE + 1);
+    TEST_ASSERT_EQUAL_INT(FDT_OK, dtb_parse(g_test_dtb, &info));
+    TEST_ASSERT_FALSE(dtb_get_blob_range(&addr, &size));
+
+    set_test_totalsize(0xFFFFFFFFu);
+    TEST_ASSERT_EQUAL_INT(FDT_OK, dtb_parse(g_test_dtb, &info));
+    TEST_ASSERT_FALSE(dtb_get_blob_range(&addr, &size));
+
+    /* With no boot blob to re-parse (QEMU), the test blob stays current
+     * after this suite: leave it with its real size. */
+    set_test_totalsize(real_total);
+    TEST_ASSERT_TRUE(dtb_get_blob_range(&addr, &size));
+}
+
+static void test_boot_blob_restored(void)
+{
+    if (g_boot_blob == NULL) {
+        TEST_IGNORE_MESSAGE("no boot DTB to restore");
+    }
+    TEST_ASSERT_EQUAL_PTR(g_boot_blob, dtb_get_blob());
+}
+
 int test_suite_dtb(void)
 {
     UnityBegin("DTB Parser Tests");
+
+    g_boot_blob = dtb_get_blob();
 
     RUN_TEST(test_dtb_validate_rejects_null);
     RUN_TEST(test_dtb_validate_rejects_bad_magic);
@@ -486,6 +556,16 @@ int test_suite_dtb(void)
     RUN_TEST(test_chosen_bootloader_metadata);
     RUN_TEST(test_chosen_absent_returns_zero);
     RUN_TEST(test_chosen_long_bootloader_version_truncated);
+
+    RUN_TEST(test_blob_range_reports_parsed_blob);
+    RUN_TEST(test_blob_range_rejects_oversized_totalsize);
+
+    /* Outside RUN_TEST, so it happens even when a test above failed. */
+    if (g_boot_blob != NULL) {
+        fdt_info_t info = {0};
+        (void)dtb_parse(g_boot_blob, &info);
+    }
+    RUN_TEST(test_boot_blob_restored);
 
     return UnityEnd();
 }

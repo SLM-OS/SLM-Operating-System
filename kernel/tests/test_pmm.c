@@ -1342,6 +1342,14 @@ static void test_dtb_reserve_range_page_aligns(void)
     /* Rejected: empty, wrapping, no output. */
     TEST_ASSERT_FALSE(pmm_dtb_reserve_range(0x1000, 0, &r));
     TEST_ASSERT_FALSE(pmm_dtb_reserve_range(~0ULL - 4, 16, &r));
+    /* addr + size fits, but rounding the end up to a page wraps. */
+    TEST_ASSERT_FALSE(pmm_dtb_reserve_range(~0ULL - 0x1000, 0x800, &r));
+    TEST_ASSERT_FALSE(pmm_dtb_reserve_range(~0ULL - 0x7ff, 0x800, &r));
+    TEST_ASSERT_FALSE(pmm_dtb_reserve_range(0, ~0ULL, &r));
+    /* The highest range whose rounded end still fits. */
+    TEST_ASSERT_TRUE(pmm_dtb_reserve_range(~0ULL - 0x1fff, 0x800, &r));
+    TEST_ASSERT_EQUAL_HEX64(~0ULL - 0x1fff, r.addr);
+    TEST_ASSERT_EQUAL_HEX64(0x1000ULL, r.size);
     TEST_ASSERT_FALSE(pmm_dtb_reserve_range(0x1000, 16, NULL));
 }
 
@@ -1358,7 +1366,9 @@ static void test_carve_dtb_straddling_heap_start(void)
     TEST_ASSERT_EQUAL_HEX64(0xa1000000UL, e[0]);
 }
 
-/* The list pmm_init carves holds the live blob's range. */
+/* The list pmm_init carves holds the live blob's range. "Live" is whatever
+ * dtb_parse saw last: test_suite_dtb parses test blobs and then re-parses
+ * the boot blob, so these tests see the real one in any suite order. */
 static void test_collect_reserves_includes_live_dtb(void)
 {
     uint64_t addr, size;
@@ -1368,7 +1378,7 @@ static void test_collect_reserves_includes_live_dtb(void)
     dtb_memreserve_t want;
     TEST_ASSERT_TRUE(pmm_dtb_reserve_range(addr, size, &want));
 
-    static dtb_memreserve_t list[DTB_MAX_MEMRESERVES + 2048 + 1];
+    static dtb_memreserve_t list[DTB_MAX_MEMRESERVES + PMM_MAX_USER_RESERVES + 1];
     int n = pmm_collect_reserves(list, (int)(sizeof(list) / sizeof(list[0])));
     bool found = false;
     for (int i = 0; i < n; i++) {
@@ -1396,15 +1406,24 @@ static void test_no_free_block_overlaps_live_dtb(void)
                                     (uintptr_t)(r.addr + r.size)));
 }
 
-/* The overlap walk sees a free block and stops seeing it once allocated. */
+/* The overlap walk sees a free block and stops seeing it once allocated.
+ * On SMP hardware another CPU can allocate the page again between the free
+ * and the count (it is at the head of the order-0 list), so a single round
+ * that sees 0 after the free is retried; a walk that never sees free blocks
+ * fails every round. */
 static void test_free_overlap_count_sees_a_free_page(void)
 {
-    void *p = pmm_alloc_page();
-    TEST_ASSERT_NOT_NULL(p);
-    uintptr_t a = (uintptr_t)p;
-    TEST_ASSERT_EQUAL_UINT64(0, pmm_free_overlap_count_locked(a, a + PAGE_SIZE));
-    pmm_free_page(p);
-    TEST_ASSERT_TRUE(pmm_free_overlap_count_locked(a, a + PAGE_SIZE) >= 1);
+    bool seen_free = false;
+    for (int round = 0; round < 8 && !seen_free; round++) {
+        void *p = pmm_alloc_page();
+        TEST_ASSERT_NOT_NULL(p);
+        uintptr_t a = (uintptr_t)p;
+        TEST_ASSERT_EQUAL_UINT64(0, pmm_free_overlap_count_locked(a, a + PAGE_SIZE));
+        pmm_free_page(p);
+        seen_free = pmm_free_overlap_count_locked(a, a + PAGE_SIZE) >= 1;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(seen_free,
+                             "overlap walk never saw a just-freed page");
 }
 
 /* ============================================================================
@@ -1594,11 +1613,11 @@ static void test_user_reserve_table_full_rejects(void)
 {
     pmm_user_reserve_reset();
 
-    /* Fill the table — capacity = PMM_MAX_USER_RESERVES (file-static
-     * in pmm.c). The current value is 8192 (#788 Stage 4 bumped from
-     * 16 to fit the weights-pool extents list); the upper-bound here
-     * is 10000 so the loop has headroom over the cap and the
-     * test still works if the cap is bumped further. */
+    /* Fill the table — capacity = PMM_MAX_USER_RESERVES
+     * (pmm_internal.h, 2048 since #788 Stage 4 bumped it from 16 for
+     * the weights-pool extents list); the upper-bound here is 10000 so
+     * the loop has headroom over the cap and the test still works if
+     * the cap is bumped further. */
     int last_ok_count = 0;
     for (int i = 0; i < 10000; i++) {
         int rc = pmm_user_reserve_add(
@@ -1609,7 +1628,7 @@ static void test_user_reserve_table_full_rejects(void)
             break;
         }
     }
-    TEST_ASSERT_TRUE(last_ok_count >= 1);
+    TEST_ASSERT_EQUAL_INT(PMM_MAX_USER_RESERVES, last_ok_count);
 
     /* Once the table is full, further adds reject. */
     TEST_ASSERT_EQUAL_INT(-1, pmm_user_reserve_add(0x900000, 0x1000));

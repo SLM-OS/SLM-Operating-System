@@ -664,7 +664,8 @@ bool dtb_get_blob_range(uint64_t *addr, uint64_t *size)
     }
     const struct fdt_header *hdr = g_dtb_blob;
     uint32_t total = be32_to_cpu(hdr->totalsize);
-    if (be32_to_cpu(hdr->magic) != FDT_MAGIC || total == 0) {
+    if (be32_to_cpu(hdr->magic) != FDT_MAGIC || total == 0 ||
+        total > DTB_MAX_BLOB_SIZE) {
         return false;
     }
     *addr = (uint64_t)(uintptr_t)g_dtb_blob;
