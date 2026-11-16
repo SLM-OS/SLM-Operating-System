@@ -749,6 +749,14 @@ size_t vmm_pmm_split_linear(uintptr_t from, uintptr_t to,
                             vmm_table_alloc_fn alloc_table, size_t *missed);
 size_t vmm_linear_set_present(uintptr_t pa, size_t pages, bool present,
                               bool defer_tlbi);
+/* The split on any root table (vmm_pmm_split_linear passes the kernel's,
+ * kernel/tests/test_pmm_poison.c a private one): L2 tables for 1 GB blocks
+ * come from l2_pool (l2_pool_n tables, *l2_used advanced), L3 tables from
+ * alloc_table. */
+size_t vmm_pmm_split_core(uint64_t *root, uintptr_t from, uintptr_t to,
+                          vmm_table_alloc_fn alloc_table,
+                          uint64_t (*l2_pool)[ENTRIES_PER_TABLE],
+                          size_t l2_pool_n, size_t *l2_used, size_t *missed);
 int vmm_linear_page_state(uintptr_t pa);
 #endif /* CONFIG_PMM_UNMAP */
 #endif /* CONFIG_PMM_POISON */

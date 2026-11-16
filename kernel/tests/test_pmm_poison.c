@@ -329,6 +329,96 @@ static void test_poison_scan_reports_whole_block_extent(void)
 }
 
 #if defined(CONFIG_PMM_UNMAP)
+static void *split_table_page(void)
+{
+    return pmm_alloc_pages(1);
+}
+
+static uint64_t split_root[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+static uint64_t split_pool[1][ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+
+/*
+ * Regression for the first Jetson PMM_UNMAP run (76ec16fd): splitting a
+ * 1 GB L1 block (RAM above 4 GB on Jetson; QEMU's RAM is on L2 tables, so
+ * the real map never takes this path here) took its L2 table from the PMM,
+ * inside the 1 GB it replaced; splitting that table's own 2 MB block then
+ * unmapped the table mid break-before-make. Driven on a private root that
+ * is never installed (its addresses are not accessed), at 0x1_0000_0000:
+ * the L2 table must come from the static pool, and every 2 MB block must
+ * get an L3 table mapping the same pages with the same attributes.
+ */
+static void test_unmap_split_l1_block_above_4gb(void)
+{
+    const uint64_t gb = 0x100000000UL;
+    const uint32_t ram = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
+    for (size_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+        split_root[i] = 0;
+    }
+    /* A 1 GB-aligned PA: the L2 block format is the L1 one. */
+    split_root[L1_INDEX(gb)] = vmm_test_make_block_desc(gb, ram);
+    uint64_t want_attr = split_root[L1_INDEX(gb)] & ~0x0000FFFFC0000000UL &
+                         ~(uint64_t)PTE_TYPE_MASK;
+    size_t used = 0, missed = 0;
+    size_t n = vmm_pmm_split_core(split_root, gb, gb + L1_BLOCK_SIZE,
+                                  split_table_page, split_pool, 1, &used, &missed);
+    TEST_ASSERT_EQUAL_UINT(ENTRIES_PER_TABLE, n);
+    TEST_ASSERT_EQUAL_UINT(0, missed);
+    TEST_ASSERT_EQUAL_UINT(1, used);
+    uint64_t d1 = split_root[L1_INDEX(gb)];
+    TEST_ASSERT_EQUAL_HEX64(PTE_TYPE_TABLE, d1 & PTE_TYPE_MASK);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)split_pool[0], d1 & PTE_ADDR_MASK);
+    size_t bad = 0;
+    for (int e = 0; e < ENTRIES_PER_TABLE; e++) {
+        uint64_t d2 = split_pool[0][e];
+        if ((d2 & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+            bad++;
+            continue;
+        }
+        uint64_t *l3 = (uint64_t *)(uintptr_t)(d2 & PTE_ADDR_MASK);
+        uint64_t blk = gb + (uint64_t)e * BLOCK_SIZE;
+        if (l3[0] != (want_attr | PTE_TYPE_PAGE | blk) ||
+            l3[511] != (want_attr | PTE_TYPE_PAGE | (blk + 511 * PAGE_SIZE))) {
+            bad++;
+        }
+        pmm_free_pages(l3, 1);
+    }
+    TEST_ASSERT_EQUAL_UINT(0, bad);
+
+    /* Pool empty: a second 1 GB block is left alone and counted. */
+    split_root[L1_INDEX(gb) + 1] = vmm_test_make_block_desc(gb + L1_BLOCK_SIZE, ram);
+    n = vmm_pmm_split_core(split_root, gb + L1_BLOCK_SIZE, gb + 2 * L1_BLOCK_SIZE,
+                           split_table_page, split_pool, 1, &used, &missed);
+    TEST_ASSERT_EQUAL_UINT(0, n);
+    TEST_ASSERT_EQUAL_UINT(ENTRIES_PER_TABLE, missed);
+    TEST_ASSERT_EQUAL_HEX64(PTE_TYPE_BLOCK, split_root[L1_INDEX(gb) + 1] & PTE_TYPE_MASK);
+}
+
+/* The other half of that defect: an L2 entry that lives inside the 2 MB
+ * block it maps is never broken (the write after the break would fault);
+ * it is skipped and counted. */
+static void test_unmap_split_skips_entry_inside_its_block(void)
+{
+    /* A 2 MB-aligned block of our own, so not the image's last block. */
+    uint64_t *l2 = pmm_alloc_pages(512);
+    TEST_ASSERT_NOT_NULL(l2);
+    for (size_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+        split_root[i] = 0;
+        l2[i] = 0;
+    }
+    uint64_t self = (uint64_t)(uintptr_t)l2;
+    uint64_t blk = self & ~(uint64_t)(BLOCK_SIZE - 1);
+    l2[L2_INDEX(self)] = vmm_test_make_block_desc(blk, VMM_FLAG_READ | VMM_FLAG_WRITE);
+    split_root[L1_INDEX(self)] = PTE_TYPE_TABLE | (self & PTE_ADDR_MASK);
+    uint64_t before = l2[L2_INDEX(self)];
+    size_t used = 0, missed = 0;
+    size_t n = vmm_pmm_split_core(split_root, blk, blk + BLOCK_SIZE,
+                                  split_table_page, split_pool, 1, &used, &missed);
+    TEST_ASSERT_EQUAL_UINT(0, n);
+    TEST_ASSERT_EQUAL_UINT(1, missed);
+    TEST_ASSERT_EQUAL_HEX64(before, l2[L2_INDEX(self)]);
+    pmm_free_pages(l2, 512);
+}
+
 /* A multi-page block: every page unmapped while free, mapped when
  * allocated, and a free-then-allocate of the same pages round-trips. */
 static void test_unmap_block_round_trip(void)
@@ -357,6 +447,8 @@ int test_suite_pmm_poison(void)
     POISON_TEST(test_poison_scan_reports_whole_block_extent);
 #if defined(CONFIG_PMM_UNMAP)
     POISON_TEST(test_unmap_block_round_trip);
+    POISON_TEST(test_unmap_split_l1_block_above_4gb);
+    POISON_TEST(test_unmap_split_skips_entry_inside_its_block);
 #endif
     return UnityEnd();
 }

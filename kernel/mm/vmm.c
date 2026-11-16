@@ -2397,8 +2397,41 @@ static void vmm_bbm_replace(uint64_t *entry, uint64_t desc)
     __asm__ volatile("dsb ish\nisb" ::: "memory");
 }
 
-size_t vmm_pmm_split_linear(uintptr_t from, uintptr_t to,
-                            vmm_table_alloc_fn alloc_table, size_t *missed)
+/*
+ * The tables an entry is written into must stay mapped while a range is
+ * broken. The first Jetson kexec run (76ec16fd) took the L2 tables for the
+ * 1 GB blocks above 4 GB from the PMM: one landed at 0x13b3a6000, inside
+ * the 1 GB block it replaced, and splitting that table's own 2 MB block
+ * (0x13b200000) unmapped the table between the two writes of
+ * break-before-make: translation fault on the second write. L2 tables for
+ * L1 splits therefore come from a static pool in the image (8 x 4 KB,
+ * PMM_UNMAP builds only; Jetson needs 5, Pi 5 at most 3), and a split is
+ * skipped, and counted as missed, whenever the entry it would write lies
+ * inside the range it breaks. L3 tables can come from the PMM: they are
+ * written before their entry is installed, and the walker reads them by
+ * physical address.
+ */
+#define VMM_PMM_L2_POOL 8
+static uint64_t l2_split_pool[VMM_PMM_L2_POOL][ENTRIES_PER_TABLE]
+    __attribute__((aligned(PAGE_SIZE)));
+
+/* The physical address of a table entry reached through a kernel VA or
+ * the identity map. */
+static uint64_t vmm_entry_pa(const uint64_t *entry)
+{
+    return KVA_TO_PA((uint64_t)(uintptr_t)entry);
+}
+
+static bool vmm_entry_in(const uint64_t *entry, uint64_t base, uint64_t size)
+{
+    uint64_t pa = vmm_entry_pa(entry);
+    return pa >= base && pa < base + size;
+}
+
+size_t vmm_pmm_split_core(uint64_t *root, uintptr_t from, uintptr_t to,
+                          vmm_table_alloc_fn alloc_table,
+                          uint64_t (*l2_pool)[ENTRIES_PER_TABLE],
+                          size_t l2_pool_n, size_t *l2_used, size_t *missed)
 {
     size_t l3_tables = 0;
     *missed = 0;
@@ -2409,37 +2442,42 @@ size_t vmm_pmm_split_linear(uintptr_t from, uintptr_t to,
     }
     for (uint64_t i = L1_INDEX(from); i <= L1_INDEX(to - 1); i++) {
         uint64_t gb = i << L1_BLOCK_SHIFT;
-        uint64_t d = l1_table[i];
+        uint64_t d = root[i];
 
-        /* A 1 GB block wholly in range: an L2 table of 2 MB blocks first. */
+        /* A 1 GB block wholly in range: an L2 table of 2 MB blocks first,
+         * from the static pool. */
         if (vmm_is_wb_block(d)) {
             if (gb < from || gb + L1_BLOCK_SIZE > to ||
-                vmm_range_has_image(gb, L1_BLOCK_SIZE)) {
+                vmm_range_has_image(gb, L1_BLOCK_SIZE) ||
+                vmm_entry_in(&root[i], gb, L1_BLOCK_SIZE)) {
                 continue;
             }
-            uint64_t *nl2 = vmm_new_table(alloc_table);
-            if (nl2 == NULL) {
+            if (*l2_used >= l2_pool_n) {
                 *missed += ENTRIES_PER_TABLE;
                 continue;
             }
+            uint64_t *nl2 = l2_pool[(*l2_used)++];
             uint64_t attr = d & ~VMM_L1_BLOCK_OA_MASK;
             for (int e = 0; e < ENTRIES_PER_TABLE; e++) {
                 nl2[e] = attr | (gb + (uint64_t)e * BLOCK_SIZE);
             }
             cache_clean_range(nl2, TABLE_SIZE);
-            vmm_bbm_replace(&l1_table[i],
-                            make_table_desc((uint64_t)(uintptr_t)nl2));
-            d = l1_table[i];
+            vmm_bbm_replace(&root[i], make_table_desc(vmm_entry_pa(nl2)));
+            d = root[i];
         }
         if ((d & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
             continue;
         }
-        uint64_t *l2 = get_l2_table(gb);
+        uint64_t *l2 = (uint64_t *)PA_TO_KVA(d & PTE_ADDR_MASK);
         for (int e = 0; e < ENTRIES_PER_TABLE; e++) {
             uint64_t blk = gb + (uint64_t)e * BLOCK_SIZE;
             uint64_t bd = l2[e];
             if (blk < from || blk + BLOCK_SIZE > to || !vmm_is_wb_block(bd) ||
                 vmm_range_has_image(blk, BLOCK_SIZE)) {
+                continue;
+            }
+            if (vmm_entry_in(&l2[e], blk, BLOCK_SIZE)) {
+                (*missed)++;    /* the entry's own table is in the block */
                 continue;
             }
             uint64_t *l3 = vmm_new_table(alloc_table);
@@ -2458,6 +2496,14 @@ size_t vmm_pmm_split_linear(uintptr_t from, uintptr_t to,
         }
     }
     return l3_tables;
+}
+
+size_t vmm_pmm_split_linear(uintptr_t from, uintptr_t to,
+                            vmm_table_alloc_fn alloc_table, size_t *missed)
+{
+    static size_t l2_used;
+    return vmm_pmm_split_core(l1_table, from, to, alloc_table, l2_split_pool,
+                              VMM_PMM_L2_POOL, &l2_used, missed);
 }
 
 /*

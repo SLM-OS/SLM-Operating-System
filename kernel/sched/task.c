@@ -1141,6 +1141,17 @@ static int task_canary_check_all_impl(bool unlocked)
     } else {
         uart_printf("[canary] Task stack inventory:\n");
     }
+    /* A fault before task_table_init (e.g. in pmm_init) has no table:
+     * reading task_table[0] there faulted inside the fault dump, which
+     * then looped (#1207, Jetson PMM_UNMAP run 76ec16fd). */
+    if (task_table == NULL) {
+        if (unlocked) {
+            uart_printf_unlocked("  (no task table yet)\n");
+        } else {
+            uart_printf("  (no task table yet)\n");
+        }
+        return 0;
+    }
     for (uint32_t i = 0; i < MAX_TASKS; i++) {
         struct task *t = &task_table[i];
         if (t->id == 0) continue;
