@@ -325,6 +325,11 @@ struct pmm_poison_report {
 };
 
 unsigned pmm_poison_scan(const char *where, bool full);
+/* Arming, part 2: poison or snapshot (and unmap) every page that was free
+ * when pmm_init armed part 1. Call once all CPUs are up; the test harness
+ * calls it before the first suite. Nothing is checked on a page before it
+ * is armed. */
+void pmm_poison_arm_rest(void);
 void pmm_poison_get_stats(struct pmm_poison_stats *out);
 void pmm_poison_last_report(struct pmm_poison_report *out);
 void pmm_poison_describe_fault(uint64_t far);

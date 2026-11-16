@@ -231,6 +231,9 @@ static int harness_run_suites(void)
      * a corrupt list is reported at the first suite boundary after it was
      * damaged (#1207). Nothing without the option. */
     PMM_CHECK_WALK("before the first suite");
+#if defined(CONFIG_PMM_POISON)
+    pmm_poison_arm_rest();      /* arm the pages free at boot, all CPUs up */
+#endif
 #if defined(CONFIG_PMM_UNMAP_SELFTEST)
     pmm_unmap_selftest();       /* faults on purpose and halts (#1207) */
 #endif
@@ -305,8 +308,10 @@ static int harness_run_suites(void)
     RUN_SUITE(test_suite_ga10b_cold_pipelines); /* #1092 sched/eviction */
 #if defined(CONFIG_PMM_POISON)
     /* test_suite_oplib_gpu_as attaches the operator library to the
-     * inherited channel's VM just before test_suite_gpu: the same
-     * per-test scans, after each of its tests (#1207). */
+     * inherited channel's VM just before test_suite_gpu: a full scan
+     * before it and the same per-test scans after each of its tests
+     * (#1207). */
+    (void)pmm_poison_scan("before test_suite_oplib_gpu_as", true);
     unity_set_after_test_hook(harness_poison_after_test);
     RUN_SUITE(test_suite_oplib_gpu_as);   /* #1092 cold-channel oplib */
     unity_set_after_test_hook(NULL);
@@ -318,7 +323,7 @@ static int harness_run_suites(void)
      * test_suite_oplib_gpu_as and after test_suite_gpu. Full scans before
      * and after the suite, and a scan after each of its tests, named by
      * the test (harness_poison_after_test). */
-    (void)pmm_poison_scan("before test_suite_gpu", true);
+    (void)pmm_poison_scan("after test_suite_oplib_gpu_as, before test_suite_gpu", true);
     unity_set_after_test_hook(harness_poison_after_test);
     RUN_SUITE(test_suite_gpu);
     unity_set_after_test_hook(NULL);
