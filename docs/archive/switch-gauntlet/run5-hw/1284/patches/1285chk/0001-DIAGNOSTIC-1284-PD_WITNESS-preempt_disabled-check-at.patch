@@ -1,0 +1,288 @@
+From 1facaf65552a789e500495bddb84dfede45985f5 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Mon, 16 Nov 2026 00:43:29 -0800
+Subject: [PATCH 1/2] DIAGNOSTIC (#1284): PD_WITNESS, preempt_disabled[] check
+ at schedule()'s resume point
+
+Build option PD_WITNESS, default OFF; off, only empty macros remain and
+.text is unchanged. On, schedule() checks, on the path where it switched
+and the incoming task resumes after switch_to():
+
+  W1 (resume, before the clear): preempt_disabled[cpu_id()] == 1, read with
+     local interrupts masked. The CPU that switched the task in set its
+     own flag before its switch window and nothing clears it before the
+     task does.
+  W2 (exit, after preempt_disabled[now_cpu] = 0): preempt_disabled[cpu_id()]
+     == 0, CPU id re-read independently, interrupts masked. The reverted
+     #1229 line (clearing the pre-switch CPU's flag) violates this.
+
+Violations are counted per CPU and kind; the first three print the CPU,
+the task and both values. The test harness prints the totals after a
+run, and after any filtered pass in which the count changed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014Q9as2YTVvrZhTRC8ifcq5
+(cherry picked from commit 47c0cf285d29199e2b958137db86024951bba856)
+---
+ CMakeLists.txt              |  8 ++++
+ Makefile                    |  1 +
+ kernel/include/pd_witness.h | 61 ++++++++++++++++++++++++++++++
+ kernel/sched/sched.c        | 75 +++++++++++++++++++++++++++++++++++++
+ kernel/tests/test_harness.c | 18 +++++++++
+ 5 files changed, 163 insertions(+)
+ create mode 100644 kernel/include/pd_witness.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 06506f27..8fc3c1d0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -324,6 +324,14 @@ option(SWO_DIAG "R3 NOT-FINISHED scheduler state dump (#1262, debug only)" OFF)
+ if(SWO_DIAG)
+     add_compile_definitions(CONFIG_SWO_DIAG=1)
+ endif()
++# PD_WITNESS (#1284): check preempt_disabled[] at schedule()'s resume point
++# (1 before the clear, 0 after it, on the CPU the task runs on), count
++# violations per CPU and print the first three; totals after a test run.
++# Debug only; off, the kernel's .text is unchanged. See pd_witness.h.
++option(PD_WITNESS "preempt_disabled witness at schedule() resume (#1284, debug only)" OFF)
++if(PD_WITNESS)
++    add_compile_definitions(CONFIG_PD_WITNESS=1)
++endif()
+ option(SWITCH_WINDOW_TEST "Hold the switch window open 25 ms for the R1 test (#1234, test only)" OFF)
+ if(SWITCH_WINDOW_TEST)
+     add_compile_definitions(CONFIG_SWITCH_WINDOW_TEST=1)
+diff --git a/Makefile b/Makefile
+index e7e0d01c..f26eaaac 100644
+--- a/Makefile
++++ b/Makefile
+@@ -303,6 +303,7 @@ KERNEL_COMMON_CMAKE_ARGS = \
+ 	$(if $(filter ON,$(SWITCH_CHECK)),-DSWITCH_CHECK=ON) \
+ 	$(if $(filter ON,$(SWITCH_WINDOW_TEST)),-DSWITCH_WINDOW_TEST=ON) \
+ 	$(if $(filter ON,$(SWO_DIAG)),-DSWO_DIAG=ON) \
++	-DPD_WITNESS=$(if $(filter ON,$(PD_WITNESS)),ON,OFF) \
+ 	$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
+ 	$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
+ 	-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
+diff --git a/kernel/include/pd_witness.h b/kernel/include/pd_witness.h
+new file mode 100644
+index 00000000..e0cc959c
+--- /dev/null
++++ b/kernel/include/pd_witness.h
+@@ -0,0 +1,61 @@
++/*
++ * pd_witness.h - preempt_disabled[] witness at the resume point of
++ * schedule() (#1284). Build option PD_WITNESS, default OFF; with it off
++ * this header defines only empty macros and the kernel's .text is
++ * unchanged.
++ *
++ * What the design says (ADR 0008, #1229's fix in schedule()):
++ *
++ *  W1, "resume": when switch_to() returns on the incoming task, the CPU
++ *    the task is now running on is the CPU that switched it in. That CPU
++ *    set preempt_disabled[cpu] = 1 before its switch window (schedule(),
++ *    or scheduler_start() for the first switch), with its CPU id pinned
++ *    under masked interrupts (#1242), and nothing clears it before this
++ *    task clears it: ticks skip schedule() and the trampoline does not
++ *    arm while it is 1, so the task cannot move. So, read with local
++ *    interrupts masked, preempt_disabled[cpu_id()] must be 1 here. A 0
++ *    means another CPU cleared this CPU's flag inside its window (the
++ *    #1229 defect class) or the flag was set on a different CPU from the
++ *    one that switched the task in.
++ *
++ *  W2, "exit": right after schedule() clears preempt_disabled[now_cpu]
++ *    (now_cpu re-read with cpu_id(), #1229), the flag of the CPU the task
++ *    is running on, read with local interrupts masked and the CPU id
++ *    re-read independently, must be 0. Only this CPU writes its own flag
++ *    on these paths; a tick between the clear and the masked read runs
++ *    the trampoline to completion, which leaves 0 on the CPU it returns
++ *    on. A 1 means the clear went to another CPU's flag (the reverted
++ *    #1229 line does exactly that), or another CPU set this CPU's flag.
++ *
++ * W1 and W2 run only on the path where schedule() switched and is
++ * resuming, not on its early return (no switch) and not on a new task's
++ * first run (task_entry_trampoline clears the flag there).
++ *
++ * Violations are counted per CPU and kind; the first three are printed
++ * at once with the CPU, the task, the expected and the observed value.
++ * pd_witness_report() prints the totals (the test harness calls it after
++ * a filtered run).
++ */
++#ifndef PD_WITNESS_H
++#define PD_WITNESS_H
++
++#include <stdint.h>
++
++#if defined(CONFIG_PD_WITNESS)
++struct pd_witness_totals {
++    uint64_t checks;            /* W1 checks, all CPUs (W2 runs as often) */
++    uint64_t viol_resume;       /* W1 violations, all CPUs */
++    uint64_t viol_exit;         /* W2 violations, all CPUs */
++};
++void pd_witness_resume(void);
++void pd_witness_exit(void);
++void pd_witness_totals(struct pd_witness_totals *out);
++void pd_witness_report(const char *tag);
++#define PD_WITNESS_RESUME()     pd_witness_resume()
++#define PD_WITNESS_EXIT()       pd_witness_exit()
++#else
++#define PD_WITNESS_RESUME()     do { } while (0)
++#define PD_WITNESS_EXIT()       do { } while (0)
++#endif
++
++#endif /* PD_WITNESS_H */
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index bda5133b..d4c882ba 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -39,6 +39,7 @@
+ #include "slot_trace.h"
+ #include "switch_check.h"
+ #include "percpu_layout.h"
++#include "pd_witness.h"
+ /* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
+  * are referenced from schedule() in every configuration (they are
+  * empty functions without work stealing). */
+@@ -216,6 +217,78 @@ static inline irq_flags_t sched_irq_save(void)
+ #endif
+ }
+ 
++#if defined(CONFIG_PD_WITNESS)
++/* preempt_disabled[] witness at schedule()'s resume point (#1284); the
++ * invariants are stated in pd_witness.h. */
++static volatile uint64_t pdw_checks[MAX_CPUS];
++static volatile uint32_t pdw_viol[2][MAX_CPUS];     /* [0] W1 resume, [1] W2 exit */
++static volatile uint32_t pdw_printed;
++
++static void pdw_record(uint32_t kind, uint32_t cpu, int expected, int observed)
++{
++    __atomic_fetch_add(&pdw_viol[kind][cpu], 1, __ATOMIC_RELAXED);
++    if (__atomic_fetch_add(&pdw_printed, 1, __ATOMIC_RELAXED) < 3) {
++        struct task *t = task_current();
++        uart_printf("\n[PDW] violation %s: cpu=%u task id=%u name='%s' "
++                    "preempt_disabled expected=%d observed=%d\n",
++                    kind == 0 ? "resume" : "exit", cpu,
++                    t ? (unsigned int)t->id : 0u, t ? t->name : "(none)",
++                    expected, observed);
++    }
++}
++
++void pd_witness_resume(void)
++{
++    irq_flags_t f = sched_irq_save();
++    uint32_t cpu = cpu_id();
++    int v = preempt_disabled[cpu].v;
++    irq_restore(f);
++    pdw_checks[cpu]++;                  /* only this CPU writes its slot */
++    if (v != 1) {
++        pdw_record(0, cpu, 1, v);
++    }
++}
++
++void pd_witness_exit(void)
++{
++    irq_flags_t f = sched_irq_save();
++    uint32_t cpu = cpu_id();
++    int v = preempt_disabled[cpu].v;
++    irq_restore(f);
++    if (v != 0) {
++        pdw_record(1, cpu, 0, v);
++    }
++}
++
++void pd_witness_totals(struct pd_witness_totals *out)
++{
++    out->checks = 0;
++    out->viol_resume = 0;
++    out->viol_exit = 0;
++    for (uint32_t c = 0; c < MAX_CPUS; c++) {
++        out->checks += pdw_checks[c];
++        out->viol_resume += pdw_viol[0][c];
++        out->viol_exit += pdw_viol[1][c];
++    }
++}
++
++void pd_witness_report(const char *tag)
++{
++    struct pd_witness_totals t;
++    pd_witness_totals(&t);
++    uart_printf("[PDW] %s: checks=%lu violations resume=%lu exit=%lu\n",
++                tag, (unsigned long)t.checks, (unsigned long)t.viol_resume,
++                (unsigned long)t.viol_exit);
++    for (uint32_t c = 0; c < MAX_CPUS; c++) {
++        if (pdw_checks[c] == 0 && pdw_viol[0][c] == 0 && pdw_viol[1][c] == 0) {
++            continue;
++        }
++        uart_printf("[PDW]   cpu%u: checks=%lu resume=%u exit=%u\n", c,
++                    (unsigned long)pdw_checks[c], pdw_viol[0][c], pdw_viol[1][c]);
++    }
++}
++#endif /* CONFIG_PD_WITNESS */
++
+ /*
+  * Per-CPU run queue access. The run queues live in cacheable BSS
+  * (sched.cpu_fallback) on every platform.
+@@ -2910,6 +2983,7 @@ relock:
+                next->context.x19);
+     struct task *prev = switch_to(current, next);
+     sched_finish_switch(prev);
++    PD_WITNESS_RESUME();            /* #1284; empty unless PD_WITNESS */
+ 
+ #if !defined(PLATFORM_X86_64)
+     SLOT_TRACE_ONLY({
+@@ -2931,6 +3005,7 @@ relock:
+     uint32_t now_cpu = cpu_id();
+     SLOT_TRACE(ST_PD_CLEAR, task_current(), now_cpu, now_cpu, this_cpu);
+     preempt_disabled[now_cpu].v = 0;
++    PD_WITNESS_EXIT();              /* #1284; empty unless PD_WITNESS */
+     SWO_PHASE(now_cpu, SWO_PH_NONE, 0);
+     steal_pdwin_clear(now_cpu);                     /* #1216 trace */
+ #if defined(SECONDARY_PREEMPT)
+diff --git a/kernel/tests/test_harness.c b/kernel/tests/test_harness.c
+index fa1cf5ce..4320fdb2 100644
+--- a/kernel/tests/test_harness.c
++++ b/kernel/tests/test_harness.c
+@@ -15,6 +15,7 @@
+ #include "../include/dtb.h"
+ #endif
+ #include "test_filter.h"
++#include "../include/pd_witness.h"
+ #include <stdbool.h>
+ 
+ /* ============================================================================
+@@ -520,9 +521,22 @@ static int harness_run_filtered(void)
+         }
+     }
+ 
++#if defined(CONFIG_PD_WITNESS)
++    uint64_t pdw_seen = 0;
++#endif
+     for (uint32_t pass = 1; pass <= f->repeat; pass++) {
+         g_test_filter_pass = pass;
+         total_failures += harness_run_suites();
++#if defined(CONFIG_PD_WITNESS)
++        /* #1284: name the pass in which the witness count changed. */
++        struct pd_witness_totals pdw;
++        pd_witness_totals(&pdw);
++        if (pdw.viol_resume + pdw.viol_exit != pdw_seen) {
++            pdw_seen = pdw.viol_resume + pdw.viol_exit;
++            uart_printf("[PDW] count changed in pass %u\n", pass);
++            pd_witness_report("after pass");
++        }
++#endif
+     }
+ 
+     uint64_t freq = timer_get_frequency();
+@@ -622,6 +636,10 @@ void test_harness_register_shell(void)
+ 
+ static int test_harness_finish(int total_failures)
+ {
++#if defined(CONFIG_PD_WITNESS)
++    uart_puts("\n");
++    pd_witness_report("end of run");    /* #1284 */
++#endif
+     /* Final summary */
+     uart_puts("\n");
+     uart_puts("========================================\n");
+-- 
+2.43.0
+

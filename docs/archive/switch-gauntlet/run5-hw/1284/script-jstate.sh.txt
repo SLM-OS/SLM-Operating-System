@@ -1,0 +1,19 @@
+#!/bin/bash
+# jstate.sh <title...> : read-only state of jetson-nano-2 (SD Linux): boot entry,
+# ESP SLMOS.efi hash from a fresh read-only mount, fsck.vfat -n, /root ELFs, /tmp.
+echo "# jetson-nano-2 state: $* ($(date -u +%FT%TZ))"
+ssh -o BatchMode=yes -o ConnectTimeout=8 root@192.168.4.5 'bash -s' <<'REMOTE'
+echo "boot_id $(cat /proc/sys/kernel/random/boot_id) uptime $(cut -d" " -f1 /proc/uptime)"
+efibootmgr | grep -iE "BootCurrent|BootNext|Boot000E|BootOrder"
+efibootmgr | grep -qi bootnext || echo "no BootNext"
+dev=/dev/disk/by-partlabel/SLMOS-ESP; mnt=$(mktemp -d)
+mount -o ro $dev $mnt && { sha256sum $mnt/EFI/SLMOS/SLMOS.efi; ls -la $mnt/EFI/SLMOS/; umount $mnt; }
+rmdir $mnt
+fsck.vfat -n $dev | tail -2
+sha256sum /root/slmos.elf
+echo "/root *.elf* count: $(ls /root/*.elf* 2>/dev/null | wc -l)"
+ls -la /root/ | grep -i "elf"
+echo "/root files named 1284: $(ls /root | grep -c 1284)"
+echo "/tmp slmos files: $(ls /tmp | grep -i slmos | tr '\n' ' ')"
+df -h /root | tail -1
+REMOTE

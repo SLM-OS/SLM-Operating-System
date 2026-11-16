@@ -1,0 +1,32 @@
+#!/bin/bash
+# collect.sh : copy this session's QEMU logs, image records, scripts and Jetson state records
+# into the evidence directory. Session #1284.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/f616ae46-0930-4d47-ae76-ce0c02faf621/scratchpad/a
+P=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/f616ae46-0930-4d47-ae76-ce0c02faf621/scratchpad
+E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt/evj/docs/archive/switch-gauntlet/run5-hw/1284
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt
+cp $S/images.txt $E/images.txt
+cp $S/jetson-pre-state.txt $S/jetson-post-state.txt $E/
+for f in trigger stage-esp jstate jrestore save saveone saveone-pi5 pdmsum waitcap bld ci collect; do
+  cp $S/$f.sh $E/script-$f.sh.txt
+done
+{ echo "# QEMU ARM64 make test, PD_WITNESS=ON, at diag/1284-witness 47c0cf28 (ae1399ba + witness; built from the working tree before the commit, identical content, so the banner says ae1399ba-dirty). make test PD_WITNESS=ON BUILD_DIR=build/kt-pdw-on. Make output, then the serial log (build/kt-pdw-on/test-output.log)."
+  cat $P/qemu-pdw-on.log; echo "# ---- serial ----"; cat $W/fix/build/kt-pdw-on/test-output.log
+} > $E/Q-qemu-arm-make-test-witness-ON-47c0cf28.txt
+{ echo "# QEMU ARM64 make test, PD_WITNESS off (default), at diag/1284-B 775563b0 (the fixed test + witness commit). make test BUILD_DIR=build/kt-off. Make output, then the serial log."
+  cat $P/qemu-pdw-off.log; echo "# ---- serial ----"; cat $W/b/build/kt-off/test-output.log
+} > $E/Q-qemu-arm-make-test-witness-OFF-775563b0.txt
+{ echo "# QEMU ARM64 mutation run: 47c0cf28 with schedule()'s post-switch clear reverted to the pre-#1229 line (uncommitted, banner 47c0cf28-dirty; reverted after the run). Diff:"
+  echo "#   -    preempt_disabled[now_cpu] = 0;"
+  echo "#   +    preempt_disabled[this_cpu] = 0;     /* MUTATION: #1229 reverted */"
+  echo "# make test PD_WITNESS=ON WORK_STEALING=ON TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=20 BUILD_DIR=build/kt-mut"
+  cat $P/qemu-mut.log; echo "# ---- serial ----"; cat $W/fix/build/kt-mut/test-output.log
+} > $E/Q-qemu-mutation-1229-reverted-witness-ON-x20.txt
+{ echo "# .text section size (objdump -h), QEMU ARM64 test kernels:"
+  for f in $W/ft/build/kt-base/kernel-test/slmos.elf $W/b/build/kt-off/kernel-test/slmos.elf $W/fix/build/kt-pdw-on/kernel-test/slmos.elf; do
+    echo "$(aarch64-none-elf-objdump -h $f | awk '$2==".text"{print $3}') $f"
+  done
+  echo "# kt-base = cd1557fe (fixed test, no witness commit); kt-off = 775563b0 (cd1557fe + witness commit, PD_WITNESS off); kt-pdw-on = 47c0cf28 tree, PD_WITNESS=ON."
+  echo "# .text bytes compared base vs off (cmp -l count of differing bytes): $(cmp -l $P/text-base.bin $P/text-off.bin | wc -l); sizes equal, contents differ by line-number and layout shifts (not analysed further)."
+} > $E/Q-text-size-witness-off.txt
+ls $E | wc -l

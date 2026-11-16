@@ -1,0 +1,9 @@
+#!/bin/bash
+# waitcap.sh <labctl dir> <trigger log or -> : print the trigger log, wait (<= 540 s) for this
+# session's boot_test capture to reach the shell prompt, print its key lines.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/f616ae46-0930-4d47-ae76-ce0c02faf621/scratchpad/a
+F=/var/lib/labctl/output/$1/run_01.txt
+[ "$2" != - ] && cat $S/$2
+timeout 540 bash -c "until [ -f $F ] && grep -aq 'slmos>' $F; do sleep 10; done"
+echo "wait rc=$?"
+grep -a -E 'PDW\] (end|violation|count)|FILTER\] \[|SLM-OS v[0-9]|bad=[1-9]|KERNEL PANIC|PAGE FAULT' $F | head -20

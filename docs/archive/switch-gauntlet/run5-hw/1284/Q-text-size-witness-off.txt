@@ -1,0 +1,6 @@
+# .text section size (objdump -h), QEMU ARM64 test kernels:
+0022c658 /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt/ft/build/kt-base/kernel-test/slmos.elf
+0022c658 /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt/b/build/kt-off/kernel-test/slmos.elf
+0022c938 /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt/fix/build/kt-pdw-on/kernel-test/slmos.elf
+# kt-base = cd1557fe (fixed test, no witness commit); kt-off = 775563b0 (cd1557fe + witness commit, PD_WITNESS off); kt-pdw-on = 47c0cf28 tree, PD_WITNESS=ON.
+# .text bytes compared base vs off (cmp -l count of differing bytes): 43452; sizes equal, contents differ by line-number and layout shifts (not analysed further).

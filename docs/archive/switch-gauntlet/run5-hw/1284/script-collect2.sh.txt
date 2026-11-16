@@ -1,0 +1,13 @@
+#!/bin/bash
+# collect2.sh : save the fixed-test mutation run (session #1284).
+P=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/f616ae46-0930-4d47-ae76-ce0c02faf621/scratchpad
+E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt/evj/docs/archive/switch-gauntlet/run5-hw/1284
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt
+{ echo "# QEMU ARM64 mutation run with the FIXED test: diag/1284-B 775563b0 (cd1557fe + witness) with schedule()'s post-switch clear reverted to the pre-#1229 line (uncommitted, banner 775563b0-dirty; reverted after the run). Diff:"
+  echo "#   -    preempt_disabled[now_cpu] = 0;"
+  echo "#   +    preempt_disabled[this_cpu] = 0;     /* MUTATION: #1229 reverted */"
+  echo "# make test PD_WITNESS=ON WORK_STEALING=ON TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=20 BUILD_DIR=build/kt-mutB"
+  cat $P/qemu-mutB.log; echo "# ---- serial ----"; cat $W/b/build/kt-mutB/test-output.log
+} > $E/Q-qemu-mutation-1229-reverted-fixed-test-witness-ON-x20.txt
+cp $P/a/collect2.sh $E/script-collect2.sh.txt
+grep -a -c 'bad=[1-9]' $E/Q-qemu-mutation-1229-reverted-fixed-test-witness-ON-x20.txt

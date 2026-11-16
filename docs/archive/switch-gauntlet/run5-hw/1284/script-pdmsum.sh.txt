@@ -1,0 +1,23 @@
+#!/bin/bash
+# pdmsum.sh <capture file>... : per-file counts for #1284.
+#   iters   = number of "pdm:" lines (one per iteration)
+#   badit   = iterations whose pdm line has bad != 0;  badsum = sum of bad=
+#   moved   = sum of moved=;  filter = the [FILTER] summary line's runs/passed/failed
+#   pdw     = the "[PDW] end of run" line; pdwv = number of "[PDW] violation" lines
+for f in "$@"; do
+  awk -v F="$(basename "$f")" '
+    /^# ---- serial ----/ {body=1; next}
+    !body {next}
+    /pdm: migrations=/ {
+      it++
+      if (match($0, /bad=[0-9]+/)) { b = substr($0, RSTART+4, RLENGTH-4) + 0; bs += b; if (b) bi++ }
+      if (match($0, /moved=[0-9]+/)) { mv += substr($0, RSTART+6, RLENGTH-6) }
+    }
+    /\[FILTER\] \[(PASS|FAIL)\] test_preempt/ { if (match($0, /runs=[0-9]+ passed=[0-9]+ failed=[0-9]+/)) fl = substr($0, RSTART, RLENGTH) }
+    /\[PDW\] end of run/ { sub(/.*\[PDW\] end of run: /, ""); pdw = $0 }
+    /\[PDW\] violation/ { pv++ }
+    END {
+      printf "%s | iters=%d badit=%d badsum=%d moved=%d | %s | pdw: %s | pdw-violation-lines=%d\n",
+             F, it, bi, bs, mv, (fl ? fl : "NO FILTER LINE"), (pdw ? pdw : "NO PDW END LINE"), pv
+    }' "$f"
+done

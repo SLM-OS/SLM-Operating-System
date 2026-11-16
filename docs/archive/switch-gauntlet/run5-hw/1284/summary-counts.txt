@@ -1,0 +1,21 @@
+# Per-file counts (script-pdmsum.sh.txt) for every x1000 capture of session #1284.
+# iters = pdm: lines; badit = iterations with bad != 0; badsum = sum of bad=; moved = sum of moved=;
+# pdw = the [PDW] end-of-run line; pdw-violation-lines = [PDW] violation lines. Pi 5 row: branch gauntlet-5-hw-pi5, same directory name.
+A-kexec-c93f0891-x1000-boot01.txt | iters=1000 badit=0 badsum=0 moved=6660 | runs=1000 passed=1000 failed=0 | pdw: checks=18007 violations resume=0 exit=0 | pdw-violation-lines=0
+A-uefi-c93f0891-x1000-boot01.txt | iters=1000 badit=0 badsum=0 moved=6674 | runs=1000 passed=1000 failed=0 | pdw: checks=18354 violations resume=0 exit=0 | pdw-violation-lines=0
+A-uefi-c93f0891-x1000-boot02.txt | iters=1000 badit=1 badsum=1 moved=6584 | runs=1000 passed=999 failed=1 | pdw: checks=18742 violations resume=0 exit=0 | pdw-violation-lines=0
+A-uefi-c93f0891-x1000-boot03.txt | iters=1000 badit=0 badsum=0 moved=6636 | runs=1000 passed=1000 failed=0 | pdw: checks=20341 violations resume=0 exit=0 | pdw-violation-lines=0
+A-uefi-c93f0891-x1000-boot04.txt | iters=1000 badit=0 badsum=0 moved=6599 | runs=1000 passed=1000 failed=0 | pdw: checks=19908 violations resume=0 exit=0 | pdw-violation-lines=0
+A-uefi-c93f0891-x1000-boot05.txt | iters=1000 badit=0 badsum=0 moved=6609 | runs=1000 passed=1000 failed=0 | pdw: checks=18480 violations resume=0 exit=0 | pdw-violation-lines=0
+A-uefi-c93f0891-x1000-boot06.txt | iters=1000 badit=0 badsum=0 moved=6603 | runs=1000 passed=1000 failed=0 | pdw: checks=18799 violations resume=0 exit=0 | pdw-violation-lines=0
+A-uefi-c93f0891-x1000-boot07.txt | iters=1000 badit=0 badsum=0 moved=6582 | runs=1000 passed=1000 failed=0 | pdw: checks=18902 violations resume=0 exit=0 | pdw-violation-lines=0
+B-kexec-775563b0-x1000-boot01.txt | iters=1000 badit=0 badsum=0 moved=6661 | runs=1000 passed=1000 failed=0 | pdw: checks=18379 violations resume=0 exit=0 | pdw-violation-lines=0
+B-uefi-775563b0-x1000-boot01.txt | iters=1000 badit=0 badsum=0 moved=6647 | runs=1000 passed=1000 failed=0 | pdw: checks=18271 violations resume=0 exit=0 | pdw-violation-lines=0
+B-uefi-775563b0-x1000-boot02.txt | iters=1000 badit=0 badsum=0 moved=6687 | runs=1000 passed=1000 failed=0 | pdw: checks=18458 violations resume=0 exit=0 | pdw-violation-lines=0
+B-uefi-775563b0-x1000-boot03.txt | iters=1000 badit=0 badsum=0 moved=6627 | runs=1000 passed=1000 failed=0 | pdw: checks=18729 violations resume=0 exit=0 | pdw-violation-lines=0
+B-uefi-775563b0-x1000-boot04.txt | iters=1000 badit=0 badsum=0 moved=6627 | runs=1000 passed=1000 failed=0 | pdw: checks=18278 violations resume=0 exit=0 | pdw-violation-lines=0
+B-uefi-775563b0-x1000-boot05.txt | iters=1000 badit=0 badsum=0 moved=6570 | runs=1000 passed=1000 failed=0 | pdw: checks=18695 violations resume=0 exit=0 | pdw-violation-lines=0
+B-uefi-775563b0-x1000-boot06.txt | iters=1000 badit=0 badsum=0 moved=6618 | runs=1000 passed=1000 failed=0 | pdw: checks=18062 violations resume=0 exit=0 | pdw-violation-lines=0
+B-uefi-775563b0-x1000-boot07.txt | iters=1000 badit=0 badsum=0 moved=6611 | runs=1000 passed=1000 failed=0 | pdw: checks=18231 violations resume=0 exit=0 | pdw-violation-lines=0
+C-uefi-1285-34c43dc0-x1000-boot01.txt | iters=1000 badit=0 badsum=0 moved=6886 | runs=1000 passed=994 failed=6 | pdw: checks=19938 violations resume=0 exit=0 | pdw-violation-lines=0
+A-pi5-c93f0891-x1000-boot01.txt | iters=1000 badit=0 badsum=0 moved=6421 | runs=1000 passed=1000 failed=0 | pdw: checks=21747 violations resume=0 exit=0 | pdw-violation-lines=0

@@ -1,0 +1,10 @@
+#!/bin/bash
+# saveone-pi5.sh <labctl dir> <evidence file> <title...> : as saveone.sh, but pi-5-1 prints no
+# firmware line on this UART, so the start check accepts the kernel banner block (as session
+# 1263's A-saveone-pi5.sh). Evidence goes to the Pi 5 evidence worktree.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/f616ae46-0930-4d47-ae76-ce0c02faf621/scratchpad/a
+E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt/evp/docs/archive/switch-gauntlet/run5-hw/1284
+mkdir -p $E
+dir=$1; dst=$2; shift 2
+START="=====|SLM-OS v" bash $S/save.sh /var/lib/labctl/output/$dir/run_01.txt $E/$dst "$*"
+bash $S/pdmsum.sh $E/$dst

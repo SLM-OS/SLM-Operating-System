@@ -1,0 +1,36 @@
+== jet-1284-A
+   worktree=a head=c93f0891 tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO PD_WITNESS=ON TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=1000
+   banner:   SLM-OS v0.4.0 build 20261116085116 (c93f0891)
+   witness strings in elf: 1
+   elf: sha256=cfc0033c9a4650cccde46ec5953cb65b31de019dd0ba4165ab79ee8e381e5a3d bytes=11867752
+   bin: sha256=8310ea0c20eb8a1d5cc8fd04a608950fe7b9faf44d69a7be4f0a46f0fb8806a4 bytes=9782272
+   sections: .text=2543224 .rodata=7056034 .data=148480 .bss=37451504 
+   built: 2026-11-16T08:52:32Z
+== jet-1284-B
+   worktree=b head=775563b0 tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO PD_WITNESS=ON TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=1000
+   banner:   SLM-OS v0.4.0 build 20261116085241 (775563b0)
+   witness strings in elf: 1
+   elf: sha256=ee71665b238495bd78ba307aeb6267fcceeb34e2e7a45c124a2ca7c5d12470bb bytes=11867712
+   bin: sha256=160a2ec0da4a230cf5eed303a0fedcbe88accdaf691a72ef3d4c1bf691c1bb1f bytes=9782272
+   sections: .text=2542840 .rodata=7056034 .data=148480 .bss=37447408 
+   built: 2026-11-16T08:53:56Z
+== jet-1284-C1285
+   worktree=c head=34c43dc0 tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO PD_WITNESS=ON TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=1000
+   banner:   SLM-OS v0.4.0 build 20261116100543 (34c43dc0)
+   witness strings in elf: 1
+   elf: sha256=377fc04bb9f0e3d35ff5c941672c1d83f257d8f2372b367232a1c362bcfb7a3c bytes=11868416
+   bin: sha256=d6a682e5d76288534c749aeebdc5aa9aab875ccf2443607ca1b385fff318c860 bytes=9782272
+   sections: .text=2544856 .rodata=7058082 .data=148480 .bss=37447408 
+   built: 2026-11-16T10:06:57Z
+== pi5-1284-A
+   worktree=a head=c93f0891 tracked-modified-files=0
+   make kernel-test PLATFORM=RASPI5 PD_WITNESS=ON TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=1000
+   banner:   SLM-OS v0.4.0 build 20261116100700 (c93f0891)
+   witness strings in elf: 1
+   elf: sha256=50c1b34be0ffd7753daee1afeb2e50320385335fb46d2d45f08fc4d2ae26e10a bytes=10696272
+   bin: sha256=6c48eb63009110d0882342141afe22b8d265cc84850e6af7be44aa88bb070090 bytes=8643224
+   sections: .text=2301272 .rodata=6189610 .data=148048 .bss=36239280 
+   built: 2026-11-16T10:08:07Z

@@ -1,0 +1,17 @@
+ CMakeLists.txt                    |  24 ++
+ Makefile                          |   3 +
+ docs/adr/0008-switch-in-window.md | 575 +++++++++++++++++++++++++++++++++
+ docs/adr/README.md                |   7 +-
+ docs/architecture.md              |  26 +-
+ docs/perf/context-switch.md       |  64 ++++
+ docs/scheduler.md                 |  48 ++-
+ kernel/CLAUDE.md                  |   6 +-
+ kernel/include/sched.h            |  37 +++
+ kernel/include/sched_diag.h       |   1 +
+ kernel/include/switch_check.h     |  78 +++++
+ kernel/sched/sched.c              | 649 ++++++++++++++++++++++++++++++++++++--
+ kernel/sched/switch_check.c       | 173 ++++++++++
+ kernel/sched/task.c               |   2 +
+ kernel/tests/test_scheduler.c     | 623 +++++++++++++++++++++++++++++++++++-
+ scripts/check-build-signatures.sh |   2 +-
+ 16 files changed, 2271 insertions(+), 47 deletions(-)

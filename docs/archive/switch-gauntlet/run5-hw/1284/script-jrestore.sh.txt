@@ -1,0 +1,19 @@
+#!/bin/bash
+# jrestore.sh : end-of-session restore of jetson-nano-2 (session #1284; adapted from
+# session 1263's A-jrestore.sh). Waits for SD Linux to be fully up, stages the as-found
+# SLMOS.efi (789cba62) with stage-esp.sh (fresh read-only mount verify + fsck.vfat -n),
+# removes this session's /root/slmos-1284-* files, syncs, prints the state with jstate.sh.
+S=$(dirname "$0")
+J=root@192.168.4.5
+for i in $(seq 1 60); do
+  st=$(ssh -o BatchMode=yes -o ConnectTimeout=4 $J 'test -r /proc/sys/kernel/random/boot_id && timeout 90 systemctl is-system-running --wait; cut -d" " -f1 /proc/uptime' 2>/dev/null | tr '\n' ' ')
+  case "$st" in *running*|*degraded*) break;; esac
+  sleep 5
+done
+echo "$(date -u +%T) linux up: state+uptime=[$st]"
+sleep 20
+echo "$(date -u +%T) staging as-found image (host copy sha256 $(sha256sum $S/img/SLMOS-789cba62.efi | cut -c1-16))"
+bash $S/stage-esp.sh $S/img/SLMOS-789cba62.efi
+echo "stage-esp exit=$?"
+ssh -o BatchMode=yes $J 'ls -la /root/slmos-1284-* 2>/dev/null; rm -f /root/slmos-1284-* /tmp/slmos-uefi.efi /tmp/slmos-kexec.log; sync; echo "removed; remaining 1284 files: $(ls /root /tmp | grep -c 1284)"'
+bash $S/jstate.sh "after restore, end of session #1284"

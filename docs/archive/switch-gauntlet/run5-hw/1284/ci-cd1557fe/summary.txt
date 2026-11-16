@@ -1,0 +1,24 @@
+head cd1557fe dirty=0 start 10:19:32
+10:19:32 step 01 build-arm64: make kernel-clean && make kernel PLATFORM=QEMU_VIRT
+10:20:37 step 01 build-arm64 rc=0
+10:20:37 step 02 build-x86: make kernel-clean && make kernel PLATFORM=X86_64
+10:21:18 step 02 build-x86 rc=0
+10:21:18 step 03 build-jetson-real: make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real
+10:24:12 step 03 build-jetson-real rc=0
+10:24:12 step 04 test-arm64: make test
+10:26:48 step 04 test-arm64 rc=0
+10:26:48 step 05 test-x86: make test PLATFORM=X86_64
+10:28:12 step 05 test-x86 rc=0
+10:28:12 step 06 test-ai-sched: make test AI_SCHED=ON
+10:30:59 step 06 test-ai-sched rc=0
+10:30:59 step 07 runtime-test: make runtime-test
+10:33:46 step 07 runtime-test rc=0
+10:33:46 step 08 braces: make test-check-braces && make check-braces
+10:34:44 step 08 braces rc=0
+10:34:44 step 09 build-order: make test-build-order
+10:35:30 step 09 build-order rc=0
+10:35:30 step 10 jetson-layout: make test-jetson-uefi-layout
+10:36:48 step 10 jetson-layout rc=0
+10:36:48 step 11 diff-check: git diff origin/main...HEAD --stat; git status --porcelain
+10:36:48 step 11 diff-check rc=0
+ALL DONE 10:36:48

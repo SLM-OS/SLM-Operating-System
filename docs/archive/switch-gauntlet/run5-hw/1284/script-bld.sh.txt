@@ -1,0 +1,33 @@
+#!/bin/bash
+# bld.sh <worktree name under $W/.wt> <image name> <make target: kernel|kernel-test> [make args...]
+# Session #1284. Builds one image, copies ELF and PE/flat image to $S/img/<name>.{elf,bin}
+# and appends one record to $S/images.txt (sha256, sizes, banner, git head).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/f616ae46-0930-4d47-ae76-ce0c02faf621/scratchpad/a
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt
+export PATH=$HOME/.cargo/bin:$PATH
+wt=$1; name=$2; target=$3; shift 3
+mkdir -p $S/img $S/buildlogs
+dir=kernel; [ "$target" = kernel-test ] && dir=kernel-test
+log=$S/buildlogs/$name.log
+if ! make -C $W/$wt $target "$@" > $log 2>&1; then
+  echo "BUILD FAILED $name (see $log)"; tail -5 $log; exit 1
+fi
+elf=$W/$wt/build/$dir/slmos.elf; bin=$W/$wt/build/$dir/slmos.bin
+cp $elf $S/img/$name.elf; cp $bin $S/img/$name.bin
+head=$(git -C $W/$wt rev-parse --short=8 HEAD)
+dirty=$(git -C $W/$wt status --porcelain --untracked-files=no | wc -l)
+banner=$(strings -a $elf | grep -m1 -E 'build [0-9]{14} \(')
+pdw=$(strings -a $elf | grep -c 'PDW\] violation')
+sizes=$(aarch64-none-elf-size -A $elf | awk '$1==".text"||$1==".rodata"||$1==".data"||$1==".bss"{printf "%s=%s ", $1, $2}')
+{
+  echo "== $name"
+  echo "   worktree=$wt head=$head tracked-modified-files=$dirty"
+  echo "   make $target $*"
+  echo "   banner: $banner"
+  echo "   witness strings in elf: $pdw"
+  echo "   elf: sha256=$(sha256sum $elf | cut -d' ' -f1) bytes=$(stat -c %s $elf)"
+  echo "   bin: sha256=$(sha256sum $bin | cut -d' ' -f1) bytes=$(stat -c %s $bin)"
+  echo "   sections: $sizes"
+  echo "   built: $(date -u +%FT%TZ)"
+} >> $S/images.txt
+echo "OK $name $banner pdw=$pdw elf=$(sha256sum $elf | cut -c1-8) bin=$(sha256sum $bin | cut -c1-8)"

@@ -1,0 +1,12 @@
+#!/bin/bash
+# saveone.sh <labctl output dir name> <evidence file name> <trigger log name in $S or -> <title...>
+# Session #1284. Saves run_01.txt of one single-boot boot_test call (this session's own
+# output) with save.sh (both-ends check), copies the trigger log next to it, and prints
+# the per-file counts with pdmsum.sh.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/f616ae46-0930-4d47-ae76-ce0c02faf621/scratchpad/a
+E=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Decide-1284/.wt/evj/docs/archive/switch-gauntlet/run5-hw/1284
+mkdir -p $E
+dir=$1; dst=$2; trig=$3; shift 3
+bash $S/save.sh /var/lib/labctl/output/$dir/run_01.txt $E/$dst "$*"
+if [ "$trig" != - ] && [ -f "$S/$trig" ]; then cp "$S/$trig" $E/; fi
+bash $S/pdmsum.sh $E/$dst
