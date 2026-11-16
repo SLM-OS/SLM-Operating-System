@@ -3102,3 +3102,24 @@ against the fixed test could stop them.
   (`git merge-tree`, one conflict); #1285 rewrites the same test with the same
   masked read. Said in the #1266 comment; #1285 not touched.
 - Nothing merged.
+
+## Entry 57 (written 11:17 UTC on 2026-11-16, from date): PR #1266 merged on the user's instruction
+
+- `main` had moved (#1265, #1283, #1286) and #1266 was `CONFLICTING`. Merged
+  `main` into `c2/switch-window-r2` as 4e3c8490: conflicts only where both
+  sides added build options side by side (`CMakeLists.txt`, `Makefile`,
+  `scripts/check-build-signatures.sh`), resolved as the union
+  (`SWITCH_CHECK`, `SWO_DIAG`, `SWITCH_WINDOW_TEST` and `PMM_CHECK` all kept).
+- Checks on the merged tree (scratch logs, not pushed to an evidence branch):
+  `make check-build-signatures` (26 options), `make test` ARM64 and x86-64
+  PASSED, Jetson and Pi 5 kernel builds, `make check-braces` 0 violations.
+  `make test PMM_CHECK=ON` failed once on `test_runner_parks_without_a_lock`
+  ("nobody took the prompt", the known intermittent #1184), passed on rerun;
+  `main` alone with `PMM_CHECK=ON` passed once. No hardware row and no full
+  `/ci` at 4e3c8490; the last full `/ci` is at cd1557fe (Entry 56).
+- **PR #1266 squash-merged as `b435a19f`** (head 4e3c8490, `--match-head-commit`),
+  with the PR body as the commit message. It closed #1234, #1238 and #1242
+  (its `Closes` lines); #1262 and #1284 are open.
+- Not done: #1285 (stacked on #1266) is not updated; bringing #1266's last
+  commits into it conflicts in `kernel/tests/test_scheduler.c` (Entry 56).
+  The `c2/switch-window-r2` remote branch is not deleted.
