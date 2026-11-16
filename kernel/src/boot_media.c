@@ -19,6 +19,14 @@ static unsigned g_boot_media_test_refs;
  * the test setter / production read on weakly-ordered ARM64. */
 static boot_media_create_hook_t volatile g_test_create_hook;
 
+/* Test-only (#1274): when set, boot_media_acquire() returns only the
+ * injected test device and otherwise NULL. It never returns the cached
+ * production device and never calls boot_media_create(), so a test that
+ * did not install a RAM disk cannot reach the board's real card (Pi 5)
+ * or a scratch card left by another suite (QEMU). Always false in
+ * production; read under g_boot_media_lock. */
+static bool g_boot_media_test_no_device;
+
 static struct blkdev *boot_media_create(void)
 {
     if (g_test_create_hook) {
@@ -51,6 +59,11 @@ struct blkdev *boot_media_acquire(void)
         struct blkdev *dev = g_boot_media_test_dev;
         spin_unlock_irqrestore(&g_boot_media_lock, flags);
         return dev;
+    }
+
+    if (g_boot_media_test_no_device) {
+        spin_unlock_irqrestore(&g_boot_media_lock, flags);
+        return NULL;
     }
 
     if (g_boot_media_dev) {
@@ -156,6 +169,13 @@ void boot_media_test_set_create_hook(boot_media_create_hook_t hook)
 {
     irq_flags_t flags = spin_lock_irqsave(&g_boot_media_lock);
     g_test_create_hook = hook;
+    spin_unlock_irqrestore(&g_boot_media_lock, flags);
+}
+
+void boot_media_test_set_no_device(bool no_device)
+{
+    irq_flags_t flags = spin_lock_irqsave(&g_boot_media_lock);
+    g_boot_media_test_no_device = no_device;
     spin_unlock_irqrestore(&g_boot_media_lock, flags);
 }
 
