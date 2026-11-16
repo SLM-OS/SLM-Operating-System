@@ -1298,10 +1298,18 @@ totals per boot differ far more (3.3 to 5.9 times on Jetson UEFI-direct,
 regime ran more wake-ups (counts from the `pdm:` and `pdm-diag:` lines
 of the `A-*-pdmdiag-{U,P}-*-x200-boot*.txt` captures,
 `docs/archive/switch-gauntlet/run5-hw/1263-1207/` on the branches
-`gauntlet-5-hw-jetson` and `gauntlet-5-hw-pi5`). The same one-CPU regime
-is in the archive on unpadded kernels from
-before the #1234 change and absent in 822 runs after it, so it is not new
-with the padding; it follows the layout in this pair of kernels. The
+`gauntlet-5-hw-jetson` and `gauntlet-5-hw-pi5`). On healthy
+unpadded kernels the regime has not been seen: 0 of these 1400 unpadded
+iterations and 0 of 822 archived runs after the #1234 change. The same
+failing line (`moved=0 runs=100/100 bad=0`) does occur in two archived
+boots from before the #1234 change (`c2/hw-base/uefi-r2-boot1.txt`,
+88d4d71b, and `c2-fix-critic/base-3b369aef-r2-boot02.txt`, 3b369aef,
+under `docs/archive/switch-gauntlet/run5-hw/` on
+`gauntlet-5-hw-jetson`), but in both only after CPUs 4 and 5 had
+panicked and halted, and those lines carry no per-CPU histogram. So the
+line has been seen before, under different conditions; those boots do
+not show the regime on a healthy unpadded kernel. In this pair of
+kernels the regime follows the padded layout. The
 mechanism is inferred (with a line per lock, one CPU reliably wins each
 freshly woken task, by placement or by stealing it); which CPU steals is
 not recorded. `bench stealing --sustain 2500 --assert-shares` passes 20
