@@ -1272,6 +1272,14 @@ __attribute__((weak)) uint64_t pmm_poison_ref_pushbuf(void)
     return 0;
 }
 
+/* Jetson: GPU page-table lookup of a damaged range (ga10b_handoff_reserve.c
+ * overrides this no-op). */
+__attribute__((weak)) void pmm_poison_gpu_lookup(uint64_t lo, uint64_t hi)
+{
+    (void)lo;
+    (void)hi;
+}
+
 static void pmm_p_print_ref(uintptr_t first, uintptr_t last)
 {
     uint64_t ref = pmm_poison_ref_pushbuf();
@@ -1364,6 +1372,7 @@ static void pmm_p_report(bool scan, const char *where, uintptr_t block,
         uart_printf("  pages hit: %lu (first 0x%lx, last 0x%lx)\n",
                     (unsigned long)d->pages_hit, (unsigned long)d->first_page,
                     (unsigned long)d->last_page);
+        pmm_poison_gpu_lookup(base + d->first, base + d->last + 1);
         pmm_p_dump_line("first differing line", base + d->first_line);
         if (d->last_line != d->first_line) {
             pmm_p_dump_line("last differing line", base + d->last_line);

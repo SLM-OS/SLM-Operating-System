@@ -303,7 +303,16 @@ static int harness_run_suites(void)
     RUN_SUITE(test_suite_ga10b_cold);
     RUN_SUITE(test_suite_ga10b_mnist_pipeline);
     RUN_SUITE(test_suite_ga10b_cold_pipelines); /* #1092 sched/eviction */
+#if defined(CONFIG_PMM_POISON)
+    /* test_suite_oplib_gpu_as attaches the operator library to the
+     * inherited channel's VM just before test_suite_gpu: the same
+     * per-test scans, after each of its tests (#1207). */
+    unity_set_after_test_hook(harness_poison_after_test);
     RUN_SUITE(test_suite_oplib_gpu_as);   /* #1092 cold-channel oplib */
+    unity_set_after_test_hook(NULL);
+#else
+    RUN_SUITE(test_suite_oplib_gpu_as);   /* #1092 cold-channel oplib */
+#endif
 #if defined(CONFIG_PMM_POISON)
     /* #1207's one capture: a free block damaged between the walks after
      * test_suite_oplib_gpu_as and after test_suite_gpu. Full scans before

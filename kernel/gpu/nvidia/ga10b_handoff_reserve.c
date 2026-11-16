@@ -994,6 +994,93 @@ uint64_t pmm_poison_ref_pushbuf(void)
 {
     return g_poison_ref_pushbuf;
 }
+
+/*
+ * PMM_POISON (#1207): on a finding, is the damaged range still mapped by
+ * a GPU VM? Every inst block the boot knows (each hand-off's
+ * inst_block_phys and the kexec'd channel's from FECS_CURRENT_CTX) is
+ * walked with ga10b_gmmu_enum_pages, reading through the PMM's
+ * Non-cacheable alias (a table page the PMM has since freed is unmapped
+ * under PMM_UNMAP), and every leaf overlapping [lo, hi) is printed with
+ * its GPU VA. Runs only on a finding (overrides the weak no-op in pmm.c).
+ */
+#define POISON_GPU_INSTS 8u
+static uint64_t g_poison_inst[POISON_GPU_INSTS];
+static const char *g_poison_inst_tag[POISON_GPU_INSTS];
+static uint32_t g_poison_n_inst;
+
+static void poison_note_inst(uint64_t inst, const char *tag)
+{
+    if (inst == 0) {
+        return;
+    }
+    for (uint32_t i = 0; i < g_poison_n_inst; i++) {
+        if (g_poison_inst[i] == inst) {
+            return;
+        }
+    }
+    if (g_poison_n_inst < POISON_GPU_INSTS) {
+        g_poison_inst_tag[g_poison_n_inst] = tag;
+        g_poison_inst[g_poison_n_inst++] = inst;
+    }
+}
+
+static uint64_t poison_read64(uint64_t phys)
+{
+    if (!ga10b_phys_in_dram(phys, 8)) {
+        return 0;
+    }
+    uintptr_t va = pmm_poison_alias_of((uintptr_t)phys);
+    return *(volatile uint64_t *)(va ? va : (uintptr_t)phys);
+}
+
+struct poison_lookup {
+    uint64_t lo, hi, inst;
+    uint32_t leaves, hits, tables;
+};
+
+static void poison_lookup_visit(void *ctx, enum ga10b_gmmu_page_kind kind,
+                                uint64_t gpu_va, uint64_t phys, uint64_t bytes)
+{
+    struct poison_lookup *c = ctx;
+    if (kind != GA10B_GMMU_PAGE_LEAF) {
+        if (phys < c->hi && phys + bytes > c->lo) {
+            c->hits++;
+            uart_printf("  GPU: inst 0x%lx: a PAGE TABLE at 0x%lx (+%lu B) overlaps "
+                        "the damage\n", (unsigned long)c->inst,
+                        (unsigned long)phys, (unsigned long)bytes);
+        }
+        c->tables++;
+        return;
+    }
+    c->leaves++;
+    if (phys < c->hi && phys + bytes > c->lo) {
+        if (c->hits++ < 32u) {
+            uart_printf("  GPU: inst 0x%lx maps GPU VA 0x%lx -> PA 0x%lx (%lu KB) "
+                        "over the damage\n", (unsigned long)c->inst,
+                        (unsigned long)gpu_va, (unsigned long)phys,
+                        (unsigned long)(bytes >> 10));
+        }
+    }
+}
+
+void pmm_poison_gpu_lookup(uint64_t lo, uint64_t hi)
+{
+    if (g_poison_n_inst == 0) {
+        uart_puts("  GPU: no inst block known on this boot\n");
+        return;
+    }
+    for (uint32_t i = 0; i < g_poison_n_inst; i++) {
+        struct poison_lookup c = { .lo = lo, .hi = hi, .inst = g_poison_inst[i] };
+        int rc = ga10b_gmmu_enum_pages(g_poison_inst[i], poison_read64,
+                                       poison_lookup_visit, &c);
+        uart_printf("  GPU: inst 0x%lx (%s): %u tables, %u leaves walked (rc %d), "
+                    "%u overlap(s) with PA 0x%lx..0x%lx\n",
+                    (unsigned long)g_poison_inst[i], g_poison_inst_tag[i],
+                    (unsigned)c.tables, (unsigned)c.leaves, rc, (unsigned)c.hits,
+                    (unsigned long)lo, (unsigned long)(hi - 1));
+    }
+}
 #endif
 
 uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
@@ -1012,6 +1099,15 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
         g_poison_ref_pushbuf = ((const volatile struct ga10b_channel_handoff *)
                                     (uintptr_t)handoffs[0])->pushbuf_phys;
     }
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        if (handoffs[kind] != 0) {
+            poison_note_inst(((const volatile struct ga10b_channel_handoff *)
+                                  (uintptr_t)handoffs[kind])->inst_block_phys,
+                             kind == 0 ? "hand-off kind 0 (MNIST)"
+                                       : "hand-off kind >0");
+        }
+    }
+    poison_note_inst(resident_inst_phys, "kexec'd channel (FECS_CURRENT_CTX)");
 #endif
 
     uint32_t found_mask = 0;

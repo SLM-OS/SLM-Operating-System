@@ -338,6 +338,9 @@ void pmm_poison_note_injected(unsigned n);
 /* PMM_POISON_SNAPSHOT: true in that mode; a free page (not a listed head)
  * that still has its arming snapshot, or 0. */
 bool pmm_snap_mode(void);
+/* Jetson: print every GPU page-table leaf (and table) overlapping
+ * [lo, hi), from each inst block the boot knows; a no-op elsewhere. */
+void pmm_poison_gpu_lookup(uint64_t lo, uint64_t hi);
 uintptr_t pmm_poison_find_snapshot_page(void);
 #if defined(CONFIG_PMM_UNMAP_SELFTEST)
 void pmm_unmap_selftest(void);
