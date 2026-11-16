@@ -1,9 +1,6 @@
-# pi-5-1 after restore: this session's kernel_2712.img deleted, the original renamed back from kernel_2712.img.prev-s1244; boot shows the as-found kernel
-# source: /var/lib/labctl/output/s1244-pi5-restore-check/run_01.txt (labctl output of this session, copied verbatim below the header)
+# pi-5-1 after restore, 2026-11-16 ~08:59 UTC: kernel_2712.img.r1265keep renamed back to kernel_2712.img, test image deleted; sdwire_ls shows kernel_2712.img 6935256 bytes mtime 2026-10-29T04:54:04Z as found; boot_test 1 run, left powered on at the shell
 # banner: SLM-OS v0.4.0 build 20261022005058 (b42b2c1d)
-# power-on line (within first 2000 bytes): ========================================
-# last line: slmos>
-# lines: 224
+# source: /var/lib/labctl/output/r1265-pi5-restore-check/run_01.txt (labctl output of this session, verbatim below)
 # ---- serial ----
 
 ========================================
