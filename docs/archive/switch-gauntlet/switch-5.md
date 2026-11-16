@@ -2450,3 +2450,25 @@ Part B draft PR (references #1207 and #1228, closes neither) and the
 #1207 comment; marking each PR ready after its critic passes; an issue for
 the `bad=1` observation; the final report. Nothing is merged, and no PR or
 comment on #1262 or #1207 has been posted by this session.
+
+## Entry 51 (written 01:10 UTC on 2026-11-16, from date): resumed; session model changed to Opus
+
+The user resumed the session at about 01:05 UTC and switched its model
+from Fable 5.2 to Opus to conserve Fable usage. From this entry on: the
+orchestrator, both builders and any helper agent run on Opus (they inherit
+the session model); critics stay on Fable, spawned with the model set
+explicitly. If a critic hits a Fable usage limit it is paused and the user
+is told; it is not moved to Opus. Everything before this entry (builders,
+orchestrator and all critic rounds so far) ran on Fable 5.2.
+
+Started at 01:08 UTC:
+
+- Critic A, round 2: a fresh blind critic on Fable (`critic-a2`), not the
+  round-1 critic's session, deriving the A2b rows, the test change and the
+  round-1 answers before reading the claims and the round-1 findings.
+- Builder B, phase B3: open the Part B PR as a draft (it closes nothing),
+  post the #1207 comment, note on the known-failures list.
+- Builder A: file the `bad=1` observation as an issue and link it on PR
+  #1266; write down why the changed test's direct write of `cpu_affinity`
+  is safe and what the pinned worker no longer covers. The Part A PR and
+  the #1262 comment stay unposted until the critic reports.
