@@ -239,11 +239,14 @@ regions are added, `pmm_init` walks the free lists and prints one line:
 first overlapping block. A `totalsize` above `DTB_MAX_BLOB_SIZE` (2 MB,
 the most `vmm_map_firmware_dtb` maps) is treated as a corrupt header:
 `dtb_get_blob_range()` rejects it, nothing is reserved, and `pmm_init`
-warns `PMM: DTB at ... has no usable totalsize`. The arm64 image header's `image_size` covers the
-image through `__kernel_end` (`.bss` and the boot stack included), as the
-boot protocol asks, so a loader does not place anything inside the
-kernel's own footprint; it cannot keep the blob out of the heap, which
-starts at `__kernel_end`, so the reservation is the fix.
+warns `PMM: DTB at ... has no usable totalsize`. The arm64 image
+header's `image_size` covers the image through `__kernel_end` (`.bss`
+and the boot stack included), as the boot protocol asks, so a loader
+does not place anything inside the kernel's own footprint; it cannot
+keep the blob out of the heap, which starts at `__kernel_end`, so the
+reservation is the fix. The reservation would hide a wrong `image_size`
+from the boot-time check, so `make test` guards the field directly
+(`test_image_header_size_covers_kernel_end`, QEMU and Jetson).
 
 **RNG entropy:** Pi firmware supplies up to ~80 bytes per boot via
 `/chosen/{rng-seed, kaslr-seed}`. `dtb_parse` copies them into a

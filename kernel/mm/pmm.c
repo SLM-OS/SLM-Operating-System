@@ -1290,9 +1290,10 @@ static dtb_memreserve_t pmm_user_reserves[PMM_MAX_USER_RESERVES];
 static size_t           pmm_n_user_reserves = 0;
 
 /* Scratch arrays are sized to fit the worst case = firmware reserves
- * + user reserves + the DTB blob (#1244), plus one extra slot for the split helper's own
- * bookkeeping (matches the prior `DTB_MAX_MEMRESERVES + 1` rationale
- * for `pmm_split_starts`/`pmm_split_ends`). */
+ * + user reserves + the DTB blob (#1244), plus one extra slot for the
+ * split helper's own bookkeeping (matches the prior
+ * `DTB_MAX_MEMRESERVES + 1` rationale for
+ * `pmm_split_starts`/`pmm_split_ends`). */
 #define PMM_SPLIT_RSV_MAX  (DTB_MAX_MEMRESERVES + PMM_MAX_USER_RESERVES + 1)
 static uintptr_t        pmm_split_starts[PMM_SPLIT_RSV_MAX + 1];
 static uintptr_t        pmm_split_ends  [PMM_SPLIT_RSV_MAX + 1];
