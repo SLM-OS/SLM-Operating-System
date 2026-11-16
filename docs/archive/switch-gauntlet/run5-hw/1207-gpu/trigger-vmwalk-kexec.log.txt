@@ -1,0 +1,3 @@
+22:57:04 start mode=kexec n=1 elfs=[/root/slmos-1207-vmwalk-d4682dc3.elf] skip_current_boot_id=d4b9aec7-8011-4fff-a487-a77b66627e18 pid=1019915
+22:58:30 trigger 1/1 elf=/root/slmos-1207-vmwalk-d4682dc3.elf boot_id=9efc2c1a-3760-4e45-92aa-81db920f37d1 state+uptime=[running 23.69 ] reply=[57697692067e343b ]
+22:58:30 end triggers=1
