@@ -428,9 +428,33 @@ static void test_wpool_partial_and_capped(void)
     TEST_ASSERT_EQUAL_INT(OPLIB_AS_ERR_ARG, oplib_wpool_build(NULL, chunk, chunk, &w));
 }
 
+/* #1281: the staging state the suite found is back after its tests.
+ * Before the fix, test_pool_stage_with_as_scratch_base ended in
+ * oplib_pool_unstage(), and after a UEFI-direct boot the real pool staged
+ * by the cold bring-up stayed unstaged for the rest of the boot. */
+static struct oplib_pool_saved_state g_boot_stage;
+
+static void test_suite_restored_boot_staging(void)
+{
+    struct oplib_pool_saved_state now;
+    oplib_pool_test_save_state(&now);
+    TEST_ASSERT_EQUAL_INT(g_boot_stage.staged ? 1 : 0, now.staged ? 1 : 0);
+    TEST_ASSERT_EQUAL_INT(g_boot_stage.stage_rc, now.stage_rc);
+    TEST_ASSERT_EQUAL_HEX64(g_boot_stage.gpu_va, now.gpu_va);
+    TEST_ASSERT_EQUAL_HEX64(g_boot_stage.base_phys, now.base_phys);
+    TEST_ASSERT_EQUAL_HEX64(g_boot_stage.scratch_off, now.scratch_off);
+    TEST_ASSERT_EQUAL_HEX64(g_boot_stage.cbuf_phys, now.cbuf_phys);
+    TEST_ASSERT_EQUAL_HEX64(g_boot_stage.cbuf_gpu_va, now.cbuf_gpu_va);
+    TEST_ASSERT_EQUAL_HEX64(g_boot_stage.gpu_va, oplib_pool_gpu_va_base());
+}
+
 int test_suite_oplib_gpu_as(void)
 {
     UnityBegin("test_oplib_gpu_as.c");
+    /* #1281: these tests stage into a fake address space and unstage. Put
+     * back whatever the boot staged (the cold bring-up's real pool after a
+     * UEFI-direct boot) once they are done, a failed assertion included. */
+    oplib_pool_test_save_state(&g_boot_stage);
     RUN_TEST(test_cold_backend_maps_into_vm);
     RUN_TEST(test_stage_pool_layout);
     RUN_TEST(test_stage_pool_limits);
@@ -440,5 +464,7 @@ int test_suite_oplib_gpu_as(void)
     RUN_TEST(test_qmd_pool_for_channel_only_handoff);
     RUN_TEST(test_wpool_chunks_and_write);
     RUN_TEST(test_wpool_partial_and_capped);
+    oplib_pool_test_restore_state(&g_boot_stage);
+    RUN_TEST(test_suite_restored_boot_staging);              /* #1281 */
     return UnityEnd();
 }

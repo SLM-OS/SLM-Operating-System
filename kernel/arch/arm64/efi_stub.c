@@ -23,6 +23,11 @@
 #include "ncmem.h"
 #include <stddef.h>
 
+/* See boot_source.h (#1231). The non-zero initialiser keeps it in .data,
+ * so the value written below survives the relocation and the BSS clear
+ * in boot.S, as slmos_boot_source does. */
+volatile uint64_t slmos_efi_stub_marker = EFI_STUB_MARKER_UNSET;
+
 /*
  * Trace helper — prints a UTF-16 literal via UEFI's ConOut protocol.
  *
@@ -721,9 +726,11 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
      *
      * The boot source is recorded first: it lives in .data, so it must
      * be written before the image is cleaned and copied for the
-     * relocated kernel to see it (boot_source.h).
+     * relocated kernel to see it (boot_source.h). The test-only marker
+     * beside it is .data for the same reason.
      */
     slmos_boot_source = BOOT_SOURCE_UEFI;
+    slmos_efi_stub_marker = EFI_STUB_MARKER_RAN;
 
     efi_dcache_clean_inval(load_base, image_size);
     if (link_base != load_base) {

@@ -1,0 +1,10 @@
+# Known test-kernel failures: Raspberry Pi 5. 3 tests, whether or not the SD card probes.
+# The 14 blob_autoload tests (#1274) no longer reach the card and are off the list. The
+# eviction selftest (#1275) failed only when those tests had activated the card's MLP blob;
+# it passes now and is off the list (#1275 stays open for the selftest's own isolation).
+# Format and rules: see known-failures-jetson-1109.txt.
+test_builtin_commands_grouped_and_sorted	#1269
+test_every_command_has_help_entry	#1268
+test_timer_irq_is_physical	#1267
+# Not tests. "no help entry ..." is printed by test_every_command_has_help_entry (#1268).
+check:no help entry for built-in 'emmc-bringup'	#1268

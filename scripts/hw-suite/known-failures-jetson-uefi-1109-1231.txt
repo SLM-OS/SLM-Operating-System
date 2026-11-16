@@ -1,0 +1,28 @@
+# Known test-kernel failures: Jetson Orin Nano, UEFI-direct boot path. 15 tests:
+# 10 shared with the kexec path (#1109) plus 5 that fail only after a UEFI-direct boot (#1231),
+# 16 when test_slm_uptime_us (#1124) falls in its failing window.
+# The other four #1231 tests are no longer failures: test_boot_source_matches_stub_marker
+# checks the boot source against the EFI stub's marker, and the three oplib "unstaged"
+# tests skip when the cold bring-up has staged the pool.
+# Format and rules: see known-failures-jetson-1109.txt.
+# test_slm_uptime_us (#1124) fails only when the test runs in the second half of a
+# 2^32 us uptime cycle (36 to 72 min after power-on, then every 71.6 min): Lua is built
+# with LUA_32BITS, so slm.uptime_us() wraps. classify.sh shows it as "listed, not failing" otherwise.
+gpu: capabilities detect valid	#1270
+test_builtin_commands_grouped_and_sorted	#1269
+test_every_command_has_help_entry	#1268
+test_gpu_get_info_valid	#1270
+test_gpu_jetson_uses_stub_driver	#1270
+test_net_driver_registered	#1273
+test_no_models_means_no_mount	#1231
+test_session_open_failures	#1231
+test_slm_gpu_run_mnist_returns_negative_off_jetson	#1271
+test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson	#1271
+test_slm_gpu_set_mnist_input_returns_negative_off_jetson	#1271
+test_slm_launch_defaults_to_gpu_auto	#1231
+test_slm_launch_gpu_on_requires_a_program	#1231
+test_slm_uptime_us	#1124
+test_timer_irq_is_physical	#1267
+test_unavailable_reason_names_the_cause	#1231
+# Not tests. "no help entry ..." is printed by test_every_command_has_help_entry; tracked in #1268.
+check:no help entry for built-in 'nvcsi'	#1268

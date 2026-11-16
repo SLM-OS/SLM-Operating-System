@@ -1752,6 +1752,59 @@ static void test_blob_autoload_metadata_persists_for_every_entry(void)
 }
 
 /*
+ * #1274: tests that do not install a RAM disk must never reach the
+ * board's boot media. On Pi 5 that is the real SD card: before the fix
+ * these tests wrote 0:/slmstore/ on it and read whatever autoload
+ * config the card already held, so 14 of them failed whenever the card
+ * probed and passed when it did not. test_suite_blob_autoload() sets
+ * boot_media_test_set_no_device() around its tests; this test checks
+ * that, with that in force, the init and set paths neither create a
+ * device (the create hook would stand in for sdhci_create_bcm2712())
+ * nor get one back.
+ */
+static unsigned g_no_device_create_calls;
+
+static struct blkdev *no_device_counting_create_hook(void)
+{
+    g_no_device_create_calls++;
+    return NULL;
+}
+
+static void test_blob_autoload_never_reaches_boot_media(void)
+{
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+
+    g_no_device_create_calls = 0;
+    boot_media_test_set_create_hook(no_device_counting_create_hook);
+
+    int init_rc = blob_autoload_init();
+    int write_rc = write_binary_file("/mnt/files/nodev.blob", ev_blob, ev_blob_len);
+    int set_rc = blob_autoload_set("eviction", "xgboost", "/mnt/files/nodev.blob");
+    struct blkdev *dev = boot_media_acquire();
+    if (dev != NULL) {
+        boot_media_release(dev);
+    }
+    boot_media_test_set_create_hook(NULL);
+    (void)blob_autoload_clear("eviction", "xgboost");
+    (void)remove_file("/mnt/files/nodev.blob");
+
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, init_rc);
+    TEST_ASSERT_EQUAL_INT(0, write_rc);
+    TEST_ASSERT_EQUAL_INT(0, set_rc);
+    if (g_no_device_create_calls != 0 || dev != NULL) {
+        uart_printf("  blob_autoload no-device: create calls=%u acquire=%p\n",
+                    g_no_device_create_calls, (void *)dev);
+    }
+    TEST_ASSERT_MESSAGE(g_no_device_create_calls == 0,
+                        "boot media create was called");
+    TEST_ASSERT_MESSAGE(dev == NULL, "boot_media_acquire returned a device");
+}
+
+/*
  * Leave the scheduler's runtime models at their defaults (#1044).
  *
  * Several tests here stage and activate sched config / thresholds /
@@ -1785,6 +1838,11 @@ static void blob_autoload_suite_reset_runtime_state(void)
 int test_suite_blob_autoload(void)
 {
     UNITY_BEGIN();
+    /* #1274: no test in this suite may reach the board's boot media. Tests
+     * that need a FAT volume install a RAM disk with
+     * boot_media_test_set_device(), which still takes precedence. */
+    boot_media_test_set_no_device(true);
+    RUN_TEST(test_blob_autoload_never_reaches_boot_media);   /* #1274 */
     RUN_TEST(test_blob_autoload_init_creates_conf);
     RUN_TEST(test_blob_autoload_init_marks_existing_fat_config_authoritative);
     RUN_TEST(test_blob_autoload_init_recovers_missing_fat_blob_from_lfs);
@@ -1814,5 +1872,6 @@ int test_suite_blob_autoload(void)
     RUN_TEST(test_blob_autoload_accepts_max_length_paths_across_all_slots);
 #endif
     blob_autoload_suite_reset_runtime_state();
+    boot_media_test_set_no_device(false);
     return UNITY_END();
 }

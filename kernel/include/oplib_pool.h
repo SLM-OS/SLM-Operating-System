@@ -185,6 +185,24 @@ int oplib_pool_scratch_base(uint64_t *out_phys, uint64_t *out_gpu_va);
  * address space; the kernel never unstages. */
 void oplib_pool_unstage(void);
 
+/* Test-only (#1281): the staging bookkeeping, saved and put back around
+ * a test suite that stages into a fake address space and unstages. After
+ * a UEFI-direct boot the cold bring-up has staged the real pool, and
+ * without this the suite left it unstaged for the rest of the boot. No
+ * page is mapped or freed by either call. */
+struct oplib_pool_saved_state {
+    bool     staged;
+    int      stage_rc;
+    uint64_t gpu_va;
+    size_t   n_pages;
+    uint64_t base_phys;
+    uint64_t scratch_off;
+    uint64_t cbuf_phys;
+    uint64_t cbuf_gpu_va;
+};
+void oplib_pool_test_save_state(struct oplib_pool_saved_state *s);
+void oplib_pool_test_restore_state(const struct oplib_pool_saved_state *s);
+
 /* Bytes of SASS in the embedded library (0 before oplib_pool_init or
  * for the stub library). */
 size_t oplib_pool_sass_region_len(void);

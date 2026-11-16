@@ -60,4 +60,14 @@ void boot_media_test_set_create_hook(boot_media_create_hook_t hook);
  */
 void boot_media_test_clear_production_cache(void);
 
+/*
+ * Test-only hook (#1274): while set, boot_media_acquire() returns the
+ * device injected with boot_media_test_set_device() if there is one, and
+ * NULL otherwise. The cached production device, the create hook and the
+ * platform create (the real SD card on Pi 5) are all bypassed. Suites
+ * whose tests must never touch the board's boot media set it around
+ * their RUN_TESTs.
+ */
+void boot_media_test_set_no_device(bool no_device);
+
 #endif /* BOOT_MEDIA_H */

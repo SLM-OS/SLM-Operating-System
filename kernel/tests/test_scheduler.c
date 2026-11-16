@@ -1772,39 +1772,98 @@ static void test_migrate_ready_task_updates_assigned_cpu(void)
 }
 
 /*
- * Test: Multiple cores can be isolated
+ * Test: every CPU but CPU 0 can be isolated at once, and a task with
+ * CPU_AFFINITY_ANY then goes to CPU 0, the only CPU left (#1272).
+ *
+ * All of CPUs 1 to cpu_count - 1 are isolated, not a fixed 1 to 3: with
+ * six CPUs (Jetson) a fixed set left CPUs 4 and 5 eligible. The values the
+ * test checks are read into locals and every piece of state it changed
+ * (isolation, the masked IRQs, the queued task) is restored before the
+ * first assertion. A failed Unity assertion returns from the test (#512),
+ * so an assertion placed before the cleanup leaked all three into the rest
+ * of the suite. test_isolation_test_left_state_clean, which runs next,
+ * checks that nothing is left over.
  */
 static void test_multiple_cores_isolated(void)
 {
-    /* Isolate CPUs 1, 2, 3 (if available) */
-    if (cpu_count >= 2) sched_isolate_core(1);
-    if (cpu_count >= 3) sched_isolate_core(2);
-    if (cpu_count >= 4) sched_isolate_core(3);
-
     uint32_t expected = 0;
-    if (cpu_count >= 2) expected |= 0x2;
-    if (cpu_count >= 3) expected |= 0x4;
-    if (cpu_count >= 4) expected |= 0x8;
-
-    TEST_ASSERT_EQUAL_UINT32(expected, sched_get_isolated_cores());
+    for (uint32_t cpu = 1; cpu < cpu_count && cpu < 32; cpu++) {
+        sched_isolate_core(cpu);
+        expected |= 1u << cpu;
+    }
+    uint32_t isolated = sched_get_isolated_cores();
 
     /* Task with CPU_AFFINITY_ANY should go to CPU 0 (only non-isolated) */
     struct task *t = task_create_with_priority("multi", nop_entry, NULL, TASK_PRIORITY_NORMAL);
+    uint32_t assigned = UINT32_MAX;
+    if (t != NULL) {
+        irq_flags_t flags = irq_save();
+        scheduler_add_task(t);
+        assigned = t->assigned_cpu;
+        scheduler_remove_task(t);
+        irq_restore(flags);
+        t->state = TASK_TERMINATED;
+        task_destroy(t);
+    }
+
+    for (uint32_t cpu = 1; cpu < cpu_count && cpu < 32; cpu++) {
+        sched_unisolate_core(cpu);
+    }
+
+    TEST_ASSERT_EQUAL_UINT32(expected, isolated);
     TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT32(0, assigned);
+}
 
-    irq_flags_t flags = irq_save();
-    scheduler_add_task(t);
-    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
-    scheduler_remove_task(t);
-    irq_restore(flags);
+/*
+ * State a scheduler test must leave behind (#1272, #512): no CPU
+ * isolated, local IRQs unmasked in the test task, and no task of the
+ * given name still in the task table. Run right after a test that
+ * isolates CPUs, masks IRQs or queues tasks, so a leak shows on that
+ * test's own line instead of as unrelated failures further down.
+ */
+static bool sched_test_irqs_masked(void)
+{
+    irq_flags_t f = irq_save();
+    irq_restore(f);
+#if defined(PLATFORM_X86_64)
+    return (f & 0x200u) == 0;           /* RFLAGS.IF clear */
+#else
+    return (f & 0x80u) != 0;            /* DAIF.I set */
+#endif
+}
 
-    /* Clean up */
-    if (cpu_count >= 2) sched_unisolate_core(1);
-    if (cpu_count >= 3) sched_unisolate_core(2);
-    if (cpu_count >= 4) sched_unisolate_core(3);
+static uint32_t sched_test_live_tasks_named(const char *name)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < MAX_TASKS; i++) {
+        struct task *t = task_slot(i);
+        if (t != NULL && t->id != 0 && strcmp(t->name, name) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
 
-    t->state = TASK_TERMINATED;
-    task_destroy(t);
+static void assert_sched_state_clean(const char *task_name)
+{
+    TEST_ASSERT_EQUAL_HEX32(0, sched_get_isolated_cores());
+    TEST_ASSERT_FALSE_MESSAGE(sched_test_irqs_masked(), "IRQs left masked");
+    uint32_t live = sched_test_live_tasks_named(task_name);
+    if (live != 0) {
+        uart_printf("  %u task(s) named %s left in the task table\n", live, task_name);
+    }
+    TEST_ASSERT_MESSAGE(live == 0, "test task left in the task table");
+}
+
+static void test_isolation_test_left_state_clean(void)
+{
+    assert_sched_state_clean("multi");
+}
+
+static void test_round_robin_left_state_clean(void)
+{
+    assert_sched_state_clean("rr_test");
 }
 
 /* ============================================================================
@@ -4222,6 +4281,11 @@ static void test_cpu_id_returns_correct_value(void)
 /*
  * Test: find_target_cpu() distributes tasks across CPUs.
  * The round-robin should NOT always return 0 when all queues are empty.
+ *
+ * Hits are counted for every CPU (MAX_CPUS), not only CPUs 0 to 3: on
+ * Jetson's six CPUs a pick of CPU 4 or 5 was dropped (#1272). Nothing is
+ * asserted while IRQs are masked or a task is queued (#512); the checks
+ * run after every task is removed and IRQs are restored.
  */
 static void test_round_robin_distributes_tasks(void)
 {
@@ -4231,24 +4295,33 @@ static void test_round_robin_distributes_tasks(void)
     }
 
     /* Create and dispatch 4 tasks via scheduler_add_task (uses find_target_cpu).
-     * Use NULL entry + IRQ protection to prevent tasks from running
-     * on secondary CPUs before we can check assigned_cpu. */
-    uint32_t cpu_hits[4] = {0, 0, 0, 0};
+     * IRQ protection keeps the tasks from running on secondary CPUs before
+     * assigned_cpu is read. */
+    uint32_t cpu_hits[MAX_CPUS] = {0};
+    struct task *tasks[4] = {NULL, NULL, NULL, NULL};
+    int created = 0;
     irq_flags_t rr_flags = irq_save();
     for (int i = 0; i < 4; i++) {
         struct task *t = task_create("rr_test", nop_entry, NULL);
-        TEST_ASSERT_NOT_NULL(t);
+        if (t == NULL) {
+            break;
+        }
+        tasks[created++] = t;
         scheduler_add_task(t);
         uint32_t assigned = t->assigned_cpu;
-        if (assigned < 4) cpu_hits[assigned]++;
+        if (assigned < MAX_CPUS) cpu_hits[assigned]++;
         scheduler_remove_task(t);
-        t->id = 0;
     }
     irq_restore(rr_flags);
+    for (int i = 0; i < created; i++) {
+        tasks[i]->state = TASK_TERMINATED;
+        task_destroy(tasks[i]);
+    }
 
+    TEST_ASSERT_MESSAGE(created == 4, "task_create failed");
     /* At least 2 different CPUs should have been selected */
     int cpus_used = 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < MAX_CPUS; i++) {
         if (cpu_hits[i] > 0) cpus_used++;
     }
     TEST_ASSERT_MESSAGE(cpus_used >= 2,
@@ -7100,6 +7173,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_wake_during_switch_out);               /* #1234 R3 */
     migrate_spin_cleanup();
     RUN_TEST(test_multiple_cores_isolated);
+    RUN_TEST(test_isolation_test_left_state_clean);      /* #1272 */
 
     /* Integration tests: Priority ordering */
     RUN_TEST(test_high_priority_runs_first);
@@ -7176,6 +7250,7 @@ int test_suite_scheduler(void)
     /* Cross-CPU dispatch infrastructure */
     RUN_TEST(test_cpu_id_returns_correct_value);
     RUN_TEST(test_round_robin_distributes_tasks);
+    RUN_TEST(test_round_robin_left_state_clean);         /* #1272 */
     RUN_TEST(test_scheduler_start_accepts_cpu_param);
     RUN_TEST(test_deadline_boost_raises_priority);
     RUN_TEST(test_inherited_priority_is_floor_on_recompute);
