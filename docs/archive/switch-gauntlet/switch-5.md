@@ -2570,3 +2570,104 @@ Findings:
   boot if QEMU cannot show it; one suite boot per Jetson path;
   `--assert-shares` x20 on Jetson UEFI-direct, padded against unpadded.
 - Then critic A round 3, on Fable.
+
+## Entry 53 (written 02:40 UTC on 2026-11-16, from date): builder A phase A2c (test rework, mutation run, `--assert-shares` on UEFI-direct); boards restored and released again; critic A round 3 started
+
+Source: builder A's A2c report, as received; not yet checked by a critic.
+`fix/percpu-cacheline` f3c0d021 = c3ce3885 (the three-worker test and
+comments) + one document-only commit; the A2c hardware rows are at
+c3ce3885. Kernel code outside tests is c0612fa7's apart from one comment
+in `spinlock.h`. Evidence `gauntlet-5-hw-jetson` 20d62916 and
+`gauntlet-5-hw-pi5` 067161f2.
+
+### The test, reworked (c3ce3885, test only)
+
+`pdm_a` and `pdm_b` are unpinned as in the original test; a third worker
+`pdm_c` rotates its affinity over CPUs 1 to 3 through
+`sched_set_task_affinity()` and carries the coverage condition; the run
+ends after 10 `pdm_c` wake-ups or 1 s. All three workers read `cpu_id()`
+and the flag with interrupts masked. The output gives per-worker wake-ups,
+moves, bad reads and wake-ups per CPU.
+
+Mutation run (QEMU, `A-qemu-mutation-1229-reverted-pdm3-x20-ws.txt`,
+carries the source diff): with `sched.c:2931` reverted to `now_cpu =
+this_cpu`, the test fails 20 of 20, bad reads on all three workers in
+iteration 1. Not booted on hardware.
+
+QEMU at c3ce3885: the test x200 with `WORK_STEALING=ON` 200 of 200
+(`A-qemu-pdm3-c3ce3885-x200-ws.txt`); `make test SLOT_TRACE=ON` passes
+with `test_slot_trace_arrays_one_line_per_cpu` PASS at a committed head
+(`A-qemu-arm-slottrace-make-test-c3ce3885.txt`); `/ci` 12 steps
+(`A-ci-c3ce3885-step01..12-*.txt`), of which step 6 (`make test
+AI_SCHED=ON`) **failed once** on `test_litmus_patterns_pass` (#1230,
+`A-ci-c3ce3885-step06-test-ai-sched-attempt1-FAILED.txt`) and passed on a
+rerun of the same build. `/ci` was not rerun at f3c0d021 (documents only).
+
+### Lab rows at c3ce3885, one boot each, x200
+
+| Row | File | Result |
+|---|---|---|
+| Pi 5 | `A-pi5-pdm3-c3ce3885-x200-boot01.txt` | 200 of 200, bad 0; `pdm_a` 2196 wake-ups, 195 moves in 26 iterations; `pdm_b` 2196, 219 moves in 27; unpinned 91.1% on CPU 3 |
+| Jetson UEFI-direct | `A-uefi-pdm3-c3ce3885-x200-boot01.txt` | 200 of 200, bad 0; `pdm_a` 2237, 78 moves in 4 iterations; `pdm_b` 2234, 72 moves in 4; 79 unpinned wake-ups on CPUs 4 and 5; unpinned 98.2% on CPU 3 |
+| Jetson kexec | `A-kexec-pdm3-c3ce3885-x200-boot01.txt` | 200 of 200, bad 0; `pdm_a` 2800, 1261 moves in 61 iterations; `pdm_b` 2802, 1265 moves in 61; 1324 unpinned wake-ups on CPUs 4 and 5; unpinned 76.4% on CPU 1 |
+| Suite, Jetson UEFI-direct | `A-uefi-suite-c3ce3885-boot01.txt` | completes, 21 failures, none outside the known list; the test passes; 0 halts |
+| Suite, Jetson kexec | `A-kexec-suite-c3ce3885-boot01.txt` | completes, 14 failures, none outside the known list; the test passes; 0 halts |
+
+The reworked test passes everywhere, and the unpinned workers still stick
+to one CPU on the padded kernel: on Jetson UEFI-direct they moved in 4 of
+200 iterations. `pdm_c` gives the #1229 cross-CPU resume on every boot;
+the unpinned steal and placement exposure is real on kexec (61 of 200
+iterations, reaching CPUs 4 and 5) and small on UEFI-direct and Pi 5 in
+these single boots.
+
+`--assert-shares` x20 (`A-assert-shares-compare.txt`), lowest thief share
+min / median / max:
+
+| Path | Kernel | Result |
+|---|---|---|
+| Jetson UEFI-direct | padded c3ce3885 | 20 of 20 pass; 15.3 / 15.9 / 16.4% |
+| Jetson UEFI-direct | unpadded ae1399ba | 20 of 20 pass; 14.1 / 15.0 / 15.9% |
+| Jetson kexec | unpadded ae1399ba | 20 of 20 pass; 15.7 / 16.3 / 16.5% |
+| Jetson kexec | padded c0612fa7 (A2, Entry 46) | 20 of 20 pass; 14.8 / 16.1 / 16.6% |
+
+The check measures each thief's share of stolen tasks under a sustained
+supply from CPU 1. It does not measure where a sleeping task wakes, nor
+latency or throughput, so it cannot see the sticky-wake behaviour. **No
+row of this session compares latency or throughput between a sticky and a
+non-sticky boot.**
+
+Correction to Entry 52 (the critic's and the builder's counts): steal
+counts for iterations of exactly 100 wake-ups per worker are 131 to 136 on
+Pi 5 and 157 to 162 on UEFI-direct; the 164 upper bound includes
+iterations of 101 wake-ups (`A-pdm-normalise.txt`).
+
+### Incident: scratch files edited by another writer
+
+Builder A reports that files in its scratch directory (the PR-body
+template, its patch script, the #1262 comment draft) were changed on disk
+by someone else while it worked, and that it re-read and layered its
+changes on top. The orchestrator did not edit them. Who did is not
+established (possibly a helper agent the builder itself started). Checked
+at 02:33 UTC: #1262 has no new comment (1 comment, dated 2026-11-15
+03:50 UTC), no PR exists from `fix/percpu-cacheline`, #1284 is open with
+one comment. The texts are read in full by the critic before anything is
+posted.
+
+### `0:/slmstore/` on pi-5-1 during A2c
+
+Recorded before and after the one filtered-test boot
+(`A-pi5-slmstore-before-a2c.txt`, `A-pi5-slmstore-after-a2c.txt`, with
+read timestamps this time); restore-check boot
+`A-pi5-restore-check-a2c-boot01.txt`. The comparison is checked by the
+critic.
+
+### Lab end state (orchestrator's checks, 02:33 UTC)
+
+jetson-nano-2: online; SD Linux, BootCurrent 0001, no BootNext; ESP
+`SLMOS.efi` 789cba626338af47 from a fresh read-only mount;
+`/root/slmos.elf` 098f3163; 14 `*.elf*` files; nothing of the session in
+`/tmp`. pi-5-1: online, powered on. No session image in
+`/var/lib/labctl/images`. Both boards released at 02:36 UTC.
+
+Critic A round 3 started at 02:38 UTC: a fresh blind critic on Fable
+(`critic-a3`).
