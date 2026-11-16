@@ -2281,6 +2281,27 @@ static bool vmm_is_wb_block(uint64_t d)
            ((d >> 2) & 0x7) == MAIR_IDX_NORMAL_WB;
 }
 
+/* An L2 table entry whose L3 table maps all 512 pages of its 2 MB as
+ * Write-Back memory: the image-tail block that vmm_init split
+ * (vmm_pmm_split_image_tail), whose heap pages need the alias as much as
+ * the 2 MB blocks do. A partly mapped table (the Jetson firmware DTB's,
+ * mapped page by page so that neighbouring carve-outs stay unreachable)
+ * does not qualify. */
+static bool vmm_is_wb_l3_table(uint64_t d)
+{
+    if ((d & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return false;
+    }
+    const uint64_t *l3 = (const uint64_t *)PA_TO_KVA(d & PTE_ADDR_MASK);
+    for (int p = 0; p < ENTRIES_PER_TABLE; p++) {
+        if ((l3[p] & PTE_TYPE_MASK) != PTE_TYPE_PAGE ||
+            ((l3[p] >> 2) & 0x7) != MAIR_IDX_NORMAL_WB) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* A zeroed 4 KB table from the caller's allocator (PMM pages are
  * identity-mapped, so the pointer is also the table's PA). */
 static uint64_t *vmm_new_table(vmm_table_alloc_fn alloc_table)
@@ -2320,7 +2341,7 @@ int vmm_pmm_alias_init(vmm_table_alloc_fn alloc_table)
             const uint64_t *l2 = get_l2_table(i << L1_BLOCK_SHIFT);
             uint64_t *al2 = NULL;
             for (int e = 0; e < ENTRIES_PER_TABLE; e++) {
-                if (!vmm_is_wb_block(l2[e])) {
+                if (!vmm_is_wb_block(l2[e]) && !vmm_is_wb_l3_table(l2[e])) {
                     continue;
                 }
                 if (al2 == NULL && (al2 = vmm_new_table(alloc_table)) == NULL) {
@@ -2328,7 +2349,8 @@ int vmm_pmm_alias_init(vmm_table_alloc_fn alloc_table)
                     ERROR("pmm alias: no page for an L2 table");
                     return -1;
                 }
-                al2[e] = make_block_desc(l2[e] & VMM_L2_BLOCK_OA_MASK, nc);
+                al2[e] = make_block_desc(((i << L1_BLOCK_SHIFT) |
+                                          ((uint64_t)e << BLOCK_SHIFT)), nc);
             }
             if (al2 == NULL) {
                 continue;

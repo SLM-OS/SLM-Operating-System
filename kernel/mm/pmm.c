@@ -1255,10 +1255,9 @@ static void pmm_poison_arm(void)
                block_state[i + n] != BLOCK_ALLOCATED) {
             n++;
         }
-        uintptr_t a = block_index_to_addr(i);
 #if defined(CONFIG_PMM_UNMAP)
         /* (1) No identity entry: deferred TLB invalidate below. */
-        mapped += vmm_linear_set_present(a, n, false, true);
+        mapped += vmm_linear_set_present(block_index_to_addr(i), n, false, true);
 #else
         mapped += n;
 #endif

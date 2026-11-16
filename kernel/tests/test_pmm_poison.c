@@ -94,6 +94,17 @@ static void test_poison_is_armed(void)
 #endif
     TEST_ASSERT_EQUAL_HEX64(0x1000UL + VMM_PMM_ALIAS_OFFSET,
                             pmm_poison_alias_of(0x1000UL));
+
+    /* The alias covers the whole heap, including the first pages, which
+     * share a 2 MB block with the end of the image (a missing alias
+     * would fault here). */
+    struct pmm_stats st;
+    pmm_get_stats(&st);
+    const volatile uint64_t *first = (const volatile uint64_t *)
+        pmm_poison_alias_of(st.heap_start);
+    const volatile uint64_t *last = (const volatile uint64_t *)
+        pmm_poison_alias_of(st.heap_end - PAGE_SIZE);
+    TEST_ASSERT_TRUE(first[PAGE_SIZE / 8 - 1] != 0x5aUL || last[0] != 0x5aUL);
 }
 
 /* A freed page holds the pattern (past the two link words) and, under
