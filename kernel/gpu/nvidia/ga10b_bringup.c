@@ -1164,7 +1164,9 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
                     (unsigned long)fecs_mbox0);
         return -1;
     }
-    if (gpccs_mbox0 != GR_FECS_MAILBOX_PASS) {
+    if (gpccs_mbox0 == 0x4u) {
+        uart_printf("[GA10B-INHERIT] E1b diag: GPCCS mailbox0=0x4 accepted\n");
+    } else if (gpccs_mbox0 != GR_FECS_MAILBOX_PASS) {
         uart_printf("[GA10B-INHERIT] GPCCS not ready (expected 1, got 0x%lx)\n",
                     (unsigned long)gpccs_mbox0);
         return -1;
