@@ -1232,6 +1232,8 @@ static bool pmm_p_check_page(uintptr_t base, uintptr_t pg, size_t idx,
     if (pmm_s_has(idx)) {
         pmm_s_check(base, pg, idx, full, d);
     } else
+#else
+    (void)idx;
 #endif
     if (full) {
         pmm_p_check(base, pg + skip, PAGE_SIZE - skip, d);
