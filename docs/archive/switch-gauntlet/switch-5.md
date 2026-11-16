@@ -2571,7 +2571,7 @@ Findings:
   `--assert-shares` x20 on Jetson UEFI-direct, padded against unpadded.
 - Then critic A round 3, on Fable.
 
-## Entry 53 (written 02:40 UTC on 2026-11-16, from date): builder A phase A2c (test rework, mutation run, `--assert-shares` on UEFI-direct); boards restored and released again; critic A round 3 started
+## Entry 53 (written 02:34 UTC on 2026-11-16, from date): builder A phase A2c (test rework, mutation run, `--assert-shares` on UEFI-direct); boards restored and released again; critic A round 3 started
 
 Source: builder A's A2c report, as received; not yet checked by a critic.
 `fix/percpu-cacheline` f3c0d021 = c3ce3885 (the three-worker test and
@@ -2667,7 +2667,7 @@ jetson-nano-2: online; SD Linux, BootCurrent 0001, no BootNext; ESP
 `SLMOS.efi` 789cba626338af47 from a fresh read-only mount;
 `/root/slmos.elf` 098f3163; 14 `*.elf*` files; nothing of the session in
 `/tmp`. pi-5-1: online, powered on. No session image in
-`/var/lib/labctl/images`. Both boards released at 02:36 UTC.
+`/var/lib/labctl/images`. Both boards released at about 02:34 UTC.
 
-Critic A round 3 started at 02:38 UTC: a fresh blind critic on Fable
+Critic A round 3 started at about 02:34 UTC: a fresh blind critic on Fable
 (`critic-a3`).
