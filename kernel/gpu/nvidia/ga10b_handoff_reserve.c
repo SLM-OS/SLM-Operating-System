@@ -809,6 +809,9 @@ static void vm_reserve_flush(struct vm_reserve_ctx *c)
     if (c->run_end == c->run_base) {
         return;
     }
+    uart_printf("[1207-vmwalk] reserve range 0x%lx-0x%lx (%lu KB)\n",
+                (unsigned long)c->run_base, (unsigned long)c->run_end,
+                (unsigned long)((c->run_end - c->run_base) >> 10));
     if (pmm_user_reserve_add(c->run_base, c->run_end - c->run_base) != 0) {
         c->table_full = true;
     } else {
@@ -838,10 +841,34 @@ static void vm_reserve_add(struct vm_reserve_ctx *c, uint64_t phys,
     c->run_end  = end;
 }
 
+/* DIAGNOSTIC ONLY (diag/1207-vmwalk, #1207, never merged): count and
+ * print the GMMU leaves and tables vm_reserve_add skips because their
+ * address is not in DRAM (an SMMU IOVA would look like that), and print
+ * every coalesced range that is reserved. */
+static uint32_t g_diag_offdram_leaves, g_diag_offdram_tables;
+static uint64_t g_diag_offdram_bytes;
+
 static void vm_reserve_visit(void *ctx, enum ga10b_gmmu_page_kind kind,
                              uint64_t gpu_va, uint64_t phys, uint64_t bytes)
 {
     struct vm_reserve_ctx *c = ctx;
+    if (!ga10b_phys_in_dram(phys & ~4095ull,
+                            (size_t)(((phys + bytes + 4095ull) & ~4095ull) -
+                                     (phys & ~4095ull)))) {
+        if (kind == GA10B_GMMU_PAGE_LEAF) {
+            g_diag_offdram_leaves++;
+            g_diag_offdram_bytes += bytes;
+            if (g_diag_offdram_leaves <= 64u) {
+                uart_printf("[1207-vmwalk] off-DRAM leaf va=0x%lx phys=0x%lx "
+                            "bytes=0x%lx\n", (unsigned long)gpu_va,
+                            (unsigned long)phys, (unsigned long)bytes);
+            }
+        } else {
+            g_diag_offdram_tables++;
+            uart_printf("[1207-vmwalk] off-DRAM table phys=0x%lx bytes=0x%lx\n",
+                        (unsigned long)phys, (unsigned long)bytes);
+        }
+    }
     if (kind == GA10B_GMMU_PAGE_LEAF) {
         if (gpu_va >= c->skip_va_lo && gpu_va < c->skip_va_hi) {
             return;
@@ -903,6 +930,11 @@ static void reserve_channel_vm(uint64_t inst_phys,
     if (seen->n < VM_RESERVE_MAX_PDBS) {
         seen->pdb[seen->n++] = pdb;
     }
+    uart_printf("[1207-vmwalk] vm @inst 0x%lx PDB 0x%lx: off-DRAM so far: %u "
+                "leaves (%lu KB), %u tables\n", (unsigned long)inst_phys,
+                (unsigned long)pdb, (unsigned)g_diag_offdram_leaves,
+                (unsigned long)(g_diag_offdram_bytes >> 10),
+                (unsigned)g_diag_offdram_tables);
     uart_printf("[ga10b-reserve]   vm @inst 0x%lx: %u tables, %u pages "
                 "(%lu KB) in %u ranges%s%s\n",
                 (unsigned long)inst_phys, (unsigned)c.n_tables,
