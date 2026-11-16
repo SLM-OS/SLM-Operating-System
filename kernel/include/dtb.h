@@ -104,6 +104,15 @@ typedef struct {
 
 #define DTB_MAX_MEMRESERVES 8
 
+/*
+ * Largest DTB blob totalsize SLM-OS accepts as the blob's range (2 MB).
+ * Real blobs are far smaller (Jetson about 1 MB, QEMU virt 1 MB, Pi 5 under
+ * 100 KB), and vmm_map_firmware_dtb maps at most 2 MB. A larger totalsize
+ * is a corrupt header: dtb_get_blob_range rejects it, so the PMM does not
+ * carve up to 4 GB out of the heap on its word.
+ */
+#define DTB_MAX_BLOB_SIZE (2u * 1024u * 1024u)
+
 /* /chosen entropy + bootloader metadata. Populated by dtb_parse. */
 typedef struct {
     /* Firmware-supplied entropy. Each `*_len` is the byte length actually
@@ -203,6 +212,16 @@ int dtb_validate(const void *dtb);
  * those pages are never handed out.
  */
 int dtb_get_memreserves(dtb_memreserve_t *out, int max);
+
+/*
+ * Physical range of the DTB blob itself: its address as handed over by the
+ * boot path and the header's totalsize. Returns false when no blob has been
+ * parsed (or on x86-64, which has none), or when the header's magic is wrong
+ * or its totalsize is 0 or above DTB_MAX_BLOB_SIZE. The PMM reserves this range (#1244):
+ * nothing in the blob's own reserve map covers the blob, and a loader may
+ * put it anywhere in RAM, including right after the kernel image.
+ */
+bool dtb_get_blob_range(uint64_t *addr, uint64_t *size);
 
 /*
  * Get the firmware-supplied /chosen entropy + bootloader info. Returns

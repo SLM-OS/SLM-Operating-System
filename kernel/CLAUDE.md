@@ -805,9 +805,34 @@ uintptr_t buddy_addr = block_addr ^ (PAGE_SIZE << order);
 
 **Freeing:**
 1. Round count up to power of 2 to find block order
-2. Check if buddy is free at same order (look it up in free list)
-3. If buddy is free, remove it and merge into parent (order + 1)
-4. Repeat until buddy is not free or MAX_ORDER reached
+2. Reject the free unless every page of the range is allocated (first page free: double free, WARN; a free page further in: ERROR)
+3. Check if the buddy is one free block of the same order: its first page's `block_state[]` byte is `BLOCK_FREE_HEAD | order`
+4. If it is, remove it and merge into parent (order + 1)
+5. Repeat until the buddy is not such a block or MAX_ORDER reached
+
+**Free-list consistency (#1207):** "every page of the buddy range is free"
+is not the merge test. Two smaller free blocks side by side satisfy it,
+and merging with them unlinks a block from a list it is not on: the
+count of that order goes down (underflows at zero), and a later
+allocation finds a count without a list and splits from `PMM_ALLOC_FAIL`
+(data abort, FAR = `&block_state[huge]`, x0 = -1). This sequence produces
+#1207's signature in QEMU; it is not shown to occur on jetson-nano-2, and
+the halt persists with it fixed (3 of 20 kexec suite boots). The head byte
+is written only by `free_list_add` and cleared by `free_list_remove` /
+`free_list_pop`; keep it that way in new list code. `pmm_add_region` adds
+whole pages only (start up, end down). A count without a list now panics
+by name. `PMM_CHECK=ON` (debug option, `docs/testing.md`) asserts all of
+this per operation and walks the lists after every test suite.
+`pmm_verify_free_lists()` (every build, no table) walks the lists and
+prints a `[pmm-verify] FINDING` with the damaged block's bytes; test
+kernels call it at each suite boundary and once a second from CPU 0's
+tick. **#1207 is still open on Jetson kexec:** 1 to 2 suite boots in 10
+end with a count without a list. In the one boot captured, a listed
+order-4 block read all zero across its start (both links, 64 bytes each
+side of the block boundary) after `test_suite_gpu`. When DRAM changed is
+not known (a non-snooping device can write under a line the CPU holds).
+A header write lost to DC IVAC is excluded on these cores if the note in
+`kernel/arch/arm64/mmu.S` holds: A76 and A78AE execute it as DC CIVAC.
 
 **Statistics API:**
 ```c
@@ -819,8 +844,12 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
 
 `pmm_init` calls `pmm_add_region_split` (not the bare `pmm_add_region`)
 for every memory region it adds to the buddy allocator. The wrapper
-queries `dtb_get_memreserves()` and carves any reservation out of
-the region before adding the surviving subranges.
+takes its reserve list from `pmm_collect_reserves()` (firmware
+`dtb_get_memreserves()` entries, user reserves and the DTB blob) and
+carves every reservation out of the region before adding the surviving
+subranges. The carve is at byte bounds and is not page-rounded, so a
+reserve that starts mid-page currently loses that page to the free
+lists (#1276).
 
 Two reserve encodings are honored — both produced by the same
 `dtb_get_memreserves` call:
@@ -838,6 +867,23 @@ and is exposed via `kernel/include/pmm_internal.h` for the regression
 tests in `kernel/tests/test_pmm.c`. It handles unsorted reservation
 lists, zero-size entries, reservations entirely outside the target
 region, and reservations that fully swallow the region.
+
+**The DTB blob is reserved too (#1244).** The blob's reserve map never
+covers the blob itself, and kexec-tools places it in the first free
+pages after the image, which is where the heap starts (Pi 5 firmware
+puts it in low RAM, also inside the heap). `pmm_collect_reserves`
+appends the blob's page-aligned range (`dtb_get_blob_range()`: address
+and `totalsize`, rejected above `DTB_MAX_BLOB_SIZE`, 2 MB) to the carve
+list on every boot path that passes the blob to `dtb_parse` (Pi 5's
+`x0`-NULL scan fallback does not, #1277; QEMU hands over no DTB), and
+`pmm_init` ends with a free-list walk that prints `PMM: DTB at ... is
+clear of every free block` or a `[WARN]` with the first overlapping
+block (or, for a rejected header, `PMM: DTB at ... has no usable
+totalsize`). `test_suite_dtb` re-parses the boot blob after its own test
+blobs, so later suites see the real one. A new boot path that hands over
+a DTB needs nothing more than `dtb_parse` before `pmm_init`. The arm64
+header's `image_size` is `__kernel_end - _start` (`.bss` and boot stack
+included); UEFI does not read it.
 
 **Re-entry guard (PR #598):** `pmm_add_region_split` uses file-scope
 scratch arrays (`pmm_split_*`) shared across calls. The "single-
@@ -857,7 +903,8 @@ Tests in `kernel/tests/test_pmm.c` verify:
 - Basic alloc/free
 - Power-of-two rounding
 - Block splitting creates correct buddies
-- Coalescing enables larger allocations
+- Coalescing enables larger allocations (run with the order-0 list drained; a Jetson kexec boot has ~100 free single pages, which made the undrained proofs fail on every Jetson kexec suite boot, #1109)
+- Free-list consistency: no merge with a split buddy range, no listing of a partial page, no free over a free page (#1207)
 - Exhaustion and recovery
 - Mixed workload stress
 - `pmm_carve_reserves` (memreserve carve helper) — 11 cases including

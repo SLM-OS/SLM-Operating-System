@@ -14,6 +14,7 @@
 #if !defined(PLATFORM_X86_64)
 #include "../include/dtb.h"
 #endif
+#include "../include/pmm.h"
 #include "test_filter.h"
 #include <stdbool.h>
 
@@ -129,7 +130,8 @@ static int test_harness_finish(int total_failures);
 #define RUN_SUITE(fn) \
     do { \
         if (harness_suite_selected(#fn)) { \
-            total_failures += fn(); \
+            total_failures += fn(); PMM_CHECK_WALK("after " #fn); \
+            (void)pmm_verify_free_lists("after " #fn); \
         } \
     } while (0)
 
@@ -190,6 +192,12 @@ static int harness_run_suites(void)
     return total_failures;
 #endif
 
+    /* PMM_CHECK builds walk the free lists here and after every suite, so
+     * a corrupt list is reported at the first suite boundary after it was
+     * damaged (#1207). Nothing without the option. */
+    PMM_CHECK_WALK("before the first suite");
+    (void)pmm_verify_free_lists("before the first suite");
+
     /* Run model_mem smoke test FIRST so an init regression (e.g.
      * silent PMM oversubscribe on a tight-RAM platform) surfaces
      * before downstream tests have a chance to silently no-op or
@@ -203,6 +211,8 @@ static int harness_run_suites(void)
         if (ipc_failures == 0 && !test_filter_active()) {
             uart_puts("[INFO] IPC tests passed\n");
         }
+        PMM_CHECK_WALK("after test_suite_ipc");
+        (void)pmm_verify_free_lists("after test_suite_ipc");
     }
 
     RUN_SUITE(test_suite_pi_mutex);

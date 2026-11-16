@@ -1170,6 +1170,17 @@ static void test_ncmem_boot_maint_covers_nc_block(void)
 #endif
 
 #if !defined(PLATFORM_RASPI5)
+/* The arm64 image header's image_size must reach __kernel_end; see the
+ * image_size comment in boot.S (#1244). Pi 5 has no header. */
+static void test_image_header_size_covers_kernel_end(void)
+{
+    extern char _start[], __kernel_end[];
+    uint64_t image_size = ((const volatile uint64_t *)(const void *)_start)[2];
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(__kernel_end - _start), image_size);
+}
+#endif
+
+#if !defined(PLATFORM_RASPI5)
 /*
  * efi_range_os_owned decides whether the EFI stub cleans the NC block
  * with UEFI's map live (#1196). Maps follow the jetson-nano-2 layout
@@ -1325,6 +1336,10 @@ int test_suite_vmm(void)
 #endif
 #if !defined(PLATFORM_RASPI5)
     RUN_TEST(test_efi_range_os_owned_nc_block);
+#endif
+#if !defined(PLATFORM_RASPI5)
+    /* Own guard: not tied to the EFI tests' block. */
+    RUN_TEST(test_image_header_size_covers_kernel_end);
 #endif
     RUN_TEST(test_va_pa_coherency);
 

@@ -90,13 +90,13 @@ void pmm_init(void);
  * code, but no protection is granted. The caller is responsible for
  * the ordering — there's no late-binding rescan.
  *
- * `size` is the byte length; the carve helper page-rounds internally
- * so partial-page reservations protect the containing 4 KB page.
+ * `size` is the byte length. The carve is at byte bounds and is not
+ * page-rounded: a range that starts mid-page does not protect that page
+ * (#1276), so pass page-aligned ranges.
  *
  * Returns 0 on success, -1 if the user-reserve table is full
- * (PMM_MAX_USER_RESERVES, file-static in pmm.c) or `size == 0`. The
- * cap is currently 16 — generous for the kexec-handoff use case
- * which adds a handful of regions per boot.
+ * (PMM_MAX_USER_RESERVES in pmm_internal.h, currently 2048, sized for
+ * the GA10B weights-pool extents list) or `size == 0`.
  *
  * Thread-safety: file-static array, no locking. PMM init runs early
  * in single-CPU context before scheduler bring-up, so callers don't
@@ -191,7 +191,12 @@ void pmm_free_page(void *page);
  * Free contiguous physical pages.
  *
  * @page: Physical address of first page to free.
- * @count: Number of pages to free.
+ * @count: Number of pages to free (rounded up to a power of two, as in
+ *         pmm_alloc_pages).
+ *
+ * Every page of the rounded range must be allocated. A range whose first
+ * page is free is a double free (WARN); a range that holds a free page
+ * further in is rejected with an ERROR. Nothing is freed in either case.
  */
 void pmm_free_pages(void *page, size_t count);
 
@@ -236,5 +241,41 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
  * order-19 fault).
  */
 void pmm_dump_free_list(unsigned int order, size_t max_blocks);
+
+/*
+ * Free-list verification (#1207), in every build; no table, no cost
+ * unless called.
+ *
+ * pmm_verify_free_lists() walks every free list (links inside the heap
+ * and aligned, each element marked as a listed block of its order, prev
+ * links, length against the count). Each inconsistency is printed once as
+ * a `[pmm-verify] FINDING` block (time, `where`, the element holding the
+ * bad link with its first 64 bytes and the 64 bytes before it, every
+ * order's count against its walked length); the kernel keeps running.
+ * Returns the number of orders with an inconsistency. `where` is also
+ * remembered as the last suite boundary for later reports.
+ * pmm_verify_tick() is the same walk for a timer tick: it try-locks,
+ * never waits, and prints only on a new finding.
+ * pmm_verify_finding_count() is the number of findings printed so far.
+ */
+unsigned pmm_verify_free_lists(const char *where);
+void pmm_verify_tick(void);
+unsigned pmm_verify_finding_count(void);
+
+/*
+ * PMM_CHECK build option (#1207, debug only; see kernel/mm/pmm.c).
+ *
+ * pmm_check_walk() walks every free list (links, order tags, page state,
+ * list length against free_counts, the page total) and prints one
+ * `[pmm-check] <where>: ok (...)` line; the first inconsistency panics
+ * with the list state instead. PMM_CHECK_WALK() is the call for code that
+ * is also built without the option, where it expands to nothing.
+ */
+#if defined(CONFIG_PMM_CHECK)
+unsigned pmm_check_walk(const char *where);
+#define PMM_CHECK_WALK(where)   ((void)pmm_check_walk(where))
+#else
+#define PMM_CHECK_WALK(where)   ((void)0)
+#endif
 
 #endif /* PMM_H */
