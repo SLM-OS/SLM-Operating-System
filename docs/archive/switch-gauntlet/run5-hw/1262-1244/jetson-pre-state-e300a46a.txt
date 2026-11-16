@@ -1,0 +1,37 @@
+Mon Nov 16 07:01:31 AM UTC 2026
+5.15.148-tegra
+BootCurrent: 0001
+Timeout: 5 seconds
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+Boot0000* Enter Setup
+098f316368baf94ef117195d30cda8e1f2124fc9e66fecef7bce4c15f815d6c5  /root/slmos.elf
+-rwxr-xr-x  1 root root      39717 2026-04-30T09:01:30 jetson-kexec-slmos.sh
+-rwxr-xr-x  1 root root   10089968 2026-11-05T04:10:01 slmos-1079.elf
+-rwxr-xr-x  1 root root    8885392 2026-11-03T14:16:05 slmos-1088.elf
+-rwxr-xr-x  1 root root   10220056 2026-11-03T20:02:35 slmos-1092.elf
+-rwxr-xr-x  1 root root    9782344 2026-11-08T17:55:18 slmos-1193-stage.efi
+-rwxr-xr-x  1 root root   10175560 2026-11-09T20:25:38 slmos-1194-uefi.efi
+-rwxr-xr-x  1 root root    8595976 2026-10-29T23:10:04 slmos-A.elf
+-rwxr-xr-x  1 root root    8596168 2026-10-29T23:10:06 slmos-B.elf
+drwxr-xr-x  4 root root       4096 2026-05-18T09:43:48 slmos-build
+drwxr-xr-x  5 root root       4096 2026-11-07T01:52:52 slmos-c3k
+-rwxr-xr-x  1 root root    8596488 2026-10-29T23:22:34 slmos-C.elf
+-rwxr-xr-x  1 root root    7740672 2026-05-06T13:03:15 slmos-combined.elf
+-rwxr-xr-x  1 root root    7740520 2026-05-06T13:03:14 slmos-control.elf
+drwxr-xr-x  4 root root       4096 2026-11-03T15:16:38 slmos-cuda
+-rwxr-xr-x  1 root root    8596488 2026-10-30T02:36:59 slmos-D.elf
+-rwxr-xr-x  1 root root    8602432 2026-10-30T13:11:13 slmos-E.elf
+-rwxr-xr-x  1 root root    8864840 2026-11-08T05:40:44 slmos-efi-pre1193.efi
+-rwxr-xr-x  1 root root    8864840 2026-11-09T02:41:58 SLMOS.efi.pre1194
+-rwxr-xr-x  1 root root    9796520 2026-10-31T16:47:01 slmos.elf
+-rwxr-xr-x  1 root root    8316080 2026-10-29T15:28:47 slmos.elf.pre-pr6
+-rwxr-xr-x  1 root root    7515528 2026-04-29T14:58:24 slmos.elf.prev
+-rwxr-xr-x  1 root root   16558408 2026-04-28T14:51:05 slmos.elf.symposium
+-rw-r--r--  1 root root      39725 2026-05-13T18:33:58 slmos-handoff.h
+-rw-r--r--  1 root root       2194 2026-11-03T14:16:20 slmos-kexec-1088.log
+-rw-r--r--  1 root root       1963 2026-10-29T23:22:40 slmos-kexec-ab.log
+-rw-r--r--  1 root root       1961 2026-10-29T23:10:21 slmos-kexec-helpers.log
+-rwxr-xr-x  1 root root      53287 2026-10-29T21:47:16 slmos-kexec.new
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.zLIIvRcpaj/EFI/SLMOS/SLMOS.efi

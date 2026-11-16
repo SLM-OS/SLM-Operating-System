@@ -1,0 +1,5 @@
+07:05:28 start mode=kexec n=3 elfs=[/root/slmos-1265-suite-e300a46a.elf /root/slmos-1265-suite-e300a46a.elf /root/slmos-1265-suite-e300a46a.elf] skip_current_boot_id=c30795a9-00eb-437d-8e26-eab140ae15d9
+07:06:55 trigger 1/3 elf=/root/slmos-1265-suite-e300a46a.elf boot_id=a4b5d080-73c7-4032-89ef-633ccd5d9305 state+uptime=[running 26.27 ] reply=[5fb2c8d91046423c ]
+07:10:58 trigger 2/3 elf=/root/slmos-1265-suite-e300a46a.elf boot_id=1c013697-1ec2-40d4-9257-b59f38f32d5f state+uptime=[running 25.13 ] reply=[5fb2c8d91046423c ]
+07:17:50 trigger 3/3 elf=/root/slmos-1265-suite-e300a46a.elf boot_id=38e3caf4-0eec-4295-9792-8cbff1c178ac state+uptime=[running 25.50 ] reply=[5fb2c8d91046423c ]
+07:17:50 end triggers=3
