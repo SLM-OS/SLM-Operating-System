@@ -1,0 +1,3 @@
+00:35:43 start mode=kexec n=1 elfs=[/root/slmos-1263-jet-pdmnew-d09b063b.elf] skip_current_boot_id=none pid=2272629
+00:37:06 trigger 1/1 elf=/root/slmos-1263-jet-pdmnew-d09b063b.elf boot_id=16d6a47d-eee6-41cd-aab6-52cd2ec28a4d state+uptime=[running 23.28 ] reply=[09c05fea21de9c6b ]
+00:37:06 end triggers=1

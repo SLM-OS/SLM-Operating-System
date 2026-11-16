@@ -45,3 +45,22 @@ A-uefi-pdmnew-d09b063b-x200-boot01.txt | build 20261115141549 (d09b063b) | Boot 
    moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
    moved distribution: 200 x moved=6; 
    runs (larger of a/b) bands: 6-10: 200; 
+A-kexec-pdmdiag-P-6247f73a-x200-boot01.txt | build 20261115135009 (6247f73a) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=50674 avg=74919 max=401608
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 1 x moved=5; 107 x moved=6; 88 x moved=7; 4 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 66; 6-10: 133; 26-50: 1; 
+   steals: total 1843 over 200 iterations, iterations with steals=0: 0
+   wake-ups per CPU, worker a: cpu0=0 cpu1=0 cpu2=0 cpu3=0 cpu4=524 cpu5=613  | worker b: cpu0=0 cpu1=0 cpu2=0 cpu3=0 cpu4=693 cpu5=549 
+A-kexec-pdmdiag-U-6439476f-x200-boot01.txt | build 20261115135007 (6439476f) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=28419 avg=54386 max=121265
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 16 x moved=5; 62 x moved=6; 110 x moved=7; 12 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 162; 6-10: 36; 11-25: 2; 
+   steals: total 1161 over 200 iterations, iterations with steals=0: 0
+   wake-ups per CPU, worker a: cpu0=0 cpu1=312 cpu2=310 cpu3=50 cpu4=123 cpu5=124  | worker b: cpu0=0 cpu1=273 cpu2=282 cpu3=60 cpu4=128 cpu5=126 
+A-kexec-pdmnew-d09b063b-x200-boot01.txt | build 20261115141549 (d09b063b) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=50751 avg=62176 max=70938
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 200 x moved=6; 
+   runs (larger of a/b) bands: 1-5: 86; 6-10: 114; 
