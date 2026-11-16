@@ -3194,3 +3194,76 @@ Every boot prints one `[ERROR] PMM: free of 4 pages ... rejected: page
 provoking it on purpose (it passes), not a finding.
 
 Next: more baseline boots while the builder finishes step 1 in QEMU.
+
+## Entry 60 (written 21:50 UTC on 2026-11-16, from date): baseline 3 in 16; the unmap image faults at boot; poison-only shows the inherited GPU needs "free" pages; ELPG experiment started
+
+Evidence `gauntlet-5-hw-jetson` db1a2733, `run5-hw/1207-gpu/`.
+
+**Baseline, main b548f29d, kexec suite: 3 PMM halts in 16 boots** (boots 05,
+11, 12; files `base-kexec-suite-b548f29d-boot01..16.txt`). All three:
+the walk after `test_suite_oplib_gpu_as` clean, the walk after
+`test_suite_gpu` finds a listed free-block head with both links and its
+first 64 bytes zero, then `test_exhaustion_recovery` halts on it.
+
+| Boot | Damaged head (order) | MNIST hand-off pushbuf | Offset |
+|---|---|---|---|
+| 05 | 0x13a6c0000 (5) | 0x13a5b0000 | +0x110000 |
+| 11 | 0x13b640000 (5) | 0x13b530000 | +0x110000 |
+| 12 | 0x13b600000 (7); the 64 bytes before it also zero | 0x13b500000 | +0x100000 |
+| run 5 boot04 (647c2c33) | 0x139580000 (4) | 0x139460000 | +0x120000 |
+
+Observation: in four of four, the zeros sit 1.0 to 1.2 MB above that
+boot's MNIST pushbuf. Inference: one region of at least about 128 KB in
+Linux-allocated memory, not covered by the hand-off reservation, is
+written with zeros during `test_suite_gpu`; a halt needs a free-block
+head to fall inside it. The 13 complete boots each have the ten listed
+failures and nothing unlisted. Bar for a fix from this rate: 0 halts and
+0 damage in at least 27 kexec boots (5 x 16/3).
+
+**Diagnostic images** (builder, `diag/1207-poison` 76ec16fd, banner
+`76ec16fd-dirty`; what was dirty is asked of the builder).
+- `PMM_POISON=ON PMM_UNMAP=ON` (sha b25c5f28), 1 boot
+  (`pu-kexec-suite-76ec16fd-boot01.txt`): data abort at arming, right
+  after `PMM initialized`, ELR 0x80027ca4 = `vmm_bbm_replace`, FAR
+  0xffffff813b3a6ec8 (PA 0x13b3a6ec8 with a high prefix; RAM above 4 GB,
+  which Jetson maps with 1 GB L1 blocks and QEMU does not have), then
+  3670 nested dumps from `task_canary_check_all_impl` (no task yet). A
+  defect in the diagnostic code; sent back to the builder.
+- `PMM_POISON=ON` only (sha b11c55f7), 2 boots
+  (`po-kexec-suite-76ec16fd-boot01,02.txt`): suite completes (8 and 9
+  failures). Arming poisons 1803694 free pages in 976 ms; a full scan
+  takes 12.3 s, a per-test edge scan 475 ms. **In both boots
+  `[GA10B-INHERIT] FECS not ready (expected 1, got 0x0)` twice inside
+  `test_suite_gpu`: the inherited MNIST channel never comes up**, MNIST
+  does not run (the three #1271 tests pass because rc < 0), and every
+  scan in and after `test_suite_gpu` is clean. In all 16 baseline boots
+  the inherit succeeded at that point (`[gpu-kind=0] channel bring-up:
+  inherit 2072 us`). Inference, two boots: overwriting the initially free
+  pages destroys state the inherited GPU context needs, i.e. Linux-left
+  GPU state lives in pages the PMM treats as free. Plain poison at arming
+  therefore suppresses the GPU activity to be bracketed; the builder is
+  adding a snapshot mode (hash the initially free pages, poison only
+  later frees).
+- Both poison boots also report, before the first suite, 192 bytes of
+  **non-zero** structured data written into free block 0x104000000 (at
+  PA 0x104f6f0c0 and 0x104f950c0), with 0x7ffff... IOVA-looking words:
+  a second device writing free memory, not the #1207 zeros. Kept as a
+  separate finding; device not identified.
+- Unlisted failures under the poison build: `test_l1_block_mapping_detection`
+  (both boots; likely the alias mapping) and
+  `test_component_cleanup_ctx_is_per_task` (boot 02 only). Sent to the
+  builder.
+
+**ELPG.** On SD Linux before kexec: `elpg_enable=1`, `aelpg_enable=1`,
+`elpg_residency` 98 %, 12 ELPG entries since boot; `slmos-kexec` (on the
+board = main's script, sha 3d5e1901) does not touch ELPG, and its default
+channel-preserving mode leaves the GPU and its PMU firmware running.
+Hypothesis, untested: the PMU firmware keeps power-gating GR after kexec
+and saves GR state by DMA into a buffer in its own VM; the hand-off
+reservation walks only channel VMs. That would explain both the zeros
+after GR activity and the FECS failure when that memory is poisoned.
+**Experiment E1 (started 21:40 UTC):** the unmodified baseline image,
+with `aelpg_enable` and `elpg_enable` set to 0 on Linux just before
+`slmos-kexec` (trigger `o-trigger-pre.sh.txt`, readback logged per boot).
+Prediction if ELPG is the writer: no halt and no finding after
+`test_suite_gpu` in about 27 boots.
