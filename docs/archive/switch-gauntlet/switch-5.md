@@ -3123,3 +3123,35 @@ against the fixed test could stop them.
 - Not done: #1285 (stacked on #1266) is not updated; bringing #1266's last
   commits into it conflicts in `kernel/tests/test_scheduler.c` (Entry 56).
   The `c2/switch-window-r2` remote branch is not deleted.
+
+## Entry 58 (written 19:05 UTC on 2026-11-16, from date): lab session for #1207 (PMM halt on Jetson kexec), start
+
+Brief: root-cause #1207 with a discriminating build (poison on free, unmap
+on free, check on alloc, full scan), bracket it inside `test_suite_gpu`,
+compare kexec with UEFI-direct, fix only to the brief's bar. One
+orchestrator (this log), one builder, a blind critic on Fable at the end.
+Board: jetson-nano-2 only. Nothing merges.
+
+- **Base: main b548f29d** (#1282 merged; #1265, #1283, #1266, #1285 also
+  in). Code branch `diag/1207-poison` from b548f29d. Evidence:
+  `gauntlet-5-hw-jetson`, `docs/archive/switch-gauntlet/run5-hw/1207-gpu/`.
+- **Board as found** (18:55 UTC): health online (ping, serial, power on);
+  `recovery_mode` binding desired `released`, last state `open`; no claims
+  in the lab; claimed by this session (hold `session`). SD Linux
+  5.15.148-tegra, BootCurrent 0001, no BootNext; NVMe ESP
+  `\EFI\SLMOS\SLMOS.efi` sha256 789cba62... (mounted read-only to check);
+  14 `*.elf*` files in `/root`.
+- **Builder** started on step 1 (QEMU and code only): options for
+  poison-on-free, unmap-on-free with a PMM-only alias, check-on-alloc, and
+  a full scan built on #1283's verifier, with a per-test scan inside
+  `test_suite_gpu`.
+- **Baseline (step 2's rate without any change)**: the orchestrator runs
+  main b548f29d's unmodified Jetson test kernel, kexec, one boot per
+  `boot_test` call, pattern `Task 'main' \(id=\d+\) exiting`, timeout
+  540 s, host-side trigger (run 5's `B-trigger.sh`, temp dir changed).
+  Image `/root/slmos-1207-base-b548f29d.elf`, sha256 8c608c78..., banner
+  `SLM-OS v0.4.0 build 20261116185912 (b548f29d)`, `PMM_CHECK` off.
+  Boot 01: the trigger's temp directory had not been created, so its
+  redirect failed and it fired nothing; the orchestrator ran the same kexec
+  command by hand at 19:04:08 UTC, Linux uptime 80 s (normally about
+  25 s). The capture runs from power-on either way.
