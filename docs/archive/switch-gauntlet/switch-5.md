@@ -2828,3 +2828,29 @@ at 02:33 UTC from a fresh read-only mount, after the last lab use),
 `kernel_2712.img`, restore-check banner b42b2c1d
 (`A-pi5-restore-check-a2c-boot01.txt`). No session image in
 `/var/lib/labctl/images`.
+
+## Entry 55 (written 07:25 UTC on 2026-11-16, from date): PR #1265 and PR #1283 merged on the user's instruction
+
+- **PR #1265** squash-merged as `a07a1383` (head e300a46a). #1244 closed
+  by it. Its head had moved since Part B was stacked on it (661204e6): two
+  review-fix commits from another session (8b6b97c1, e300a46a) touching
+  `pmm.c`, `pmm.h`, `pmm_internal.h`, `test_pmm.c`, `test_dtb.c`, `dtb.h`,
+  `dtb.c`, `dtb_x86_stub.c` and two documents.
+- **`fix/pmm-coalesce` brought up to date:** e300a46a merged in (no
+  conflicts), then `main` recorded as merged (the trees of `main` and
+  e300a46a were identical); head 31d04473. No hand edits.
+- **Checks at 31d04473:** `make test` (QEMU ARM64) passes, 105 suite
+  summaries, 2565 tests, 2544 passed, 0 failed, 21 ignored (scratch
+  `b/B-qemu-arm-make-test-31d04473-serial.txt`; not pushed to the evidence
+  branch); GitHub build matrix 122 of 122. **No hardware row and no full
+  `/ci` at 31d04473:** the Part B hardware rows remain at 647c2c33, before
+  both the later Part B commits and the two #1265 review-fix commits.
+- **PR #1283** squash-merged as `7181718b`, with the PR body as the commit
+  message (as the PR asks, so that e3c22600's overstated sentence does not
+  reach `main`). `closingIssuesReferences` was empty before the merge;
+  #1207, #1228 and #1109 are open after it.
+- The eight idle builder and critic agents of the session were stopped at
+  about 06:50 UTC. No claims, no scheduled jobs, no session process left.
+- Not done: PR #1285 (Part A) is not merged; its base PR #1266 is open.
+  The two coalescing tests can now come off #1109's list (comment already
+  on #1109); the list was not edited.
