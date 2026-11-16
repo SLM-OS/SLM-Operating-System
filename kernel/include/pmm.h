@@ -191,7 +191,12 @@ void pmm_free_page(void *page);
  * Free contiguous physical pages.
  *
  * @page: Physical address of first page to free.
- * @count: Number of pages to free.
+ * @count: Number of pages to free (rounded up to a power of two, as in
+ *         pmm_alloc_pages).
+ *
+ * Every page of the rounded range must be allocated. A range whose first
+ * page is free is a double free (WARN); a range that holds a free page
+ * further in is rejected with an ERROR. Nothing is freed in either case.
  */
 void pmm_free_pages(void *page, size_t count);
 
@@ -236,5 +241,41 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
  * order-19 fault).
  */
 void pmm_dump_free_list(unsigned int order, size_t max_blocks);
+
+/*
+ * Free-list verification (#1207), in every build; no table, no cost
+ * unless called.
+ *
+ * pmm_verify_free_lists() walks every free list (links inside the heap
+ * and aligned, each element marked as a listed block of its order, prev
+ * links, length against the count). Each inconsistency is printed once as
+ * a `[pmm-verify] FINDING` block (time, `where`, the element holding the
+ * bad link with its first 64 bytes and the 64 bytes before it, every
+ * order's count against its walked length); the kernel keeps running.
+ * Returns the number of orders with an inconsistency. `where` is also
+ * remembered as the last suite boundary for later reports.
+ * pmm_verify_tick() is the same walk for a timer tick: it try-locks,
+ * never waits, and prints only on a new finding.
+ * pmm_verify_finding_count() is the number of findings printed so far.
+ */
+unsigned pmm_verify_free_lists(const char *where);
+void pmm_verify_tick(void);
+unsigned pmm_verify_finding_count(void);
+
+/*
+ * PMM_CHECK build option (#1207, debug only; see kernel/mm/pmm.c).
+ *
+ * pmm_check_walk() walks every free list (links, order tags, page state,
+ * list length against free_counts, the page total) and prints one
+ * `[pmm-check] <where>: ok (...)` line; the first inconsistency panics
+ * with the list state instead. PMM_CHECK_WALK() is the call for code that
+ * is also built without the option, where it expands to nothing.
+ */
+#if defined(CONFIG_PMM_CHECK)
+unsigned pmm_check_walk(const char *where);
+#define PMM_CHECK_WALK(where)   ((void)pmm_check_walk(where))
+#else
+#define PMM_CHECK_WALK(where)   ((void)0)
+#endif
 
 #endif /* PMM_H */

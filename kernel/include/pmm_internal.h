@@ -70,4 +70,38 @@ size_t pmm_free_overlap_count_locked(uintptr_t start, uintptr_t end);
  */
 int pmm_collect_reserves(dtb_memreserve_t *out, int max);
 
+
+/*
+ * Test hooks for kernel/tests (#1207). The test sources are part of every
+ * image (CMake TEST_SOURCES), so these are too.
+ *
+ * pmm_test_add_region() adds [start, end) to the allocator the way
+ * pmm_init adds a carved subrange. The caller must own every page the
+ * range touches (allocated from the PMM, not freed); ownership of the
+ * pages the allocator lists passes to the allocator.
+ *
+ * pmm_free_block_order() returns the order of the listed free block that
+ * starts at addr, or -1 when no listed block starts there. Walks the
+ * lists: tests only.
+ */
+void pmm_test_add_region(uintptr_t start, uintptr_t end);
+int pmm_free_block_order(uintptr_t addr);
+
+/*
+ * Test hook for the free-list verifier: under pmm_lock, clear the next
+ * link of the head of the lowest order that has two listed blocks, verify
+ * twice, put the link back and verify again. Returns that order (-1: no
+ * such order) and the three results (orders with an inconsistency). The
+ * lock is held throughout, so no allocation ever sees the cleared link.
+ */
+int pmm_test_verify_cleared_link(unsigned int *first, unsigned int *second,
+                                 unsigned int *restored);
+
+/*
+ * Test hook: whether the verifier's dump would read the 64 bytes at addr
+ * (only a free page inside the heap is read; the heap range has unmapped
+ * holes on Jetson).
+ */
+bool pmm_test_dump_readable(uintptr_t addr);
+
 #endif /* PMM_INTERNAL_H */

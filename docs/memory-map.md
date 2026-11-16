@@ -309,7 +309,7 @@ The PMM uses a buddy allocator for O(log n) allocation and freeing:
 
 **Algorithm:**
 1. `pmm_alloc_pages(n)`: Find smallest free block >= 2^⌈log₂(n)⌉, split if needed
-2. `pmm_free_pages(addr, n)`: Free block, recursively merge with buddy if both free
+2. `pmm_free_pages(addr, n)`: Free block, recursively merge with buddy while the buddy is one free block of the same order
 
 **Buddy Address Calculation:**
 ```c
@@ -317,6 +317,58 @@ buddy_addr = block_addr XOR (block_size)
 ```
 
 Two blocks are buddies if they are the same size and XOR to produce their parent address.
+
+**Free-list consistency rules (#1207).** `block_state[]` holds one byte per
+page. Every page of a free block is "not allocated", and the first page of
+a block on a free list carries `BLOCK_FREE_HEAD | order`, written only by
+`free_list_add` and cleared by `free_list_remove` / `free_list_pop`.
+
+- **A merge needs one buddy block of exactly that order.** `is_buddy_free`
+  compares the buddy's first page with `BLOCK_FREE_HEAD | order`. It used
+  to test that every page of the buddy range was free, which is also true
+  of two smaller free blocks lying side by side; merging with such a range
+  unlinked a block from a list it was not on, counted that list down (an
+  underflow at zero) and left the rest of the range listed inside the
+  merged block. A later allocation then found a non-zero count over an
+  empty list, split from the failure sentinel and wrote `block_state[]`
+  far outside the array. This sequence produces #1207's signature in QEMU.
+  It is not shown to occur on jetson-nano-2, and the halt persists with it
+  fixed (3 of 20 kexec suite boots).
+- **A free must cover allocated pages only.** `pmm_free_pages` rejects a
+  range whose first page is free (double free, WARN) and a range that
+  holds a free page further in (ERROR): an over-sized count, or a free
+  after part of the block was already freed. Freeing part of an allocated
+  block is allowed; the rest stays allocated.
+- **Regions are added in whole pages.** `pmm_add_region` rounds the start
+  up and the end down, so a page shared with a reservation is never
+  listed.
+- **A count without a list stops the kernel by name.** `buddy_alloc`
+  panics with `PMM: order N free list is empty but its count is M` instead
+  of splitting from the sentinel, `free_list_remove` panics on a zero
+  count, and `free_list_pop` panics, after printing the block, when the
+  head's next link is NULL with blocks still counted or is not a listed
+  block of this order.
+
+`pmm_verify_free_lists()` walks the lists in any build and prints a
+`[pmm-verify] FINDING` block with the damaged block's contents
+(`docs/testing.md`, "PMM Free-List Verification"); test kernels call it at
+every suite boundary and once a second. The `PMM_CHECK=ON` build option
+adds per-operation assertions (`docs/testing.md`, "PMM_CHECK").
+
+**Open on hardware (#1207).** On jetson-nano-2 after kexec, 1 to 2 suite
+boots in 10 still end with a count without a list (3 of 20 with the merge
+rule above in place, so that rule does not prevent it). In the one boot
+captured with the verifier, a listed order-4 block read all zero across
+its start (both links, its first 64 bytes and the 64 bytes before it)
+after `test_suite_gpu`, having read intact after the suite before, and
+`block_state[]` still marked it as a listed head. When the bytes changed
+in DRAM is not known: a device that does not snoop the CPU caches can
+write DRAM under a line the CPU holds, and the CPU sees it only when the
+line leaves the cache. A header write lost to a cache discard would look
+the same and is architecturally possible, but the tree records that
+Cortex-A76 and A78AE execute DC IVAC as DC CIVAC and DC ISW as a local
+clean and invalidate (`kernel/arch/arm64/mmu.S`, `smp_boot.S`,
+`kernel/sched/smp.c`), which excludes it on these boards if that holds.
 
 ### Interface
 

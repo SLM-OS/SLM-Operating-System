@@ -306,6 +306,18 @@ if(SLOT_TRACE)
     add_compile_definitions(CONFIG_SLOT_TRACE=1)
 endif()
 
+# PMM free-list and count assertions (#1207): every free-list operation
+# checks its preconditions (count zero on remove, block not on that order's
+# list, empty list with a non-zero count, a buddy range that is free but is
+# not one block, an over-sized free) and panics with the list state at the
+# operation that finds them broken; the test harness walks every free list
+# after each suite. Debug only; with it off pmm.c compiles to the same
+# code. See kernel/mm/pmm.c and docs/testing.md.
+option(PMM_CHECK "PMM free-list and count assertions (#1207, debug only)" OFF)
+if(PMM_CHECK)
+    add_compile_definitions(CONFIG_PMM_CHECK=1)
+endif()
+
 option(STAGE25_TRACE_PI5 "Pi 5 vector + trampoline trace markers (debug only)" OFF)
 if(PLATFORM STREQUAL "RASPI5" AND STAGE25_TRACE_PI5)
     add_compile_definitions(STAGE25_TRACE_PI5=1)

@@ -350,6 +350,79 @@ prints within 1 s. The harness runs only those two tests, because CPUs 1 to
 3 stay halted. With `SLOT_TRACE=ON` as well, the first fault goes through
 `slot_trace_dump()`, which ends the run through semihosting.
 
+### PMM Free-List Verification (every build)
+
+`pmm_verify_free_lists(where)` (`kernel/mm/pmm.c`, #1207) walks every
+free list: each link inside the heap and aligned for its order, each
+element marked in `block_state[]` as the head of a listed block of that
+order, prev links, and the length against `free_counts[]`. It keeps no
+table (about 200 bytes of `.bss`), so it does not move the heap the way
+`PMM_CHECK` does. An inconsistency is printed once and the kernel keeps
+running:
+
+```
+[pmm-verify] FINDING 1 at 13489 ms (after test_suite_x; last suite boundary: after test_suite_w)
+  order 5: list ends early: next link is NULL with blocks still counted
+  count 48, walked 1, head 0x..., bad link value 0x0, held by 0x...
+  the element holding the bad link:
+  block 0x...: page state 0x85, page before 0x1, page after 0x0
+  first 64 bytes at 0x...: <8 words>
+  64 bytes before, at 0x...: <8 words>
+  order: count / walked length / head
+  ...
+[pmm-verify] end of finding
+```
+
+It runs at the end of `pmm_init`; in a test kernel also before the first
+suite, after every suite, and once a second from CPU 0's timer tick on
+ARM64 (`timer_handler`, try-lock only, silent unless it finds something).
+`free_list_pop` makes the same report when it takes a head whose `next`
+is NULL while more blocks are counted, or is not a listed block of that order, before
+it clears the block's header, and then panics (the blocks left behind
+would still point at a block that is about to be handed out). The "count
+without a list" panic prints every order's count against its walked
+length first. The dump reads only free pages inside the heap: the heap
+range has unmapped holes on Jetson, which are marked allocated like pages
+in use (`test_verify_dump_reads_only_free_heap_pages`).
+`test_verify_reports_a_cleared_link` clears a link under the lock, checks
+that it is reported exactly once, and restores it; the `FINDING` block
+labelled `verifier self-test` in every suite log is that test's.
+
+### PMM_CHECK (Free-List Assertions)
+
+`make kernel PMM_CHECK=ON` (also `kernel-test` and `test`; CMake
+`-DPMM_CHECK=ON`, default OFF, nothing compiled when OFF) builds the
+allocator with assertions on its own free lists (#1207). They exist to
+catch a free-list or count inconsistency at the operation that causes or
+first meets it, instead of at a later allocation's data abort.
+
+Each check panics with `[pmm-check] <what>`, the address and order, the
+caller's PC, the raw first words of the block, the first eight elements of
+the failing list and every order's count and head:
+
+| Where | Reported |
+|-------|----------|
+| `free_list_add` | block already on a free list; list head not a listed block of that order |
+| `free_list_remove` | count is zero; block not listed at that order; neighbours do not link back |
+| `free_list_pop` | list empty with a non-zero count (the #1207 signature); head not listed at that order; head's links are not list elements |
+| `buddy_free` | buddy range free page by page but not one listed block of that order |
+| `pmm_free_pages` | a page of the range is not allocated; order larger than the block's allocation order |
+| `pmm_init` (printed, not fatal) | the reserve list (totals, each firmware `/memreserve/` entry, entries that are not page-aligned); free blocks and pages, free pages by page state, unmerged free buddy pairs, regions that were not page-aligned |
+
+A free with a smaller order than the allocation (a partial free) is
+printed once per caller and allowed. The per-operation checks are O(1)
+apart from the page-state scan of a freed range; the option keeps one tag
+byte per page (2 MB of `.bss` on Jetson), which moves the start of the
+heap.
+
+In a test kernel the harness also calls `pmm_check_walk()` before the
+first suite and after every suite. The walk checks every list (links,
+order tags, page state, length against the count, the page total) and
+prints `[pmm-check] after test_suite_x: ok (N free blocks, M free pages)`.
+A list link overwritten by something other than the PMM is therefore
+reported at the first suite boundary after the write, which names the
+suite to look in.
+
 ---
 
 ## Current Test Suites
@@ -713,7 +786,7 @@ Validates the GPU platform abstraction layer. Since QEMU has no GPU hardware, th
 
 ### PMM Tests (`kernel/tests/test_pmm.c`)
 
-Comprehensive validation of the buddy allocator physical memory manager. Tests run via Unity framework (24 tests total).
+Comprehensive validation of the buddy allocator physical memory manager. Tests run via Unity framework (60 tests in the suite on Pi 5 and Jetson, 55 in QEMU, which has no NC allocator; the count includes the reserve-carving, DTB-reservation, NC-allocator and user-reserve tests that are not listed below).
 
 These tests verify actual buddy allocator behavior, not just page counts. Key tests prove coalescing works by allocating larger blocks after freeing smaller ones.
 
@@ -743,7 +816,20 @@ These tests verify actual buddy allocator behavior, not just page counts. Key te
 |------|-------------|
 | test_coalesce_enables_larger_allocation | **Proves coalescing works** by allocating 4-page block after freeing 4 singles |
 | test_recursive_coalescing | Free 8 pages → verify 4+ merges → allocate 8-page block |
+| test_coalesce_with_lone_free_pages | The first proof with eight free single pages on the order-0 list (the Jetson kexec state) |
+| test_recursive_coalescing_with_lone_free_pages | The second proof in the same state |
 | test_coalesce_any_free_order | Coalescing works regardless of free order (forward, reverse, interleaved) |
+
+The two proofs count splits and merges of single pages, so they run with
+the order-0 list emptied first (`order0_drain()` holds every free single
+page and gives them back afterwards). Without that, free single pages
+whose buddies are in use are handed out first: no split, and nothing to
+merge with. A Jetson kexec boot has about a hundred such pages (104 to 132
+in five captures, left by the carve-outs for the inherited GPU state); QEMU
+has none and Pi 5 one. That is why both proofs failed on every Jetson
+kexec suite boot (two of the #1109 known failures) and passed in QEMU, on
+Pi 5 and after a Jetson UEFI-direct boot until #1207. The
+`_with_lone_free_pages` tests create that state in QEMU.
 
 #### Split Verification
 
@@ -801,8 +887,23 @@ These tests verify actual buddy allocator behavior, not just page counts. Key te
 | test_no_memory_leak | 500 alloc/free cycles don't leak memory |
 | test_mixed_workload_stress | Complex allocation pattern with proper size tracking |
 
+#### Free-List Consistency (#1207)
+
+| Test | Description |
+|------|-------------|
+| test_add_region_leaves_out_partial_last_page | A region whose end is not page-aligned does not list the page holding the end |
+| test_free_does_not_merge_with_split_buddy | A free does not merge with a buddy range that is free page by page but is two smaller blocks |
+| test_free_rejects_range_holding_a_free_page | A free whose range holds an already-free page is rejected |
+| test_verify_reports_a_cleared_link | The free-list verifier reports a cleared next link once, and nothing once it is restored |
+| test_verify_dump_reads_only_free_heap_pages | The verifier's dump reads only free pages inside the heap |
+
+On the allocator before #1207's fix, the second test followed by a run of
+single-page allocations reproduces the #1207 halt in QEMU (data abort,
+ESR 0x96000044, FAR `&block_state[...]` computed from `PMM_ALLOC_FAIL`).
+
 **Test API:**
 - `pmm_get_buddy_stats()` exposes internal buddy state for testing
+- `pmm_test_add_region()` and `pmm_free_block_order()` (`pmm_internal.h`, for `kernel/tests` only) add a region the way `pmm_init` does and report the order of the listed block at an address
 - Tests verify actual behavior (coalescing enables larger allocations), not just page counts
 
 ### LittleFS Tests (`kernel/tests/test_littlefs.c`)
