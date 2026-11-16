@@ -303,4 +303,41 @@ void sched_ai_set_priority_actions(bool enabled);
 bool sched_ai_priority_actions_enabled(void);
 #endif
 
+#if defined(CONFIG_SWO_DIAG)
+/*
+ * SWO_DIAG (#1262, debug only): print where each of `tasks` is (state,
+ * on_cpu, run queue, switch_in_waiting, current) and every CPU's current
+ * task, switch_in_waiting entry, queue and tick/schedule/idle counters. A
+ * later call also prints the counter deltas since the previous call.
+ */
+void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n);
+void sched_swo_diag_prelude_report(const char *tag, uint32_t min_us);
+
+/*
+ * Per-CPU beacon: the last point this CPU passed in task_exit()/schedule(),
+ * one argument (a task id) and when. Read by the dump, so a CPU that is not
+ * running its queue shows where it is and for how long.
+ */
+#define SWO_PH_NONE         0   /* outside schedule() */
+#define SWO_PH_ENTER        1   /* schedule() entered, before the rq lock */
+#define SWO_PH_REAP         2   /* zombie reaper: task_destroy_gen(arg) running */
+#define SWO_PH_LOCKED       3   /* holds its rq lock, picking */
+#define SWO_PH_WINDOW       4   /* unlocked, before switch_to(arg = next) */
+#define SWO_PH_EXIT         5   /* task_exit(arg), IRQs masked, before TERMINATED */
+#define SWO_PH_EXIT_SCHED   6   /* task_exit(arg): TERMINATED, calling schedule() */
+extern volatile uint32_t swo_diag_phase[MAX_CPUS];
+extern volatile uint32_t swo_diag_phase_arg[MAX_CPUS];
+extern volatile uint64_t swo_diag_phase_t[MAX_CPUS];
+uint64_t swo_diag_stamp(void);
+#define SWO_PHASE(cpu, ph, arg)                                 \
+    do {                                                        \
+        uint32_t swo_c_ = (cpu);                                \
+        swo_diag_phase_arg[swo_c_] = (uint32_t)(arg);           \
+        swo_diag_phase_t[swo_c_] = swo_diag_stamp();              \
+        swo_diag_phase[swo_c_] = (ph);                          \
+    } while (0)
+#else
+#define SWO_PHASE(cpu, ph, arg) ((void)0)
+#endif
+
 #endif /* SCHED_H */

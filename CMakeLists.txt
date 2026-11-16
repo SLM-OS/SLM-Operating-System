@@ -306,6 +306,28 @@ if(SLOT_TRACE)
     add_compile_definitions(CONFIG_SLOT_TRACE=1)
 endif()
 
+# Switch-in window instruments (#1234). SWITCH_CHECK: per-task generation
+# check at switch-in (restored before its save completed, or switched in
+# while another CPU owns it), read by the R3 test. SWITCH_WINDOW_TEST: the
+# run-4 critic's window patch as a test hook (R1), holds the outgoing
+# switch window open 25 ms. Debug only; with both off the kernel's .text is
+# unchanged. See kernel/include/switch_check.h.
+option(SWITCH_CHECK "Switch-in generation/owner check (#1234, debug only)" OFF)
+if(SWITCH_CHECK)
+    add_compile_definitions(CONFIG_SWITCH_CHECK=1)
+endif()
+# SWO_DIAG (#1262): when an R3 iteration does not finish, dump the stuck
+# tasks and every CPU's scheduler state, poll 1 s more, and log each
+# "Cannot migrate running task" with ids (rate-limited). Debug only; off,
+# the kernel's .text is unchanged.
+option(SWO_DIAG "R3 NOT-FINISHED scheduler state dump (#1262, debug only)" OFF)
+if(SWO_DIAG)
+    add_compile_definitions(CONFIG_SWO_DIAG=1)
+endif()
+option(SWITCH_WINDOW_TEST "Hold the switch window open 25 ms for the R1 test (#1234, test only)" OFF)
+if(SWITCH_WINDOW_TEST)
+    add_compile_definitions(CONFIG_SWITCH_WINDOW_TEST=1)
+endif()
 # PMM free-list and count assertions (#1207): every free-list operation
 # checks its preconditions (count zero on remove, block not on that order's
 # list, empty list with a non-zero count, a buddy range that is free but is
@@ -723,6 +745,7 @@ set(KERNEL_SOURCES
     kernel/sched/sched_heuristic.c
     kernel/sched/steal_deque.c
     kernel/sched/slot_trace.c
+    kernel/sched/switch_check.c
     kernel/src/sched_trace.c
     kernel/src/latency_hist.c
     kernel/src/rate_ewma.c

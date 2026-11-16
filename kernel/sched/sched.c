@@ -37,6 +37,7 @@
 #include "steal_deque.h"
 #endif
 #include "slot_trace.h"
+#include "switch_check.h"
 /* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
  * are referenced from schedule() in every configuration (they are
  * empty functions without work stealing). */
@@ -153,17 +154,68 @@ static uint64_t steal_woff_bound[STEAL_WOFF_BINS - 1];
 static volatile uint64_t steal_trace_t0_cnt;
 #endif /* CONFIG_WORK_STEALING */
 
+#if defined(CONFIG_SWO_DIAG)
+/* SWO_DIAG (#1262): who holds each rq lock. (holder cpu + 1) | (source line
+ * << 8), written by the holder right after it takes the lock and cleared
+ * right before it releases it; 0 = not held, or held by a site that does
+ * not record. Read without the lock by a waiter, as a diagnostic only. */
+static volatile uint32_t swo_rq_owner[MAX_CPUS];
+#define SWO_RQ_OWN(c, line) \
+    (swo_rq_owner[(c)] = (cpu_id() + 1U) | ((uint32_t)(line) << 8))
+#define SWO_RQ_DISOWN(c)    (swo_rq_owner[(c)] = 0)
+#else
+#define SWO_RQ_OWN(c, line) ((void)0)
+#define SWO_RQ_DISOWN(c)    ((void)0)
+#endif
+
 /* Lock helpers that use the correct lock for a given CPU */
-static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
+static inline irq_flags_t rq_lock_irqsave_l(uint32_t cpu, uint32_t line)
 {
     irq_flags_t f = spin_lock_irqsave(&rq_lock[cpu]);
+    (void)line;
+    SWO_RQ_OWN(cpu, line);
     SLOT_TRACE_RQ_LOCKED(cpu);
     return f;
 }
+#define rq_lock_irqsave(cpu) rq_lock_irqsave_l((cpu), __LINE__)
 static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
 {
     SLOT_TRACE_RQ_UNLOCKING(cpu);
+    SWO_RQ_DISOWN(cpu);
     spin_unlock_irqrestore(&rq_lock[cpu], flags);
+}
+
+/* For schedule(), which masks first and then reads its CPU id (#1242). */
+static inline void rq_lock_masked_l(uint32_t cpu, uint32_t line)
+{
+    spin_lock(&rq_lock[cpu]);
+    (void)line;
+    SWO_RQ_OWN(cpu, line);
+    SLOT_TRACE_RQ_LOCKED(cpu);
+}
+#define rq_lock_masked(cpu) rq_lock_masked_l((cpu), __LINE__)
+static inline void rq_unlock_masked(uint32_t cpu)
+{
+    SLOT_TRACE_RQ_UNLOCKING(cpu);
+    SWO_RQ_DISOWN(cpu);
+    spin_unlock(&rq_lock[cpu]);
+}
+
+/*
+ * Mask every interrupt class that can reach scheduler_tick and so a nested
+ * schedule() (ADR 0008 part 1): IRQ, plus FIQ where the Pi 5 tick is an FIQ.
+ * The saved word is the whole DAIF (RFLAGS on x86), so irq_restore and
+ * rq_unlock_irqrestore restore it exactly.
+ */
+static inline irq_flags_t sched_irq_save(void)
+{
+#if defined(PI5_FIQ_TIMER) && !defined(PLATFORM_X86_64)
+    irq_flags_t f;
+    __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(f) :: "memory");
+    return f;
+#else
+    return irq_save();
+#endif
 }
 
 /*
@@ -373,6 +425,7 @@ uint32_t sched_ai_get_top_tasks(struct task **out, uint32_t max)
 /* Per-CPU diagnostic counters for cross-CPU dispatch debugging,
  * declared in sched_diag.h. */
 volatile uint32_t sched_diag_tick[MAX_CPUS];
+volatile uint32_t sched_diag_switch_defer[MAX_CPUS];
 volatile uint32_t sched_diag_schedule[MAX_CPUS];
 volatile uint32_t sched_diag_picked[MAX_CPUS];
 volatile uint32_t sched_diag_idle_loops[MAX_CPUS];
@@ -450,6 +503,7 @@ void sched_drain_cpu_runqueue(uint32_t cpu)
 void sched_finish_switch(struct task *prev)
 {
     if (prev) {
+        SWITCH_CHECK_OUT(prev);
         __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
     }
 }
@@ -547,6 +601,116 @@ const struct sched_policy_ops *sched_policy_get(int index)
  * Idle task - runs when no other tasks are ready.
  * Each CPU has its own idle task.
  */
+/*
+ * Switch-in deferral (#1234, ADR 0008 part 2). switch_in_waiting[c] is the
+ * task CPU c's last schedule() could not switch in because the CPU that ran
+ * it had not yet released it (on_cpu still set), when no other queued task
+ * was ready either; NULL otherwise. Written only by CPU c under rq_lock[c];
+ * read only by c's idle loop, outside the lock, as a hint: tasks live in the
+ * static task_table, the poll on w->on_cpu is bounded, and the schedule()
+ * that follows decides under the lock.
+ */
+static struct task *volatile switch_in_waiting[MAX_CPUS];
+
+#if defined(CONFIG_SWO_DIAG)
+volatile uint32_t swo_diag_phase[MAX_CPUS];
+volatile uint32_t swo_diag_phase_arg[MAX_CPUS];
+volatile uint64_t swo_diag_phase_t[MAX_CPUS];
+/* Zombie reaper timing: longest task_destroy_gen and how many took > 1 ms. */
+static volatile uint32_t swo_diag_reap_max_us[MAX_CPUS];
+static volatile uint32_t swo_diag_reap_max_id[MAX_CPUS];
+static volatile uint32_t swo_diag_reap_slow[MAX_CPUS];
+/* schedule() prelude timing (entry to holding the rq lock, tick masked):
+ * longest total, longest steal attempt with its probe count, longest wait
+ * for the CPU's own rq lock, and how many preludes took over 1 ms. Reset by
+ * sched_swo_diag_prelude_report(). */
+static volatile uint32_t swo_diag_pre_max_us[MAX_CPUS];
+static volatile uint32_t swo_diag_steal_max_us[MAX_CPUS];
+static volatile uint32_t swo_diag_steal_max_probes[MAX_CPUS];
+static volatile uint32_t swo_diag_lockw_max_us[MAX_CPUS];
+/* For the longest wait: failed try-lock spins, the lock word and the
+ * recorded owner when the wait began, and the owner 1 ms into it. A long
+ * wait with few spins means the waiting CPU was not executing. */
+static volatile uint32_t swo_diag_lockw_spins[MAX_CPUS];
+static volatile uint32_t swo_diag_lockw_word0[MAX_CPUS];
+static volatile uint32_t swo_diag_lockw_own0[MAX_CPUS];
+static volatile uint32_t swo_diag_lockw_own1[MAX_CPUS];
+static volatile uint32_t swo_diag_pre_slow[MAX_CPUS];
+static volatile uint32_t swo_diag_steal_probes[MAX_CPUS];
+static inline uint32_t swo_diag_us(uint64_t t0)
+{
+    return (uint32_t)((timer_get_count() - t0) /
+                      (timer_get_frequency() / 1000000U));
+}
+uint64_t swo_diag_stamp(void)
+{
+    return timer_get_count();
+}
+static bool swo_diag_irqs_masked(void)
+{
+#if defined(PLATFORM_X86_64)
+    unsigned long fl;
+    __asm__ volatile("pushfq; popq %0" : "=r"(fl));
+    return !(fl & 0x200UL);
+#else
+    uint64_t daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    return (daif >> 7) & 1U;
+#endif
+}
+#endif
+
+/* Idle poll bound: about 50 us between schedule() calls while waiting. */
+#define SWITCH_IN_POLL_US   50U
+
+static void idle_poll_waiting(struct task *w)
+{
+    uint64_t f = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    uint64_t lim = (f / 1000000U) * SWITCH_IN_POLL_US;
+    while (__atomic_load_n(&w->on_cpu, __ATOMIC_ACQUIRE) &&
+           timer_get_count() - t0 < lim) {
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
+}
+
+static inline struct task *idle_waiting(uint32_t cpu)
+{
+    return __atomic_load_n(&switch_in_waiting[cpu], __ATOMIC_RELAXED);
+}
+
+/*
+ * Choose what to switch in (ADR 0008 part 2), under rq_lock[cpu] with cpu
+ * pinned (part 1). `next` is the queue head (or idle). A task is ready to be
+ * switched in when it is `current` or its previous CPU has released it
+ * (on_cpu 0, load-acquire: the store-release in sched_finish_switch orders
+ * that CPU's save of its context before our switch_to's loads). If the head
+ * is not ready, run the highest-priority queued task that is, or idle when
+ * none is. The CPU's own idle task needs no check: only this CPU switches it
+ * in and out, so here it is current or fully switched out.
+ */
+static struct task *pick_ready_locked(struct cpu_runqueue *rq, uint32_t cpu,
+                                      struct task *next, struct task *current)
+{
+    switch_in_waiting[cpu] = NULL;
+    if (next == rq->idle_task || next == current ||
+        !__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE)) {
+        return next;
+    }
+    sched_diag_switch_defer[cpu]++;
+    for (struct task *t = next->next; t; t = t->next) {
+        if (t == current || !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+            return t;
+        }
+    }
+    switch_in_waiting[cpu] = next;
+    return rq->idle_task;
+}
+
 static void idle_task_func(void *arg)
 {
     (void)arg;
@@ -556,7 +720,19 @@ static void idle_task_func(void *arg)
          * and `cpu` (shell) to distinguish "secondary never reached
          * idle" (counter==0) from "secondary is idling but SEV is not
          * reaching it" (counter frozen after initial iterations). */
-        sched_diag_idle_loops[cpu_id()]++;
+        uint32_t idle_cpu = cpu_id();
+        sched_diag_idle_loops[idle_cpu]++;
+        struct task *waiting;
+
+        /* ADR 0008: while a task waits on this CPU's queue for its previous
+         * CPU to release it (switch_in_waiting), skip only the wait
+         * instruction, never the unmask. On every branch that unmasks
+         * before its wait, read switch_in_waiting with the tick's interrupt
+         * class masked and wait only if it is NULL: no schedule() can then
+         * set it between the read and the wait, and WFI (and x86 sti;hlt)
+         * wakes on the masked pending interrupt, taken at the unmask. The
+         * branches that never unmask (WFE) are written only by this loop's
+         * own yield(), so check-then-WFE is race-free there. */
 
         /* Unmask IRQ so timer interrupts can fire.
          * This must be inside the loop because context switch saves/restores
@@ -564,8 +740,13 @@ static void idle_task_func(void *arg)
          * IRQ masked (hardware masks IRQ on exception entry). On resume,
          * the restored DAIF keeps IRQ masked — so we must re-clear it here. */
 #if defined(PLATFORM_X86_64)
-        __asm__ volatile("sti" ::: "memory");
-        __asm__ volatile("hlt");
+        __asm__ volatile("cli" ::: "memory");
+        waiting = idle_waiting(idle_cpu);
+        if (!waiting) {
+            __asm__ volatile("sti; hlt" ::: "memory");  /* sti shadow covers hlt */
+        } else {
+            __asm__ volatile("sti" ::: "memory");
+        }
 #elif defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
         /* Pi 5/Jetson idle loop. Which CPUs may WFI is a timer-IRQ
          * delivery question, keyed on the platform.
@@ -582,9 +763,14 @@ static void idle_task_func(void *arg)
          * timer PPI remains in Group 0 and arrives as FIQ; masking F
          * would keep the interrupt line dead. (daifclr #3 clears I+F.) */
 #if defined(PI5_FIQ_TIMER)
+        __asm__ volatile("msr daifset, #3" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+        waiting = idle_waiting(idle_cpu);
+        if (!waiting) {
+            __asm__ volatile("wfi" ::: "memory");
+        }
         __asm__ volatile("msr daifclr, #3" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
-        __asm__ volatile("wfi");
 #elif defined(SECONDARY_PREEMPT) && \
       (!defined(PLATFORM_JETSON_ORIN_NANO) || defined(JETSON_HW_TICK))
         /* Pi 5 always (#742 landed the BL31 routing fix), or Jetson
@@ -593,9 +779,14 @@ static void idle_task_func(void *arg)
          * 1 NS IRQs at NS-EL2/VHE; daifclr unmasks I, WFI sleeps
          * until the next tick. The ELR trampoline handles the
          * switch_to-in-ISR problem on secondary CPUs. */
+        __asm__ volatile("msr daifset, #2" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+        waiting = idle_waiting(idle_cpu);
+        if (!waiting) {
+            __asm__ volatile("wfi" ::: "memory");
+        }
         __asm__ volatile("msr daifclr, #2" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
-        __asm__ volatile("wfi");
 #elif defined(PLATFORM_JETSON_ORIN_NANO)
         /* Jetson without JETSON_HW_TICK (stock BL31): hardware timer
          * IRQs do not deliver to EL1/EL2 because the GIC group/route
@@ -620,21 +811,43 @@ static void idle_task_func(void *arg)
          * acceptable for stock-BL31 builds. The JETSON_HW_TICK build
          * path above is the long-term answer (#380 / PR with
          * tools/tfa-patches/0004-*). */
-        if (cpu_id() != 0) {
+        waiting = idle_waiting(idle_cpu);     /* never unmasks: WFE branch */
+        if (idle_cpu != 0 && !waiting) {
             __asm__ volatile("wfe" ::: "memory");
         }
 #else
-        if (cpu_id() == 0) {
+        if (idle_cpu == 0) {
+            __asm__ volatile("msr daifset, #2" ::: "memory");
+            __asm__ volatile("isb" ::: "memory");
+            waiting = idle_waiting(idle_cpu);
+            if (!waiting) {
+                __asm__ volatile("wfi" ::: "memory");
+            }
             __asm__ volatile("msr daifclr, #2" ::: "memory");
-            __asm__ volatile("wfi");
+            __asm__ volatile("isb" ::: "memory");
         } else {
-            __asm__ volatile("wfe" ::: "memory");
+            waiting = idle_waiting(idle_cpu); /* never unmasks: WFE branch */
+            if (!waiting) {
+                __asm__ volatile("wfe" ::: "memory");
+            }
         }
 #endif
 #else
+        __asm__ volatile("msr daifset, #2" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+        waiting = idle_waiting(idle_cpu);
+        if (!waiting) {
+            __asm__ volatile("wfi" ::: "memory");
+        }
         __asm__ volatile("msr daifclr, #2" ::: "memory");
-        __asm__ volatile("wfi");
+        __asm__ volatile("isb" ::: "memory");
 #endif
+
+        /* A task waits here for its previous CPU: poll its on_cpu word
+         * (lock-free, bounded) before the schedule() that will pick it. */
+        if (waiting) {
+            idle_poll_waiting(waiting);
+        }
 
         /* Yield to check if other tasks are ready */
         yield();
@@ -1423,6 +1636,10 @@ void scheduler_terminate_task(struct task *task)
 #endif
 }
 
+#if defined(CONFIG_SWO_DIAG)
+static void swo_diag_migrate_running(struct task *task, uint32_t target_cpu);
+#endif
+
 /*
  * Migrate a task to a different CPU.
  *
@@ -1436,7 +1653,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
 
     /* Cannot migrate running tasks */
     if (task->state == TASK_RUNNING) {
+#if defined(CONFIG_SWO_DIAG)
+        swo_diag_migrate_running(task, target_cpu);
+#else
         WARN("Cannot migrate running task '%s'", task->name);
+#endif
         return -1;
     }
 
@@ -1464,9 +1685,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     if (old_cpu < target_cpu) {
         flags = rq_lock_irqsave(old_cpu);
         spin_lock(&rq_lock[target_cpu]);
+        SWO_RQ_OWN(target_cpu, __LINE__);
     } else {
         flags = rq_lock_irqsave(target_cpu);
         spin_lock(&rq_lock[old_cpu]);
+        SWO_RQ_OWN(old_cpu, __LINE__);
     }
 
     /* Remove from old CPU queue if task is ready.
@@ -1508,9 +1731,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
 
     /* Unlock in reverse order */
     if (old_cpu < target_cpu) {
+        SWO_RQ_DISOWN(target_cpu);
         spin_unlock(&rq_lock[target_cpu]);
         rq_unlock_irqrestore(old_cpu, flags);
     } else {
+        SWO_RQ_DISOWN(old_cpu);
         spin_unlock(&rq_lock[old_cpu]);
         rq_unlock_irqrestore(target_cpu, flags);
     }
@@ -1909,6 +2134,9 @@ static struct task *sched_try_steal(uint32_t this_cpu)
         probed++;
         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
             uint32_t captured_gen = 0;
+#if defined(CONFIG_SWO_DIAG)
+            swo_diag_steal_probes[this_cpu]++;
+#endif
             /* #1203: was the lock held when this thief arrived? Plain
              * load; the acquisition below is unchanged. */
             if (steal_deque_lock[victim].lock != 0) {
@@ -2345,9 +2573,29 @@ uint64_t sched_rebalance_get_migrations(void)
  */
 void schedule(void)
 {
+    /*
+     * Pin the CPU id (#1242, ADR 0008 part 1). Mask the tick's interrupt
+     * class before reading cpu_id() and keep it masked through the
+     * cooperative tick, the steal prelude and the locked section, up to the
+     * unlock that opens the switch window. current leaves this CPU only by
+     * switching out, which needs a schedule(); with the tick masked no
+     * nested schedule() can run here (tick ISR, trampoline arming and the
+     * x86 resched IPI are interrupt paths, and nothing below calls
+     * schedule()), so from the read to the unlock this CPU is this_cpu and
+     * every per-CPU field below is this CPU's. Before this, a tick between
+     * an unmasked read and the lock let the task be preempted, moved and
+     * resumed elsewhere with the old id: it then worked on another CPU's
+     * run queue, idle task and preempt flag.
+     */
+    irq_flags_t flags = sched_irq_save();
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
+    uint32_t lock_site = 1;            /* SWITCH_CHECK probe site */
     sched_diag_schedule[this_cpu]++;
+    SWO_PHASE(this_cpu, SWO_PH_ENTER, 0);
+#if defined(CONFIG_SWO_DIAG)
+    uint64_t swo_t0 = timer_get_count();
+#endif
 
 #if defined(COOP_PREEMPT)
     /* Cooperative preemption: drive scheduler_tick off CNTPCT when the
@@ -2365,16 +2613,75 @@ void schedule(void)
      * next schedule() call picks it up.
      */
     if (!rq->head) {
+#if defined(CONFIG_SWO_DIAG)
+        uint64_t swo_s0 = timer_get_count();
+        uint32_t swo_p0 = swo_diag_steal_probes[this_cpu];
+#endif
         struct task *stolen = sched_try_steal(this_cpu);
+#if defined(CONFIG_SWO_DIAG)
+        {
+            uint32_t us = swo_diag_us(swo_s0);
+            if (us > swo_diag_steal_max_us[this_cpu]) {
+                swo_diag_steal_max_us[this_cpu] = us;
+                swo_diag_steal_max_probes[this_cpu] =
+                    swo_diag_steal_probes[this_cpu] - swo_p0;
+            }
+        }
+#endif
         if (stolen) {
-            irq_flags_t sf = rq_lock_irqsave(this_cpu);
+            rq_lock_masked(this_cpu);
             add_to_cpu_queue_locked(stolen, this_cpu);
-            rq_unlock_irqrestore(this_cpu, sf);
+            rq_unlock_masked(this_cpu);
         }
     }
 #endif
 
-    irq_flags_t flags = rq_lock_irqsave(this_cpu);
+relock:
+#if defined(CONFIG_SWO_DIAG)
+    {
+        uint64_t swo_l0 = timer_get_count();
+        uint32_t spins = 0;
+        uint32_t word0 = *(volatile uint32_t *)&rq_lock[this_cpu];
+        uint32_t own0 = swo_rq_owner[this_cpu];
+        uint32_t own1 = 0;
+        bool sampled = false;
+        while (!spin_trylock(&rq_lock[this_cpu])) {
+            spins++;
+            if (!sampled && swo_diag_us(swo_l0) > 1000) {
+                own1 = swo_rq_owner[this_cpu];
+                sampled = true;
+            }
+#if defined(PLATFORM_X86_64)
+            __asm__ volatile("pause" ::: "memory");
+#else
+            __asm__ volatile("yield" ::: "memory");
+#endif
+        }
+        SWO_RQ_OWN(this_cpu, __LINE__);
+        SLOT_TRACE_RQ_LOCKED(this_cpu);
+        uint32_t lw = swo_diag_us(swo_l0);
+        if (lw > swo_diag_lockw_max_us[this_cpu]) {
+            swo_diag_lockw_max_us[this_cpu] = lw;
+            swo_diag_lockw_spins[this_cpu] = spins;
+            swo_diag_lockw_word0[this_cpu] = word0;
+            swo_diag_lockw_own0[this_cpu] = own0;
+            swo_diag_lockw_own1[this_cpu] = own1;
+        }
+        if (lock_site == 1) {
+            uint32_t pre = swo_diag_us(swo_t0);
+            if (pre > swo_diag_pre_max_us[this_cpu]) {
+                swo_diag_pre_max_us[this_cpu] = pre;
+            }
+            if (pre > 1000) {
+                swo_diag_pre_slow[this_cpu]++;
+            }
+        }
+    }
+#else
+    rq_lock_masked(this_cpu);
+#endif
+    SWITCH_CHECK_CPU(this_cpu, lock_site);  /* #1242 probe; empty unless SWITCH_CHECK */
+    SWO_PHASE(this_cpu, SWO_PH_LOCKED, 0);
 
     /*
      * Clean up zombie task from previous schedule cycle.
@@ -2393,7 +2700,8 @@ void schedule(void)
         uint32_t zombie_gen = rq->zombie_gen;
         rq->zombie = NULL;
         SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), zombie_gen);
-        rq_unlock_irqrestore(this_cpu, flags);
+        rq_unlock_masked(this_cpu);
+        irq_restore(flags);             /* destroy with the caller's state */
 
         /* Destroy outside lock - task_destroy may call pmm.
          *
@@ -2404,9 +2712,43 @@ void schedule(void)
          * task mid-construction: its TERMINATED check still saw the old
          * occupant's state, it cleared stack_top, and task_create copied
          * the cleared value into context.sp (SP 0 on the next switch). */
+#if defined(CONFIG_SWO_DIAG)
+        {
+            uint32_t z_id = zombie->id;
+            uint32_t z_on = zombie->on_cpu;
+            uint32_t z_state = (uint32_t)zombie->state;
+            uint32_t r_cpu = cpu_id();
+            SWO_PHASE(r_cpu, SWO_PH_REAP, z_id);
+            uint64_t r0 = timer_get_count();
+            (void)task_destroy_gen(zombie, zombie_gen);
+            uint64_t us = (timer_get_count() - r0) /
+                          (timer_get_frequency() / 1000000U);
+            if (us > swo_diag_reap_max_us[r_cpu]) {
+                swo_diag_reap_max_us[r_cpu] = (uint32_t)us;
+                swo_diag_reap_max_id[r_cpu] = z_id;
+            }
+            if (us > 1000) {
+                swo_diag_reap_slow[r_cpu]++;
+            }
+            if (us > 5000) {
+                WARN("swo-diag: zombie reap took %lu us on cpu %u (now %u): "
+                     "zombie id=%u state=%u on_cpu=%u at start, irqs %s",
+                     (unsigned long)us, r_cpu, cpu_id(), z_id, z_state, z_on,
+                     swo_diag_irqs_masked() ? "masked" : "open");
+            }
+            SWO_PHASE(cpu_id(), SWO_PH_ENTER, 0);
+        }
+#else
         (void)task_destroy_gen(zombie, zombie_gen);
+#endif
 
-        flags = rq_lock_irqsave(this_cpu);
+        /* Unpinned during the destroy: mask again and re-read the id
+         * before touching anything per-CPU (#1242). */
+        flags = sched_irq_save();
+        this_cpu = cpu_id();
+        rq = cpu_rq(this_cpu);
+        lock_site = 2;
+        goto relock;
     }
 
     struct task *current = task_current();
@@ -2432,14 +2774,22 @@ void schedule(void)
         next = pick_next_task(this_cpu);
     }
 
-    /* Remove next from front of queue */
-    if (next != rq->idle_task && rq->head == next) {
-        rq->head = next->next;
-        if (!rq->head) {
-            rq->tail = NULL;
+    /* #1234 (ADR 0008 part 2): never switch in a task whose previous CPU
+     * has not released it; run the next ready task, or idle. */
+    next = pick_ready_locked(rq, this_cpu, next, current);
+
+    /* Remove next from its queue (not always the head after a deferral) */
+    if (next != rq->idle_task) {
+        if (rq->head == next) {
+            rq->head = next->next;
+            if (!rq->head) {
+                rq->tail = NULL;
+            }
+            next->next = NULL;
+            rq->ready_count--;
+        } else {
+            (void)remove_from_cpu_queue_locked(next, this_cpu);
         }
-        next->next = NULL;
-        rq->ready_count--;
     }
 
     /*
@@ -2460,6 +2810,7 @@ void schedule(void)
         if (current) {
             current->state = TASK_RUNNING;
         }
+        SWO_PHASE(this_cpu, SWO_PH_NONE, 0);
         rq_unlock_irqrestore(this_cpu, flags);
 
         /* NOTE: before #1047, tasks on Pi 5 and Jetson ran with DAIF.I=1
@@ -2473,6 +2824,7 @@ void schedule(void)
 
     /* Perform context switch */
 
+    SWITCH_CHECK_IN(next, this_cpu);
     next->state = TASK_RUNNING;
     next->on_cpu = 1;           /* cleared by sched_finish_switch (#1213) */
     next->switches++;
@@ -2520,8 +2872,11 @@ void schedule(void)
     preempt_disabled[this_cpu] = 1;
     SLOT_TRACE(ST_PD_SET, next, this_cpu, cpu_id(), 0);
     steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
+    SWO_PHASE(this_cpu, SWO_PH_WINDOW, next->id);
 
     rq_unlock_irqrestore(this_cpu, flags);
+
+    SWITCH_WINDOW_HOLD(current);    /* R1 test hook; empty unless SWITCH_WINDOW_TEST */
 
     /* Stack-overflow assertion. Validate the live SP register against
      * `current`'s stack range BEFORE we save it via switch_to.
@@ -2609,6 +2964,7 @@ void schedule(void)
     uint32_t now_cpu = cpu_id();
     SLOT_TRACE(ST_PD_CLEAR, task_current(), now_cpu, now_cpu, this_cpu);
     preempt_disabled[now_cpu] = 0;
+    SWO_PHASE(now_cpu, SWO_PH_NONE, 0);
     steal_pdwin_clear(now_cpu);                     /* #1216 trace */
 #if defined(SECONDARY_PREEMPT)
     /* Clear any pending reschedule flag set by scheduler_tick while
@@ -2650,15 +3006,24 @@ void scheduler_start(uint32_t this_cpu)
         panic("scheduler_start: no tasks to run");
     }
 
+    /* #1234: as in schedule(); this_cpu is a parameter from this CPU's
+     * boot context, which cannot move. No current yet. */
+    first = pick_ready_locked(rq, this_cpu, first, NULL);
+
     /* Remove from queue */
-    if (first != rq->idle_task && rq->head == first) {
-        rq->head = first->next;
-        if (!rq->head) {
-            rq->tail = NULL;
+    if (first != rq->idle_task) {
+        if (rq->head == first) {
+            rq->head = first->next;
+            if (!rq->head) {
+                rq->tail = NULL;
+            }
+            rq->ready_count--;
+        } else {
+            (void)remove_from_cpu_queue_locked(first, this_cpu);
         }
-        rq->ready_count--;
     }
 
+    SWITCH_CHECK_IN(first, this_cpu);
     first->state = TASK_RUNNING;
     first->on_cpu = 1;          /* cleared by sched_finish_switch (#1213) */
     first->switches++;
@@ -3011,3 +3376,231 @@ int sched_set_task_affinity(struct task *task, uint32_t cpu)
 
     return 0;
 }
+
+#if defined(CONFIG_SWO_DIAG)
+/* ============================================================================
+ * SWO_DIAG (#1262): scheduler state dump for a task that is READY but not
+ * run. Debug only (SWO_DIAG=ON); with the option off nothing here is built.
+ *
+ * The state is read without locks into a static snapshot first and printed
+ * afterwards, so the UART time of the dump does not change what it shows.
+ * The queue walks are racy and bounded by 2 * MAX_TASKS steps. A second
+ * call prints the per-CPU counter deltas since the previous call.
+ * ============================================================================ */
+
+#define SWO_DIAG_QIDS   8
+
+struct swo_diag_cpu {
+    uint32_t cur_id, cur_state, cur_on_cpu, cur_is_idle;
+    uint32_t wait_id, wait_on_cpu, has_wait;
+    uint32_t ready_count, qlen, qids[SWO_DIAG_QIDS];
+    uint32_t zombie_id, has_zombie;
+    int      pd;
+    uint32_t tick, sched, idle, picked, defer;
+    uint32_t lock_word;
+    uint32_t phase, phase_arg, phase_age_us;
+    uint32_t reap_max_us, reap_max_id, reap_slow;
+};
+
+struct swo_diag_where {
+    uint32_t q_cpu, q_pos, waited_by, current_of;
+};
+
+static struct swo_diag_cpu swo_diag_now[MAX_CPUS];
+static struct swo_diag_cpu swo_diag_prev[MAX_CPUS];
+static struct swo_diag_where swo_diag_where[32];
+static bool swo_diag_have_prev;
+static volatile uint32_t swo_diag_mig_total;
+static volatile uint32_t swo_diag_mig_printed;
+static volatile uint64_t swo_diag_mig_window;
+
+/* "Cannot migrate running task": every event is counted; at most 4 lines
+ * per 100 ms are printed, with the id and the CPUs involved. */
+static void swo_diag_migrate_running(struct task *task, uint32_t target_cpu)
+{
+    uint32_t total = __atomic_add_fetch(&swo_diag_mig_total, 1, __ATOMIC_RELAXED);
+    uint64_t now = timer_get_count();
+    uint64_t f = timer_get_frequency();
+    if (now - swo_diag_mig_window > f / 10) {
+        swo_diag_mig_window = now;
+        swo_diag_mig_printed = 0;
+    }
+    if (__atomic_fetch_add(&swo_diag_mig_printed, 1, __ATOMIC_RELAXED) >= 4) {
+        return;
+    }
+    uint32_t cur_on = 0xFF;
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        if (task_current_on_cpu(c) == task) {
+            cur_on = c;
+        }
+    }
+    WARN("Cannot migrate running task '%s' id=%u by_cpu=%u target=%u "
+         "assigned=%u aff=%u on_cpu=%u current_of=%u total=%u",
+         task->name, task->id, cpu_id(), target_cpu, task->assigned_cpu,
+         task->cpu_affinity, task->on_cpu, cur_on, total);
+}
+
+void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
+{
+    uint64_t t_snap = timer_get_count();
+    struct swo_diag_where *where = swo_diag_where;
+
+    if (n > 32) {
+        n = 32;
+    }
+    /* Read everything before anything is printed. */
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        struct swo_diag_cpu *d = &swo_diag_now[c];
+        struct cpu_runqueue *rq = cpu_rq(c);
+        struct task *cur = task_current_on_cpu(c);
+        struct task *w = __atomic_load_n(&switch_in_waiting[c], __ATOMIC_RELAXED);
+        struct task *z = rq->zombie;
+        d->cur_id = cur ? cur->id : 0;
+        d->cur_state = cur ? (uint32_t)cur->state : 0xFF;
+        d->cur_on_cpu = cur ? cur->on_cpu : 0xFF;
+        d->cur_is_idle = cur == rq->idle_task;
+        d->has_wait = w != NULL;
+        d->wait_id = w ? w->id : 0;
+        d->wait_on_cpu = w ? w->on_cpu : 0xFF;
+        d->has_zombie = z != NULL;
+        d->zombie_id = z ? z->id : 0;
+        d->ready_count = rq->ready_count;
+        d->pd = preempt_disabled[c];
+        d->tick = sched_diag_tick[c];
+        d->sched = sched_diag_schedule[c];
+        d->idle = sched_diag_idle_loops[c];
+        d->picked = sched_diag_picked[c];
+        d->defer = sched_diag_switch_defer[c];
+        d->lock_word = *(volatile uint32_t *)&rq_lock[c];
+        d->phase = swo_diag_phase[c];
+        d->phase_arg = swo_diag_phase_arg[c];
+        d->phase_age_us = (uint32_t)((t_snap - swo_diag_phase_t[c]) /
+                                     (timer_get_frequency() / 1000000U));
+        d->reap_max_us = swo_diag_reap_max_us[c];
+        d->reap_max_id = swo_diag_reap_max_id[c];
+        d->reap_slow = swo_diag_reap_slow[c];
+        d->qlen = 0;
+        uint32_t steps = 0;
+        for (struct task *t = rq->head; t && steps < 2 * MAX_TASKS;
+             t = t->next, steps++) {
+            if (d->qlen < SWO_DIAG_QIDS) {
+                d->qids[d->qlen] = t->id;
+            }
+            d->qlen++;
+        }
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        struct task *t = tasks[i];
+        where[i].q_cpu = where[i].waited_by = where[i].current_of = 0xFF;
+        where[i].q_pos = 0;
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            uint32_t pos = 0;
+            for (struct task *q = cpu_rq(c)->head; q && pos < 2 * MAX_TASKS;
+                 q = q->next, pos++) {
+                if (q == t) {
+                    where[i].q_cpu = c;
+                    where[i].q_pos = pos;
+                    break;
+                }
+            }
+            if (__atomic_load_n(&switch_in_waiting[c], __ATOMIC_RELAXED) == t) {
+                where[i].waited_by = c;
+            }
+            if (task_current_on_cpu(c) == t) {
+                where[i].current_of = c;
+            }
+        }
+    }
+
+    uint64_t f = timer_get_frequency();
+    uart_printf("  swo-diag %s: t=%lu us by_cpu=%u migrate_running_total=%u "
+                "(255 = none; phase 0 out of schedule, 1 entered, 2 reaping "
+                "zombie arg, 3 rq locked, 4 switch window to arg, 5 task_exit "
+                "arg, 6 task_exit arg into schedule)\n", tag,
+                (unsigned long)(t_snap / (f / 1000000U)), cpu_id(),
+                swo_diag_mig_total);
+    for (uint32_t i = 0; i < n; i++) {
+        struct task *t = tasks[i];
+        uart_printf("  swo-diag task id=%u '%s' state=%u on_cpu=%u assigned=%u "
+                    "aff=%u flags=0x%x wake_time=%lu prio=%u eff=%u | "
+                    "on_rq_of=%u pos=%u switch_in_waiting_of=%u current_of=%u\n",
+                    t->id, t->name, (unsigned)t->state, t->on_cpu,
+                    t->assigned_cpu, t->cpu_affinity, (unsigned)t->flags,
+                    (unsigned long)t->wake_time_ns, (unsigned)t->priority,
+                    (unsigned)t->effective_priority, where[i].q_cpu,
+                    where[i].q_pos, where[i].waited_by, where[i].current_of);
+    }
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        struct swo_diag_cpu *d = &swo_diag_now[c];
+        struct swo_diag_cpu *p = &swo_diag_prev[c];
+        uart_printf("  swo-diag cpu%u: current id=%u%s state=%u on_cpu=%u | "
+                    "switch_in_waiting=%s id=%u on_cpu=%u | pd=%d rq_lock=0x%x "
+                    "zombie=%u ready=%u qlen=%u q=[",
+                    c, d->cur_id, d->cur_is_idle ? "(idle)" : "", d->cur_state,
+                    d->cur_on_cpu, d->has_wait ? "SET" : "NULL", d->wait_id,
+                    d->wait_on_cpu, d->pd, d->lock_word,
+                    d->has_zombie ? d->zombie_id : 0, d->ready_count, d->qlen);
+        for (uint32_t k = 0; k < d->qlen && k < SWO_DIAG_QIDS; k++) {
+            uart_printf("%s%u", k ? "," : "", d->qids[k]);
+        }
+        uart_printf("] | phase=%u arg=%u age=%u us | reap max=%u us (id %u) "
+                    "over1ms=%u",
+                    d->phase, d->phase_arg, d->phase_age_us, d->reap_max_us,
+                    d->reap_max_id, d->reap_slow);
+        uart_printf(" | tick=%u sched=%u idle=%u picked=%u defer=%u",
+                    d->tick, d->sched, d->idle, d->picked, d->defer);
+        if (swo_diag_have_prev) {
+            uart_printf(" | delta tick=%u sched=%u idle=%u picked=%u defer=%u",
+                        d->tick - p->tick, d->sched - p->sched,
+                        d->idle - p->idle, d->picked - p->picked,
+                        d->defer - p->defer);
+        }
+        uart_printf("\n");
+        *p = *d;
+    }
+    swo_diag_have_prev = true;
+}
+
+/* One line with every CPU's schedule() prelude maxima since the last call,
+ * printed only if some prelude took over min_us; always resets. */
+void sched_swo_diag_prelude_report(const char *tag, uint32_t min_us)
+{
+    uint32_t pre[MAX_CPUS], st[MAX_CPUS], pr[MAX_CPUS], lw[MAX_CPUS], sl[MAX_CPUS];
+    bool any = false;
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        pre[c] = swo_diag_pre_max_us[c];
+        st[c] = swo_diag_steal_max_us[c];
+        pr[c] = swo_diag_steal_max_probes[c];
+        lw[c] = swo_diag_lockw_max_us[c];
+        sl[c] = swo_diag_pre_slow[c];
+        swo_diag_pre_max_us[c] = 0;
+        swo_diag_steal_max_us[c] = 0;
+        swo_diag_steal_max_probes[c] = 0;
+        swo_diag_lockw_max_us[c] = 0;
+        swo_diag_pre_slow[c] = 0;
+        if (pre[c] > min_us || lw[c] > min_us) {
+            any = true;
+        }
+    }
+    if (!any) {
+        return;
+    }
+    uart_printf("  swo-diag prelude %s (max us entry-to-rq-lock / steal(probes) "
+                "/ rq-lock wait / preludes over 1 ms):", tag);
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        uart_printf(" cpu%u %u/%u(%u)/%u/%u", c, pre[c], st[c], pr[c], lw[c], sl[c]);
+    }
+    uart_printf("\n");
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        if (lw[c] > min_us) {
+            uint32_t o0 = swo_diag_lockw_own0[c], o1 = swo_diag_lockw_own1[c];
+            uart_printf("  swo-diag lockwait cpu%u: %u us, %u failed try-locks, "
+                        "lock word at start %u, owner at start cpu%d line %u, "
+                        "owner at 1 ms cpu%d line %u (cpu-1 = none recorded)\n",
+                        c, lw[c], swo_diag_lockw_spins[c],
+                        swo_diag_lockw_word0[c], (int)(o0 & 0xFF) - 1, o0 >> 8,
+                        (int)(o1 & 0xFF) - 1, o1 >> 8);
+        }
+    }
+}
+#endif /* CONFIG_SWO_DIAG */

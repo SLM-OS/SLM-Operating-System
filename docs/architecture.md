@@ -193,11 +193,11 @@ Memory". The old design is described under `docs/archive/coherency-gauntlet/`.
 - **Secondary-CPU recovery:** `kernel/sched/cpu_supervisor.c` (#216).
 - **Priority inheritance:** `kernel/ipc/pi_mutex.c`.
 
-### Task lifecycle (#1237)
+### Task lifecycle (#1237, ADR 0008)
 
 PR #1237 (commit `5b28d065`, 2026-11-12) set the rules for reclaiming a
 task slot; they are documented in `docs/scheduler.md`, "Task Slot
-Reclaim", and in `kernel/CLAUDE.md`:
+Reclaim", and in `kernel/CLAUDE.md`. Rule 5 is ADR 0008's (#1234):
 
 1. **`task->on_cpu`.** Set by the CPU that switches a task in; cleared
    with a store-release by the same CPU after `switch_to` returns on the
@@ -215,9 +215,25 @@ Reclaim", and in `kernel/CLAUDE.md`:
    resched IPI handler returns while `preempt_disabled[cpu]` is set
    (#1236).
 
-One window stays open: a task requeued as READY is visible to other CPUs
-before its context is saved; waiting on `next->on_cpu` under `rq_lock`
-deadlocks and was reverted (#1234). The `SLOT_TRACE` build option
+5. **Switch-in only after the release (#1234, #1242, ADR 0008).** A task
+   requeued as READY, or woken, is visible to other CPUs before its previous
+   CPU has saved its context. `schedule()` therefore never switches in a
+   task (other than `current` or its own idle task) whose `on_cpu` it reads
+   as 1 under its own `rq_lock` (load-acquire, paired with the store-release
+   in `sched_finish_switch`). It leaves that task queued and runs the next
+   ready task or idle instead; idle polls the waiting task's `on_cpu`
+   without a lock and, on every branch that unmasks before its wait
+   instruction, masks, re-checks and only then waits. No CPU waits on
+   another CPU's `on_cpu` while holding a lock: the run-4 design that spun
+   under `rq_lock` deadlocked against a tick in the IRQ-open switch window
+   and was reverted. `schedule()` also masks the tick's interrupt class
+   before reading `cpu_id()`, so every per-CPU field it uses comes from the
+   CPU it runs on (#1242). Paths that make a task runnable elsewhere
+   (`sched_migrate_task`, `sched_try_steal`, wake-ups) need no `on_cpu`
+   check of their own. Decision, lock graph and ordering argument:
+   `docs/adr/0008-switch-in-window.md`.
+
+The `SLOT_TRACE` build option
 (`kernel/include/slot_trace.h`, `kernel/sched/slot_trace.c`) traces slot
 lifecycle events. Detail: `docs/scheduler.md`, `docs/smp.md`.
 

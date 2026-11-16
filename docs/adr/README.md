@@ -20,7 +20,7 @@ is `docs/architecture.md`.
 | [0005](0005-dod6-decode-bandwidth.md) | Replace the 60 percent tensor-core target with decode bandwidth parity | accepted |
 | [0006](0006-gpu-channel-recovery.md) | Recover the cold GPU channel after a step timeout | accepted |
 | [0007](0007-cross-cpu-coherency.md) | Cross-CPU state is cacheable on Pi 5 and Jetson (implemented in PR #1225) | accepted |
-| 0008 | reserved (gauntlet Brief 5) | reserved |
+| [0008](0008-switch-in-window.md) | A task is switched in only after its previous CPU has saved it (#1234, #1242) | accepted |
 | [0009](0009-el2-vhe.md) | Run the ARM64 hardware kernels at EL2 with VHE | accepted (backfilled) |
 | [0010](0010-kexec-vs-uefi-direct.md) | Keep two Jetson boot paths, kexec from Linux and UEFI-direct | accepted (backfilled) |
 | [0011](0011-two-language-lock-model.md) | Separate C and Rust spinlocks; Rust locks reached from IRQs-off paths save IRQs or try-lock | accepted (backfilled) |
@@ -65,5 +65,6 @@ Reason: on 2026-11-08 two runs both claimed 0006. The #475 follow-up work
 to write 0006 and its removal branch pointed its docs at
 `docs/adr/0006-cross-cpu-coherency.md` (commit `d1f12754`, 2026-11-08).
 The coherency ADR was renumbered to 0007 afterwards (commit `5d70fdbd`,
-"Coherency ADR is 0007; point references at it", 2026-11-09). 0008 is
-reserved this way for gauntlet Brief 5.
+"Coherency ADR is 0007; point references at it", 2026-11-09). 0008 was
+reserved this way for gauntlet Brief 5, which wrote it as
+`0008-switch-in-window.md` (#1234).
