@@ -1,0 +1,16 @@
+#!/bin/bash
+# step.sh <labctl dir> <evidence name (no .txt)> <known-failures list> <title...>
+# Saves run_${RUN:-01}.txt of the one-boot boot_test call just finished into the evidence
+# worktree's 1207-gpu dir (save.sh: both ends checked), then prints the boot's
+# PMM / poison / fault lines and classify.sh's line.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad
+WT=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Issue-1207
+EV=$WT/.wt/ev/docs/archive/switch-gauntlet/run5-hw/1207-gpu
+dir=$1; name=$2; kf=$3; shift 3
+mkdir -p $EV
+f=/var/lib/labctl/output/$dir/run_${RUN:-01}.txt
+$S/o/save.sh $f $EV/$name.txt "$*"
+echo "pmm/poison: $(grep -a -E 'pmm-verify\] (FINDING|order)|PMM: (order|free)|[Pp]oison.*(mismatch|MISMATCH|FINDING|finding|fault)|PMM-free' $f | grep -av 'self-test' | tr -d '\r' | cut -c1-200 | head -12 | tr '\n' '|')"
+echo "faults: $(grep -a -c 'PAGE FAULT' $f) page faults, $(grep -a -c 'KERNEL PANIC' $f) panics; ELR: $(grep -a -m3 'ELR' $f | tr -d '\r' | tr '\n' ' ')"
+echo "summary: $(grep -a -m1 'total failure\|All test suites passed' $f | tr -d '\r'); last suite banner: $(grep -a '^\[TEST\]' $f | tail -1 | tr -d '\r')"
+$WT/scripts/hw-suite/classify.sh $WT/scripts/hw-suite/$kf $EV/$name.txt | cut -c1-600

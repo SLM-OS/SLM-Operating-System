@@ -1,0 +1,24 @@
+mktemp: failed to create file via template ‘/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad/o/tmp/tmp.XXXXXXXXXX’: No such file or directory
+19:01:46 start mode=kexec n=1 elfs=[/root/slmos-1207-base-b548f29d.elf] skip_current_boot_id=17a7e290-60b2-4f0f-b401-ffe52f096524 pid=3663047
+/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad/o/trigger.sh: line 23: : No such file or directory
+/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad/o/trigger.sh: line 28: : No such file or directory
+19:03:12 trigger 1/1 elf=/root/slmos-1207-base-b548f29d.elf boot_id=d27050a1-63fd-4b00-8ebb-73d023a74cfa state+uptime=[running 24.89 ] reply=[]
+19:03:12 end triggers=1
+19:04:08 MANUAL trigger 1/1 (trigger.sh redirect failed: tmp dir missing) elf=/root/slmos-1207-base-b548f29d.elf reply=[d27050a1-63fd-4b00-8ebb-73d023a74cfa 80.10 8c608c78db9520e2 ]
+19:09:52 start mode=kexec n=1 elfs=[/root/slmos-1207-base-b548f29d.elf] skip_current_boot_id=none pid=3704993
+19:11:19 trigger 1/1 elf=/root/slmos-1207-base-b548f29d.elf boot_id=daf6d86e-3d93-4391-a22c-80ff4e3c68df state+uptime=[running 26.75 ] reply=[8c608c78db9520e2 ]
+19:11:19 end triggers=1
+19:16:57 start mode=kexec n=2 elfs=[/root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf] skip_current_boot_id=none pid=3741419
+19:18:20 trigger 1/2 elf=/root/slmos-1207-base-b548f29d.elf boot_id=54027ca8-68d5-419f-8e51-2e3fd20cfeb2 state+uptime=[running 23.59 ] reply=[8c608c78db9520e2 ]
+19:24:51 trigger 2/2 elf=/root/slmos-1207-base-b548f29d.elf boot_id=81bbf4d1-e1eb-4b90-9e02-e3ef112e8baf state+uptime=[running 23.89 ] reply=[8c608c78db9520e2 ]
+19:24:51 end triggers=2
+19:30:38 start mode=kexec n=3 elfs=[/root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf] skip_current_boot_id=none pid=3820329
+19:32:08 trigger 1/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=74ec36d7-570f-4b95-89ea-7252f2ad533c state+uptime=[running 27.02 ] reply=[8c608c78db9520e2 ]
+19:41:26 trigger 2/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=142fe6f3-b477-42f8-8451-83e1c26075ba state+uptime=[running 25.31 ] reply=[8c608c78db9520e2 ]
+19:47:59 trigger 3/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=2963cde4-101f-44ed-9574-07fc01f01902 state+uptime=[running 24.63 ] reply=[8c608c78db9520e2 ]
+19:47:59 end triggers=3
+19:53:52 start mode=kexec n=3 elfs=[/root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf] skip_current_boot_id=none pid=3979655
+19:55:20 trigger 1/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=2e1a9f49-1981-47a7-b1e7-f1231c5f7347 state+uptime=[running 24.82 ] reply=[8c608c78db9520e2 ]
+20:01:57 trigger 2/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=b26722f0-4eb3-4f92-af31-917477bbdf04 state+uptime=[running 25.57 ] reply=[8c608c78db9520e2 ]
+20:08:32 trigger 3/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=966cbd6b-ba78-4bc6-acb2-9326f2b195b9 state+uptime=[running 24.71 ] reply=[8c608c78db9520e2 ]
+20:08:32 end triggers=3

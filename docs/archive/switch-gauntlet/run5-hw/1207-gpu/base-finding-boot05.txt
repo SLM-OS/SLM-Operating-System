@@ -1,0 +1,38 @@
+#1207 lab session (2026-11-16), baseline row: the one halt in the first 7 kexec suite boots of main b548f29d (unmodified).
+File: base-kexec-suite-b548f29d-boot05.txt (line numbers below are lines of that saved file, header included).
+
+Observations
+ 1. Line 2772, the free-list walk after test_suite_gpu:
+      [pmm-verify] FINDING 1 at 170971 ms (after test_suite_gpu; last suite boundary: after test_suite_oplib_gpu_as)
+      order 5: element's prev link is not the element before it; count 35, walked 1, head 0x13a720000,
+      bad link value 0x13a6c0000, held by 0x13a720000.
+    Holder 0x13a720000 (page state 0x85 = listed order-5 head): next link 0x13a6c0000, prev 0 (it is the head), rest zero.
+    The block it points at, 0x13a6c0000 (page state 0x85 = listed order-5 head; page before 0x1 = allocated, page after
+    0x0 = free, not a head): first 64 bytes all zero. Its prev link should be 0x13a720000 and reads 0; its next link reads 0.
+    The 64 bytes before it are in an allocated page and were not read by the verifier.
+    Every other order's count equals its walked length.
+ 2. No finding at the walks after pmm_init, before the first suite, or after any suite up to and including
+    test_suite_oplib_gpu_as.
+ 3. Inside test_suite_gpu, before its last four tests (the slm_gpu_run_mnist / slm_gpu_set_mnist_input /
+    slm_gpu_set_mnist_input_fill tests, which on kexec run MNIST on the channel inherited from Linux; three of them are
+    the #1271 known failures because they expect no hand-off):
+      [gpu-kind=0] channel bring-up: inherit 2072 us, channel 2 us, warmup 354 us
+ 4. Line 5663, test_exhaustion_recovery: "PMM: order 5 free list head 0x13a6c0000 has next link 0x0 with 34 blocks
+    counted (free-list corruption, #1207)", then the panic. FINDING 2 (after test_suite_boot_media) and FINDING 3
+    (free_list_pop) report the same block.
+ 5. Hand-off reservations printed in this boot (lines 1655-1683): kind 0 (mnist) pushbuf 0x13a5b0000 (64 KB), userd
+    0x13a21d000, sem 0x13a2d5000, qmd_pool 0x13aa40000 (256 KB), gpfifo 0x12a892000; kind 1 (sched_mlp) pushbuf
+    0x13aaf0000; channel VMs "910 pages (3640 KB) in 84 ranges" and "917 pages (3668 KB) in 47 ranges", not listed
+    one by one. 0x13a6c0000 is in none of the printed ranges.
+
+Comparison with run 5's capture (B-kexec-suite-647c2c33-boot04.txt, B-finding-boot04.txt)
+ - Same bracket: clean after test_suite_oplib_gpu_as, damaged after test_suite_gpu.
+ - Same damage: a listed free-block head whose links and first 64 bytes read zero, block_state still a listed head.
+ - Address relative to the MNIST (kind 0) pushbuf: run 5 0x139580000 - 0x139460000 = 0x120000;
+   this boot 0x13a6c0000 - 0x13a5b0000 = 0x110000. Both about 1.1 MB above that pushbuf, in Linux-allocated territory.
+   Observation only: two points.
+
+Inference, not shown: the writer is on the inherited MNIST path that test_suite_gpu's last tests start (the GPU
+writing through the inherited channel into a page the hand-off reservation does not cover, or SLM-OS CPU code on that
+path writing through an address from the hand-off page). The discriminating build (poison, unmap, check on alloc,
+per-test scan inside test_suite_gpu) is meant to separate the two.
