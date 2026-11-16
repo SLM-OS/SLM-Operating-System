@@ -285,9 +285,9 @@ unsigned pmm_check_walk(const char *where);
  * pmm_poison_scan(where, full): the free-list walk of
  * pmm_verify_free_lists(where), then a check of the pattern in every free
  * page (full: every byte; otherwise the first and last 64 bytes of each
- * page). Prints one summary line and a report per damaged page, puts the
- * pattern back on reported pages, and returns list findings plus damaged
- * pages.
+ * page). Prints one summary line and a report per damaged free block
+ * (checked whole), puts the pattern back on it, and returns list findings
+ * plus damaged blocks.
  *
  * pmm_poison_describe_fault(far): one line for the EL1 fault dump when FAR
  * is in a heap page: free or allocated, the free block and order, and
@@ -309,9 +309,9 @@ struct pmm_poison_stats {
     size_t last_scan_pages;
 };
 
-/* The last finding: an allocation check (scan false; base == block) or a
- * scan (base is the damaged page; order -1 when no free head was found).
- * Offsets are from base. */
+/* The last finding: an allocation check (scan false) or a scan (scan
+ * true: the whole free block holding a damaged page; order -1 when no
+ * free head was found). base == block; offsets are from base. */
 struct pmm_poison_report {
     bool scan;
     const char *where;

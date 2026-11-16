@@ -980,8 +980,10 @@ unsigned pmm_verify_finding_count(void)
  * differing 64-byte line, the time and the last suite or test boundary
  * (pmm_verify_where). They do not stop the kernel. The first 16 are
  * printed in full, the next 240 in one line, the rest only counted. A
- * scan puts the pattern back on a page it reports, so a later report of
- * the same page is a new write.
+ * scan reports the whole free block holding a damaged page (offsets and
+ * extent across the block, and on Jetson kexec the offset from the MNIST
+ * hand-off pushbuf) and puts the pattern back on it, so a later report of
+ * the same block is a new write.
  *
  * Cost. Every free writes its block once and every allocation reads it
  * once, through the NC alias, with IRQs masked under pmm_lock for the
@@ -1082,6 +1084,25 @@ static bool pmm_p_find_block(uintptr_t a, uintptr_t *blk, unsigned int *order)
     return false;
 }
 
+/* The MNIST (kind 0) hand-off pushbuf on a Jetson kexec boot, or 0
+ * (ga10b_handoff_reserve.c overrides this). #1207's damaged blocks sat
+ * 1.0 to 1.2 MB above it, so reports give the offset. */
+__attribute__((weak)) uint64_t pmm_poison_ref_pushbuf(void)
+{
+    return 0;
+}
+
+static void pmm_p_print_ref(uintptr_t first, uintptr_t last)
+{
+    uint64_t ref = pmm_poison_ref_pushbuf();
+    if (ref != 0) {
+        uart_printf("  MNIST hand-off pushbuf 0x%lx: damaged bytes at +0x%lx .. +0x%lx "
+                    "(signed: %ld .. %ld)\n", (unsigned long)ref,
+                    (unsigned long)(first - ref), (unsigned long)(last - ref),
+                    (long)(first - ref), (long)(last - ref));
+    }
+}
+
 /* One 64-byte line through the alias, with what the pattern would be. */
 static void pmm_p_dump_line(const char *label, uintptr_t line)
 {
@@ -1097,10 +1118,10 @@ static void pmm_p_dump_line(const char *label, uintptr_t line)
 }
 
 /*
- * Record and print one finding: an allocation check (scan false: block
- * and order are the allocated block, base == block) or a scan (scan
- * true: base is the free page, block and order the free block holding
- * it, order -1 when none was found).
+ * Record and print one finding: an allocation check (scan false: the
+ * allocated block) or a scan (scan true: the whole free block holding the
+ * damaged page, order -1 and one page when no listed head was found).
+ * base == block; offsets in *d are from it, across the whole block.
  */
 static void pmm_p_report(bool scan, const char *where, uintptr_t block,
                          int order, uintptr_t base, const struct pmm_pdiff *d)
@@ -1126,9 +1147,10 @@ static void pmm_p_report(bool scan, const char *where, uintptr_t block,
     if (k < PMM_POISON_DETAIL_MAX) {
         if (scan) {
             uart_printf("\n[pmm-poison] FINDING (scan %u) at %lu ms: scan \"%s\": "
-                        "free page 0x%lx in free block 0x%lx order %d\n", n,
-                        (unsigned long)ms, where, (unsigned long)base,
-                        (unsigned long)block, order);
+                        "free block 0x%lx order %d (%lu KB), checked whole\n", n,
+                        (unsigned long)ms, where, (unsigned long)block, order,
+                        order >= 0 ? (unsigned long)(order_to_size((unsigned)order) / 1024)
+                                   : 4UL);
         } else {
             uart_printf("\n[pmm-poison] FINDING (allocation %u) at %lu ms: %s "
                         "allocated block 0x%lx order %d (%lu KB)\n", n,
@@ -1137,10 +1159,14 @@ static void pmm_p_report(bool scan, const char *where, uintptr_t block,
         }
         uart_printf("  last boundary: %s\n", pmm_verify_where);
         uart_printf("  %lu byte(s) differ from the pattern, offsets 0x%lx to 0x%lx "
-                    "from 0x%lx; the differing bytes are %s\n",
+                    "from 0x%lx (PA 0x%lx .. 0x%lx, extent %lu bytes); the "
+                    "differing bytes are %s\n",
                     (unsigned long)d->nbytes, (unsigned long)d->first,
                     (unsigned long)d->last, (unsigned long)base,
+                    (unsigned long)(base + d->first), (unsigned long)(base + d->last),
+                    (unsigned long)(d->last - d->first + 1),
                     d->nonzero ? "NOT all zero" : "all zero");
+        pmm_p_print_ref(base + d->first, base + d->last);
         uart_printf("  pages hit: %lu (first 0x%lx, last 0x%lx)\n",
                     (unsigned long)d->pages_hit, (unsigned long)d->first_page,
                     (unsigned long)d->last_page);
@@ -1151,12 +1177,16 @@ static void pmm_p_report(bool scan, const char *where, uintptr_t block,
         uart_puts("[pmm-poison] end of finding\n");
     } else if (k < PMM_POISON_LINE_MAX) {
         uart_printf("[pmm-poison] FINDING (%s %u) at %lu ms: base 0x%lx block 0x%lx "
-                    "order %d, %lu bytes 0x%lx..0x%lx, %s, %lu page(s); %s / %s\n",
+                    "order %d, %lu bytes 0x%lx..0x%lx, %s, %lu page(s), pushbuf "
+                    "%+ld; %s / %s\n",
                     scan ? "scan" : "allocation", n, (unsigned long)ms,
                     (unsigned long)base, (unsigned long)block, order,
                     (unsigned long)d->nbytes, (unsigned long)d->first,
                     (unsigned long)d->last, d->nonzero ? "nonzero" : "all zero",
-                    (unsigned long)d->pages_hit, where, pmm_verify_where);
+                    (unsigned long)d->pages_hit,
+                    pmm_poison_ref_pushbuf() ?
+                        (long)(base + d->first - pmm_poison_ref_pushbuf()) : 0L,
+                    where, pmm_verify_where);
     } else if (k == PMM_POISON_LINE_MAX) {
         uart_puts("[pmm-poison] further findings are counted, not printed\n");
     }
@@ -1350,15 +1380,45 @@ unsigned pmm_poison_scan(const char *where, bool full)
                 pmm_p_check(pg, pg + PAGE_SIZE - 64, 64, &d);
             }
             checked++;
-            if (d.any) {
-                uintptr_t blk = 0;
-                unsigned int bo = 0;
-                bool have = pmm_p_find_block(pg, &blk, &bo);
-                d.pages_hit = 1;
-                d.first_page = d.last_page = pg;
-                pmm_p_report(true, where, blk, have ? (int)bo : -1, pg, &d);
-                pmm_p_fill(pg + skip, PAGE_SIZE - skip);
-                found++;
+            if (!d.any) {
+                continue;
+            }
+            /* Damage: check and report the whole free block holding the
+             * page once (the extent across the block, every byte), put the
+             * pattern back on all of it, and continue after it. */
+            uintptr_t blk = pg;
+            unsigned int bo = 0;
+            bool have = pmm_p_find_block(pg, &blk, &bo);
+            size_t npages = have ? order_to_pages(bo) : 1;
+            struct pmm_pdiff bd = {0};
+            for (size_t p = 0; p < npages; p++) {
+                uintptr_t bp = blk + (p << PAGE_SHIFT);
+                size_t bskip = p == 0 && have ? 2 * sizeof(uint64_t) : skip;
+                size_t before = bd.nbytes;
+                pmm_p_check(blk, bp + bskip, PAGE_SIZE - bskip, &bd);
+                if (bd.nbytes != before) {
+                    if (bd.pages_hit++ == 0) {
+                        bd.first_page = bp;
+                    }
+                    bd.last_page = bp;
+                }
+            }
+            pmm_p_report(true, where, blk, have ? (int)bo : -1, blk, &bd);
+            for (size_t p = 0; p < npages; p++) {
+                uintptr_t bp = blk + (p << PAGE_SHIFT);
+                size_t bskip = p == 0 && have ? 2 * sizeof(uint64_t) : skip;
+                pmm_p_fill(bp + bskip, PAGE_SIZE - bskip);
+            }
+            found++;
+            /* Skip the rest of the block in this chunk; pages past the
+             * chunk are checked again (they hold the pattern now). */
+            size_t next = addr_to_block_index(blk) + npages;
+            if (next > i1) {
+                next = i1;
+            }
+            if (next > i + 1) {
+                checked += next - (i + 1);
+                i = next - 1;
             }
         }
         spin_unlock_irqrestore(&pmm_lock, flags);

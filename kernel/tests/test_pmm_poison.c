@@ -279,6 +279,55 @@ static void test_poison_edge_scan_reports_write_near_start(void)
     pmm_free_pages((void *)lower, 1);
 }
 
+/*
+ * #1207's shape: zeros across a page boundary inside a multi-page free
+ * block. The cheap scan (first and last 64 bytes per page) finds it, and
+ * the report covers the whole block: its extent (first and last differing
+ * byte from the block start) and both pages, in one finding.
+ */
+static void test_poison_scan_reports_whole_block_extent(void)
+{
+    struct pmm_poison_stats before, after;
+    struct pmm_poison_report rep;
+    uint8_t *b = pmm_alloc_pages(8);                /* order 3 */
+    TEST_ASSERT_NOT_NULL(b);
+    uintptr_t up = (uintptr_t)b + 4 * PAGE_SIZE;    /* upper order-2 half */
+    pmm_free_pages((void *)up, 4);                  /* lower half stays: no merge */
+    TEST_ASSERT_EQUAL_INT(2, pmm_free_block_order(up));
+    pmm_poison_get_stats(&before);
+
+    /* 512 zero bytes: the last 256 of page 1 and the first 256 of page 2. */
+    static const uint8_t zeros[512];
+    volatile uint64_t *a = (volatile uint64_t *)pmm_poison_alias_of(up);
+    for (size_t o = 2 * PAGE_SIZE - 256; o < 2 * PAGE_SIZE + 256; o += 8) {
+        a[o / 8] = 0;
+    }
+    barrier_sy();
+    pmm_poison_note_injected(1);
+    struct expect e = {0};
+    expect_bytes(&e, up, 2 * PAGE_SIZE - 256, zeros, sizeof(zeros));
+
+    (void)pmm_poison_scan("test_poison_scan_reports_whole_block_extent", false);
+    pmm_poison_get_stats(&after);
+    TEST_ASSERT_EQUAL_UINT(before.scan_findings + 1, after.scan_findings);
+    pmm_poison_last_report(&rep);
+    TEST_ASSERT_EQUAL_HEX64(up, rep.block);
+    TEST_ASSERT_EQUAL_HEX64(up, rep.base);
+    TEST_ASSERT_EQUAL_INT(2, rep.order);
+    TEST_ASSERT_EQUAL_UINT(e.first, rep.first);
+    TEST_ASSERT_EQUAL_UINT(e.last, rep.last);
+    TEST_ASSERT_EQUAL_UINT(e.nbytes, rep.nbytes);
+    TEST_ASSERT_TRUE(rep.all_zero);
+    TEST_ASSERT_EQUAL_UINT(2, rep.pages_hit);
+    TEST_ASSERT_EQUAL_HEX64(up + PAGE_SIZE, rep.first_page);
+
+    /* The block holds the pattern again: the next full scan is clean. */
+    (void)pmm_poison_scan("test_poison_scan_reports_whole_block_extent (again)", true);
+    pmm_poison_get_stats(&before);
+    TEST_ASSERT_EQUAL_UINT(after.scan_findings, before.scan_findings);
+    pmm_free_pages(b, 4);
+}
+
 #if defined(CONFIG_PMM_UNMAP)
 /* A multi-page block: every page unmapped while free, mapped when
  * allocated, and a free-then-allocate of the same pages round-trips. */
@@ -305,6 +354,7 @@ int test_suite_pmm_poison(void)
     POISON_TEST(test_poison_alloc_reports_raw_write);
     POISON_TEST(test_poison_scan_reports_raw_write);
     POISON_TEST(test_poison_edge_scan_reports_write_near_start);
+    POISON_TEST(test_poison_scan_reports_whole_block_extent);
 #if defined(CONFIG_PMM_UNMAP)
     POISON_TEST(test_unmap_block_round_trip);
 #endif

@@ -984,6 +984,18 @@ void ga10b_boot_handoff_reset_for_test(void)
 }
 #endif
 
+#if defined(CONFIG_PMM_POISON)
+/* PMM_POISON (#1207): the MNIST (kind 0) hand-off pushbuf, read once at
+ * the boot scan, so poison reports can give a damaged address's offset
+ * from it (overrides the weak 0 in pmm.c). */
+static uint64_t g_poison_ref_pushbuf;
+
+uint64_t pmm_poison_ref_pushbuf(void)
+{
+    return g_poison_ref_pushbuf;
+}
+#endif
+
 uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
                                          uint64_t stride,
                                          uint64_t resident_inst_phys)
@@ -995,6 +1007,12 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
         g_boot_handoff_phys[kind] = handoffs[kind];
     }
     g_boot_handoff_scan_ran = true;
+#if defined(CONFIG_PMM_POISON)
+    if (handoffs[0] != 0) {
+        g_poison_ref_pushbuf = ((const volatile struct ga10b_channel_handoff *)
+                                    (uintptr_t)handoffs[0])->pushbuf_phys;
+    }
+#endif
 
     uint32_t found_mask = 0;
     for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
