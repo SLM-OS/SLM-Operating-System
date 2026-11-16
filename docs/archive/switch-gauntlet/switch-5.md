@@ -3267,3 +3267,57 @@ with `aelpg_enable` and `elpg_enable` set to 0 on Linux just before
 `slmos-kexec` (trigger `o-trigger-pre.sh.txt`, readback logged per boot).
 Prediction if ELPG is the writer: no halt and no finding after
 `test_suite_gpu` in about 27 boots.
+
+## Entry 61 (written 23:05 UTC on 2026-11-16, from date): ELPG ruled out (E1, E1b); vmwalk diagnostic started
+
+Evidence `gauntlet-5-hw-jetson` b3a5048e (more to follow), `run5-hw/1207-gpu/`.
+Diagnostic branches by the orchestrator (one worktree each, never to
+merge): `diag/1207-elpg` (db61c7d5, then 29418281) and `diag/1207-vmwalk`
+(d4682dc3); patch files are on the evidence branch.
+
+- **E1** (unmodified b548f29d image, `elpg_enable` and `aelpg_enable`
+  set to 0 on Linux before `slmos-kexec`), 1 boot
+  (`e1-elpgoff-kexec-suite-b548f29d-boot01.txt`): no halt, but the
+  inherit is refused (`FECS not ready (expected 1, got 0x4)`), so MNIST
+  never ran and the row says nothing. The other two boots of that
+  `boot_test` call were cancelled by the orchestrator (the call kept
+  power-cycling the board; those two runs booted Linux only and are not
+  rows).
+- **E1b** (`diag/1207-elpg` 29418281 = main + accept FECS and GPCCS
+  mailbox0 = 0x4 at inherit; the first image, db61c7d5, relaxed FECS only
+  and its one boot, `e1b-...-db61c7d5-boot01.txt`, failed on GPCCS 0x4
+  and is not a row). ELPG and AELPG off before kexec, readback in the
+  trigger log. **5 boots with the inherited MNIST channel up**
+  (`channel bring-up: inherit 9561 us, ... warmup ~12.2 s`; baseline
+  warmup 354 us), files `e1b-elpgoff-kexec-suite-29418281-boot01..05.txt`:
+  **1 PMM halt (boot 04)**, same signature: after `test_suite_gpu`,
+  zeroed listed heads 0x13b740000 (order 5) and 0x13b760000 (order 4),
+  i.e. MNIST pushbuf 0x13b640000 + 0x100000 and + 0x120000. **ELPG is
+  not required for the damage; the ELPG-save hypothesis of Entry 60 is
+  refuted.** Notes: run 2's kexec was fired by hand at Linux uptime 103 s
+  (the image was replaced after the db61c7d5 boot), and its capture
+  starts at MB2 `[0001.246]`, the MB1 header lines missed by about 1 s.
+  With ELPG off the GPU path is not identical to the baseline (12 s
+  warmup; one of three MNIST calls still returns an error).
+- `test_suite_oplib_gpu_as` (the suite just before `test_suite_gpu`)
+  runs entirely on a fake allocator and no-op register ops, so it does
+  not touch the real GPU; not a candidate.
+- **Open candidate (hypothesis):** `vm_reserve_add` in
+  `ga10b_handoff_reserve.c` silently skips any GMMU leaf whose address is
+  not in DRAM. If nvgpu maps some MNIST buffers into the channel VM by
+  SMMU IOVA (Linux devices here use 0x7fxxxxxxxx IOVAs), the pages behind
+  them are never reserved, and the SMMU left configured across kexec
+  routes GPU writes there. `diag/1207-vmwalk` prints each skipped leaf
+  and every reserved range; one kexec boot is running.
+- **vmwalk result** (`vmwalk-kexec-suite-d4682dc3-boot01.txt`, evidence
+  d19ba31f; no halt in that boot): both walked VMs (inst 0x12a83d000 PDB
+  0x125956000, inst 0x13c325000 PDB 0x13c334000) have **0 off-DRAM
+  leaves and 0 off-DRAM tables**, so the IOVA hypothesis is refuted for
+  them. 150 reserved ranges are printed; **none lies in pushbuf + 0x20000
+  .. + 0x300000** (pushbuf 0x13c650000, reserved with the next 64 KB as
+  one 128 KB run). So the window where every damaged head has been found
+  holds no page either walked GPU VM maps at `pmm_init`. Inference: the
+  writer either does not go through those two VMs (CPU code, or a GPU
+  access by another path), or the mapping is created after `pmm_init`.
+  The unmap build, which faults on a CPU access to a freed page, is the
+  deciding instrument; waiting on the builder's fix.
