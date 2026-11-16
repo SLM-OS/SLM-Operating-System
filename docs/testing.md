@@ -499,6 +499,23 @@ stale pointer. The design and the cache argument are in the comment
   rest when the option arms, with break-before-make per entry and tables
   from the PMM (about 1 page per 2 MB: 495 on QEMU, about 3,550 (14 MB) on
   Jetson). `vmm_virt_to_phys` and `vmm_is_mapped` follow the L3 entries.
+- `PMM_POISON_SNAPSHOT=ON` (needs `PMM_POISON`): the pages already free
+  when the option arms are not written. On a Jetson kexec boot some of them
+  hold state Linux left for devices still in use: poisoning them kept the
+  inherited MNIST channel from coming up (`[GA10B-INHERIT] FECS not ready`,
+  76ec16fd). Instead each gets a 64-bit hash of bytes 16..4095 and an 8-bit
+  checksum per 64-byte line (72 bytes per heap page: Jetson about 16 MB +
+  128 MB, QEMU 2 MB + 16 MB; arming reads all free memory once). Allocation
+  verifies and drops the record; scans place a change to its 64-byte lines
+  (line-granular extent, `of those, N byte(s) are M whole 64-byte line(s) of
+  snapshot pages ...`), report the block, and record the page again. Pages
+  freed later get the pattern.
+- The tables the options need (alias L2 tables, L3 tables, snapshot
+  tables) come from the lowest free addresses, and arming prints where.
+  The L2 tables that split a 1 GB block (Jetson RAM above 4 GB) come from a
+  static pool in the image: a table taken from the PMM inside the block it
+  replaced unmapped itself during break-before-make on the first Jetson
+  run (`test_unmap_split_l1_block_above_4gb`).
 - `PMM_UNMAP_SELFTEST=ON` (needs `PMM_UNMAP`): the test kernel frees a
   page, writes it from `pmm_unmap_selftest_store`, and halts on the fault.
 - Both arm at the end of `pmm_init`, which poisons (and unmaps) every page
@@ -521,7 +538,9 @@ the end of the run prints
 where UNEXPECTED counts findings no test caused (the one list finding is
 `test_verify_reports_a_cleared_link`'s).
 
-**Cost.** QEMU (1 GB, TCG): arming 2.2 s; a full scan of about 145,000
+**Cost.** Jetson kexec, poison only (76ec16fd, one boot): arming 976 ms
+for 1,803,694 free pages, a full scan about 12.3 s, an edges scan about
+475 ms. QEMU (1 GB, TCG): arming 0.6 to 2.2 s; a full scan of about 145,000
 free pages (570 MB) about 0.5 s, the 64-byte-edges scan about 0.13 s;
 the QEMU run of `make test` 99 s with both options on. Jetson (about 6.7 GB free) is
 an estimate until a board prints its own `scan ... ms` lines: reads
