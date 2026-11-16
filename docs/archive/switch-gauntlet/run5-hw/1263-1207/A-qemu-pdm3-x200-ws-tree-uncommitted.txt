@@ -1,0 +1,1171 @@
+# make test WORK_STEALING=ON TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200 in .wt/a; working tree = d09b063b + the three-worker test, uncommitted at the time
+# saved 2026-11-16T01:25:00Z
+# ---- make output (last 8 lines) ----
+flock: executing make
+Creating sparse build/kernel-test/sdhci-test.img (4G, SDHC-sized)
+Running kernel tests...
+
+Test Results:
+=============
+PASSED - All tests passed (exit code 0)
+make: Leaving directory '/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a'
+# ---- QEMU serial (build/test-output.log) ----
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261116012250 (d09b063b-dirty)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x402301b8
+  .data:   0x40760000 - 0x40784000
+  .bss:    0x40790000 - 0x420dbee0
+  End:     0x420e0000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x407ec000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x407ea003 (covers VA 0x0)
+  L1[1]: 0x407eb003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x420e0000 - 0x80000000
+  Total pages:     253728 (1014912 KB)
+  Free pages:      253728 (1014912 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8416 pages (kernel)
+
+  Free list distribution:
+    Order  5 (  128 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_preempt_flag_follows_migrated_task repeat=200 source=build index=2907
+  pdm: moved=22 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,2,8,1]
+  pdm_b: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,1,7,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 1/200]  [PASS] test_preempt_flag_follows_migrated_task (130544 us)
+  pdm: moved=11 runs=12/12/11 bad=0
+  pdm_a: runs=12 moved=0 bad=0 (first on cpu 0) cpus=[0,0,12,0]
+  pdm_b: runs=12 moved=0 bad=0 (first on cpu 0) cpus=[0,0,12,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 2/200]  [PASS] test_preempt_flag_follows_migrated_task (139287 us)
+  pdm: moved=26 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,5,5,1]
+  pdm_b: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,4,6,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 3/200]  [PASS] test_preempt_flag_follows_migrated_task (121046 us)
+  pdm: moved=26 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=9 bad=0 (first on cpu 0) cpus=[0,2,4,5]
+  pdm_b: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,3,6,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 4/200]  [PASS] test_preempt_flag_follows_migrated_task (114380 us)
+  pdm: moved=16 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,2,9,0]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,6,5,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 5/200]  [PASS] test_preempt_flag_follows_migrated_task (120700 us)
+  pdm: moved=28 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,5,2,4]
+  pdm_b: runs=11 moved=10 bad=0 (first on cpu 0) cpus=[0,3,5,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 6/200]  [PASS] test_preempt_flag_follows_migrated_task (121686 us)
+  pdm: moved=12 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=0 bad=0 (first on cpu 0) cpus=[0,10,0,0]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 7/200]  [PASS] test_preempt_flag_follows_migrated_task (121608 us)
+  pdm: moved=14 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,7,0,4]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,6,0,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 8/200]  [PASS] test_preempt_flag_follows_migrated_task (120145 us)
+  pdm: moved=21 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,7,1,3]
+  pdm_b: runs=10 moved=6 bad=0 (first on cpu 0) cpus=[0,4,1,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 9/200]  [PASS] test_preempt_flag_follows_migrated_task (121106 us)
+  pdm: moved=20 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=4 bad=0 (first on cpu 0) cpus=[0,1,3,6]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,3,2,6]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 10/200]  [PASS] test_preempt_flag_follows_migrated_task (121241 us)
+  pdm: moved=14 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,0,3,8]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,4,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 11/200]  [PASS] test_preempt_flag_follows_migrated_task (120420 us)
+  pdm: moved=30 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  pdm_b: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 12/200]  [PASS] test_preempt_flag_follows_migrated_task (120999 us)
+  pdm: moved=13 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,0,10,1]
+  pdm_b: runs=10 moved=0 bad=0 (first on cpu 0) cpus=[0,0,10,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 13/200]  [PASS] test_preempt_flag_follows_migrated_task (115542 us)
+  pdm: moved=25 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=7 bad=0 (first on cpu 0) cpus=[0,6,2,2]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,6,3,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 14/200]  [PASS] test_preempt_flag_follows_migrated_task (121246 us)
+  pdm: moved=18 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,2,8,1]
+  pdm_b: runs=10 moved=2 bad=0 (first on cpu 0) cpus=[0,0,8,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 15/200]  [PASS] test_preempt_flag_follows_migrated_task (121362 us)
+  pdm: moved=17 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,10,1,0]
+  pdm_b: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,9,1,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 16/200]  [PASS] test_preempt_flag_follows_migrated_task (120978 us)
+  pdm: moved=16 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=2 bad=0 (first on cpu 0) cpus=[0,9,1,0]
+  pdm_b: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,8,3,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 17/200]  [PASS] test_preempt_flag_follows_migrated_task (120457 us)
+  pdm: moved=25 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,5,2,4]
+  pdm_b: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 18/200]  [PASS] test_preempt_flag_follows_migrated_task (121181 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 19/200]  [PASS] test_preempt_flag_follows_migrated_task (120719 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 20/200]  [PASS] test_preempt_flag_follows_migrated_task (120415 us)
+  pdm: moved=16 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,9,2,0]
+  pdm_b: runs=10 moved=3 bad=0 (first on cpu 0) cpus=[0,8,2,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 21/200]  [PASS] test_preempt_flag_follows_migrated_task (120731 us)
+  pdm: moved=17 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,9,2,0]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,8,3,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 22/200]  [PASS] test_preempt_flag_follows_migrated_task (119391 us)
+  pdm: moved=20 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,5,6,0]
+  pdm_b: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,9,2,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 23/200]  [PASS] test_preempt_flag_follows_migrated_task (121546 us)
+  pdm: moved=25 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,7,0,4]
+  pdm_b: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,4,5,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 24/200]  [PASS] test_preempt_flag_follows_migrated_task (120717 us)
+  pdm: moved=26 runs=12/12/11 bad=0
+  pdm_a: runs=12 moved=7 bad=0 (first on cpu 0) cpus=[0,6,0,6]
+  pdm_b: runs=12 moved=8 bad=0 (first on cpu 0) cpus=[0,6,1,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 25/200]  [PASS] test_preempt_flag_follows_migrated_task (130606 us)
+  pdm: moved=20 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,9,0,2]
+  pdm_b: runs=10 moved=5 bad=0 (first on cpu 0) cpus=[0,5,0,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 26/200]  [PASS] test_preempt_flag_follows_migrated_task (121331 us)
+  pdm: moved=18 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,1,1,9]
+  pdm_b: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,0,2,9]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 27/200]  [PASS] test_preempt_flag_follows_migrated_task (121814 us)
+  pdm: moved=19 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,2,6,3]
+  pdm_b: runs=10 moved=2 bad=0 (first on cpu 0) cpus=[0,1,6,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 28/200]  [PASS] test_preempt_flag_follows_migrated_task (120741 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 29/200]  [PASS] test_preempt_flag_follows_migrated_task (117403 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 30/200]  [PASS] test_preempt_flag_follows_migrated_task (120638 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 31/200]  [PASS] test_preempt_flag_follows_migrated_task (120633 us)
+  pdm: moved=19 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,1,3,7]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,0,5,6]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 32/200]  [PASS] test_preempt_flag_follows_migrated_task (120759 us)
+  pdm: moved=24 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=7 bad=0 (first on cpu 0) cpus=[0,4,0,6]
+  pdm_b: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,2,1,8]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 33/200]  [PASS] test_preempt_flag_follows_migrated_task (120713 us)
+  pdm: moved=21 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,5,0,6]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,6,0,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 34/200]  [PASS] test_preempt_flag_follows_migrated_task (120947 us)
+  pdm: moved=20 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,3,0,8]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,2,0,9]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 35/200]  [PASS] test_preempt_flag_follows_migrated_task (120640 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 36/200]  [PASS] test_preempt_flag_follows_migrated_task (121061 us)
+  pdm: moved=20 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,4,0,7]
+  pdm_b: runs=10 moved=5 bad=0 (first on cpu 0) cpus=[0,5,0,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 37/200]  [PASS] test_preempt_flag_follows_migrated_task (113791 us)
+  pdm: moved=16 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,1,0,10]
+  pdm_b: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,1,0,10]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 38/200]  [PASS] test_preempt_flag_follows_migrated_task (119644 us)
+  pdm: moved=15 runs=12/12/11 bad=0
+  pdm_a: runs=12 moved=2 bad=0 (first on cpu 0) cpus=[0,0,1,11]
+  pdm_b: runs=12 moved=2 bad=0 (first on cpu 0) cpus=[0,0,1,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 39/200]  [PASS] test_preempt_flag_follows_migrated_task (121063 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 40/200]  [PASS] test_preempt_flag_follows_migrated_task (120691 us)
+  pdm: moved=15 runs=12/12/11 bad=0
+  pdm_a: runs=12 moved=2 bad=0 (first on cpu 0) cpus=[0,0,1,11]
+  pdm_b: runs=12 moved=2 bad=0 (first on cpu 0) cpus=[0,0,1,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 41/200]  [PASS] test_preempt_flag_follows_migrated_task (121029 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 42/200]  [PASS] test_preempt_flag_follows_migrated_task (117752 us)
+  pdm: moved=16 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,3,0,8]
+  pdm_b: runs=10 moved=2 bad=0 (first on cpu 0) cpus=[0,2,0,8]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 43/200]  [PASS] test_preempt_flag_follows_migrated_task (120747 us)
+  pdm: moved=11 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=0 bad=0 (first on cpu 0) cpus=[0,10,0,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 44/200]  [PASS] test_preempt_flag_follows_migrated_task (120790 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 45/200]  [PASS] test_preempt_flag_follows_migrated_task (120385 us)
+  pdm: moved=15 runs=10/9/11 bad=0
+  pdm_a: runs=10 moved=3 bad=0 (first on cpu 0) cpus=[0,8,2,0]
+  pdm_b: runs=9 moved=1 bad=0 (first on cpu 0) cpus=[0,8,1,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 46/200]  [PASS] test_preempt_flag_follows_migrated_task (100512 us)
+  pdm: moved=29 runs=12/12/11 bad=0
+  pdm_a: runs=12 moved=9 bad=0 (first on cpu 0) cpus=[0,7,5,0]
+  pdm_b: runs=12 moved=9 bad=0 (first on cpu 0) cpus=[0,7,5,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 47/200]  [PASS] test_preempt_flag_follows_migrated_task (89916 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 48/200]  [PASS] test_preempt_flag_follows_migrated_task (79676 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 49/200]  [PASS] test_preempt_flag_follows_migrated_task (80455 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 50/200]  [PASS] test_preempt_flag_follows_migrated_task (80537 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,5,6,3]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,3,6,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 51/200]  [PASS] test_preempt_flag_follows_migrated_task (90348 us)
+  pdm: moved=20 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,5,0,6]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,7,0,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 52/200]  [PASS] test_preempt_flag_follows_migrated_task (121203 us)
+  pdm: moved=22 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,7,0,4]
+  pdm_b: runs=10 moved=3 bad=0 (first on cpu 0) cpus=[0,1,0,9]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 53/200]  [PASS] test_preempt_flag_follows_migrated_task (120941 us)
+  pdm: moved=15 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,1,0,10]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,1,0,10]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 54/200]  [PASS] test_preempt_flag_follows_migrated_task (116484 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 55/200]  [PASS] test_preempt_flag_follows_migrated_task (116423 us)
+  pdm: moved=13 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,5,6]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,6,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 56/200]  [PASS] test_preempt_flag_follows_migrated_task (120428 us)
+  pdm: moved=25 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,0,8,3]
+  pdm_b: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,0,7,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 57/200]  [PASS] test_preempt_flag_follows_migrated_task (120746 us)
+  pdm: moved=24 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,2,3,6]
+  pdm_b: runs=10 moved=7 bad=0 (first on cpu 0) cpus=[0,3,4,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 58/200]  [PASS] test_preempt_flag_follows_migrated_task (121357 us)
+  pdm: moved=21 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=6 bad=0 (first on cpu 0) cpus=[0,3,1,6]
+  pdm_b: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,3,5,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 59/200]  [PASS] test_preempt_flag_follows_migrated_task (121141 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 60/200]  [PASS] test_preempt_flag_follows_migrated_task (121080 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 61/200]  [PASS] test_preempt_flag_follows_migrated_task (120783 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 62/200]  [PASS] test_preempt_flag_follows_migrated_task (120506 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 63/200]  [PASS] test_preempt_flag_follows_migrated_task (120506 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 64/200]  [PASS] test_preempt_flag_follows_migrated_task (120744 us)
+  pdm: moved=23 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,1,3,7]
+  pdm_b: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,5,1,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 65/200]  [PASS] test_preempt_flag_follows_migrated_task (130878 us)
+  pdm: moved=22 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,6,3,2]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,6,2,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 66/200]  [PASS] test_preempt_flag_follows_migrated_task (121400 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 67/200]  [PASS] test_preempt_flag_follows_migrated_task (120169 us)
+  pdm: moved=13 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,10,1,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 68/200]  [PASS] test_preempt_flag_follows_migrated_task (121342 us)
+  pdm: moved=13 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,10,1,0]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,10,1,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 69/200]  [PASS] test_preempt_flag_follows_migrated_task (121063 us)
+  pdm: moved=21 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,6,5,0]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,6,5,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 70/200]  [PASS] test_preempt_flag_follows_migrated_task (120989 us)
+  pdm: moved=28 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=8 bad=0 (first on cpu 0) cpus=[0,3,5,5]
+  pdm_b: runs=13 moved=9 bad=0 (first on cpu 0) cpus=[0,4,4,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 71/200]  [PASS] test_preempt_flag_follows_migrated_task (141380 us)
+  pdm: moved=26 runs=12/12/11 bad=0
+  pdm_a: runs=12 moved=7 bad=0 (first on cpu 0) cpus=[0,1,3,8]
+  pdm_b: runs=12 moved=8 bad=0 (first on cpu 0) cpus=[0,0,8,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 72/200]  [PASS] test_preempt_flag_follows_migrated_task (140599 us)
+  pdm: moved=26 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,0,5,6]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,1,4,6]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 73/200]  [PASS] test_preempt_flag_follows_migrated_task (121206 us)
+  pdm: moved=22 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,2,0,9]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,1,4,6]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 74/200]  [PASS] test_preempt_flag_follows_migrated_task (120994 us)
+  pdm: moved=13 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 75/200]  [PASS] test_preempt_flag_follows_migrated_task (121231 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 76/200]  [PASS] test_preempt_flag_follows_migrated_task (120921 us)
+  pdm: moved=14 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=1 bad=0 (first on cpu 0) cpus=[0,0,7,3]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,1,10,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 77/200]  [PASS] test_preempt_flag_follows_migrated_task (120652 us)
+  pdm: moved=19 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,8,1,2]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,7,2,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 78/200]  [PASS] test_preempt_flag_follows_migrated_task (121293 us)
+  pdm: moved=24 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,7,2,2]
+  pdm_b: runs=10 moved=8 bad=0 (first on cpu 0) cpus=[0,3,6,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 79/200]  [PASS] test_preempt_flag_follows_migrated_task (120043 us)
+  pdm: moved=23 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,3,7,1]
+  pdm_b: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,2,9,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 80/200]  [PASS] test_preempt_flag_follows_migrated_task (121866 us)
+  pdm: moved=19 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,5,6,0]
+  pdm_b: runs=10 moved=2 bad=0 (first on cpu 0) cpus=[0,3,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 81/200]  [PASS] test_preempt_flag_follows_migrated_task (120980 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 82/200]  [PASS] test_preempt_flag_follows_migrated_task (121245 us)
+  pdm: moved=21 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,5,5,1]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,6,4,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 83/200]  [PASS] test_preempt_flag_follows_migrated_task (120821 us)
+  pdm: moved=25 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,6,4,1]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,5,5,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 84/200]  [PASS] test_preempt_flag_follows_migrated_task (121217 us)
+  pdm: moved=22 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,5,0,6]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,5,0,6]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 85/200]  [PASS] test_preempt_flag_follows_migrated_task (120703 us)
+  pdm: moved=22 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,2,6,3]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,8,2,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 86/200]  [PASS] test_preempt_flag_follows_migrated_task (122022 us)
+  pdm: moved=23 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,3,2,6]
+  pdm_b: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,1,5,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 87/200]  [PASS] test_preempt_flag_follows_migrated_task (117841 us)
+  pdm: moved=14 runs=10/10/11 bad=0
+  pdm_a: runs=10 moved=3 bad=0 (first on cpu 0) cpus=[0,3,0,7]
+  pdm_b: runs=10 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,10]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 88/200]  [PASS] test_preempt_flag_follows_migrated_task (120545 us)
+  pdm: moved=23 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,3,6,2]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,2,6,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 89/200]  [PASS] test_preempt_flag_follows_migrated_task (121488 us)
+  pdm: moved=22 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,0,3,8]
+  pdm_b: runs=10 moved=5 bad=0 (first on cpu 0) cpus=[0,1,6,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 90/200]  [PASS] test_preempt_flag_follows_migrated_task (120508 us)
+  pdm: moved=24 runs=10/10/11 bad=0
+  pdm_a: runs=10 moved=9 bad=0 (first on cpu 0) cpus=[0,5,3,2]
+  pdm_b: runs=10 moved=4 bad=0 (first on cpu 0) cpus=[0,7,2,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 91/200]  [PASS] test_preempt_flag_follows_migrated_task (120769 us)
+  pdm: moved=18 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=2 bad=0 (first on cpu 0) cpus=[0,2,5,3]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,2,7,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 92/200]  [PASS] test_preempt_flag_follows_migrated_task (121010 us)
+  pdm: moved=22 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,3,3,5]
+  pdm_b: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,0,8,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 93/200]  [PASS] test_preempt_flag_follows_migrated_task (121300 us)
+  pdm: moved=26 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,3,6,2]
+  pdm_b: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,3,5,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 94/200]  [PASS] test_preempt_flag_follows_migrated_task (121274 us)
+  pdm: moved=24 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=5 bad=0 (first on cpu 0) cpus=[0,2,6,2]
+  pdm_b: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,2,7,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 95/200]  [PASS] test_preempt_flag_follows_migrated_task (121559 us)
+  pdm: moved=23 runs=11/10/11 bad=0
+  pdm_a: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,3,3,5]
+  pdm_b: runs=10 moved=7 bad=0 (first on cpu 0) cpus=[0,4,4,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 96/200]  [PASS] test_preempt_flag_follows_migrated_task (120880 us)
+  pdm: moved=23 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,5,0,6]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,6,1,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 97/200]  [PASS] test_preempt_flag_follows_migrated_task (121512 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 98/200]  [PASS] test_preempt_flag_follows_migrated_task (118421 us)
+  pdm: moved=16 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,0,2,9]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,0,1,10]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 99/200]  [PASS] test_preempt_flag_follows_migrated_task (120089 us)
+  pdm: moved=25 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,2,6,3]
+  pdm_b: runs=11 moved=8 bad=0 (first on cpu 0) cpus=[0,2,5,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 100/200]  [PASS] test_preempt_flag_follows_migrated_task (121224 us)
+  pdm: moved=25 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=7 bad=0 (first on cpu 0) cpus=[0,2,5,3]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,4,6,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 101/200]  [PASS] test_preempt_flag_follows_migrated_task (121246 us)
+  pdm: moved=20 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,4,0,7]
+  pdm_b: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,4,0,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 102/200]  [PASS] test_preempt_flag_follows_migrated_task (120837 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 103/200]  [PASS] test_preempt_flag_follows_migrated_task (121185 us)
+  pdm: moved=15 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=2 bad=0 (first on cpu 0) cpus=[0,5,0,5]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,1,0,10]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 104/200]  [PASS] test_preempt_flag_follows_migrated_task (120822 us)
+  pdm: moved=30 runs=12/12/11 bad=0
+  pdm_a: runs=12 moved=10 bad=0 (first on cpu 0) cpus=[0,5,4,3]
+  pdm_b: runs=12 moved=9 bad=0 (first on cpu 0) cpus=[0,6,4,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 105/200]  [PASS] test_preempt_flag_follows_migrated_task (130564 us)
+  pdm: moved=19 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,4,0,7]
+  pdm_b: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,3,0,8]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 106/200]  [PASS] test_preempt_flag_follows_migrated_task (121385 us)
+  pdm: moved=15 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,1,0,10]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,4,0,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 107/200]  [PASS] test_preempt_flag_follows_migrated_task (120600 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 108/200]  [PASS] test_preempt_flag_follows_migrated_task (120914 us)
+  pdm: moved=19 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,2,1,8]
+  pdm_b: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,2,0,9]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 109/200]  [PASS] test_preempt_flag_follows_migrated_task (121502 us)
+  pdm: moved=14 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,10,0,1]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 110/200]  [PASS] test_preempt_flag_follows_migrated_task (120460 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 111/200]  [PASS] test_preempt_flag_follows_migrated_task (120803 us)
+  pdm: moved=13 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 112/200]  [PASS] test_preempt_flag_follows_migrated_task (114669 us)
+  pdm: moved=14 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=1 bad=0 (first on cpu 0) cpus=[0,3,0,7]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,1,0,10]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 113/200]  [PASS] test_preempt_flag_follows_migrated_task (119947 us)
+  pdm: moved=12 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 114/200]  [PASS] test_preempt_flag_follows_migrated_task (120871 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 115/200]  [PASS] test_preempt_flag_follows_migrated_task (120915 us)
+  pdm: moved=12 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,0,11]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,0,1,10]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 116/200]  [PASS] test_preempt_flag_follows_migrated_task (120852 us)
+  pdm: moved=53 runs=21/21/11 bad=0
+  pdm_a: runs=21 moved=21 bad=0 (first on cpu 0) cpus=[0,0,11,10]
+  pdm_b: runs=21 moved=21 bad=0 (first on cpu 0) cpus=[0,0,11,10]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 117/200]  [PASS] test_preempt_flag_follows_migrated_task (120748 us)
+  pdm: moved=49 runs=19/19/11 bad=0
+  pdm_a: runs=19 moved=19 bad=0 (first on cpu 0) cpus=[0,0,10,9]
+  pdm_b: runs=19 moved=19 bad=0 (first on cpu 0) cpus=[0,0,10,9]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 118/200]  [PASS] test_preempt_flag_follows_migrated_task (101006 us)
+  pdm: moved=41 runs=15/15/11 bad=0
+  pdm_a: runs=15 moved=15 bad=0 (first on cpu 0) cpus=[0,0,8,7]
+  pdm_b: runs=15 moved=15 bad=0 (first on cpu 0) cpus=[0,0,8,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 119/200]  [PASS] test_preempt_flag_follows_migrated_task (80741 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,3,7,4]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,1,7,6]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 120/200]  [PASS] test_preempt_flag_follows_migrated_task (80578 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 121/200]  [PASS] test_preempt_flag_follows_migrated_task (78804 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 122/200]  [PASS] test_preempt_flag_follows_migrated_task (80532 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 123/200]  [PASS] test_preempt_flag_follows_migrated_task (80533 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 124/200]  [PASS] test_preempt_flag_follows_migrated_task (80457 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 125/200]  [PASS] test_preempt_flag_follows_migrated_task (80446 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 126/200]  [PASS] test_preempt_flag_follows_migrated_task (79641 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 127/200]  [PASS] test_preempt_flag_follows_migrated_task (80245 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 128/200]  [PASS] test_preempt_flag_follows_migrated_task (80450 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,5,7,2]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,6,7,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 129/200]  [PASS] test_preempt_flag_follows_migrated_task (81143 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,1,7,5]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,1,7,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 130/200]  [PASS] test_preempt_flag_follows_migrated_task (73285 us)
+  pdm: moved=38 runs=13/14/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,6,3]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,6,7,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 131/200]  [PASS] test_preempt_flag_follows_migrated_task (81137 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,2,7,4]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,5,7,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 132/200]  [PASS] test_preempt_flag_follows_migrated_task (72949 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,5,7,2]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,4,7,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 133/200]  [PASS] test_preempt_flag_follows_migrated_task (80663 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,7,0]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,7,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 134/200]  [PASS] test_preempt_flag_follows_migrated_task (77346 us)
+  pdm: moved=38 runs=14/13/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,4,7,3]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 135/200]  [PASS] test_preempt_flag_follows_migrated_task (80650 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,5,6,2]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 136/200]  [PASS] test_preempt_flag_follows_migrated_task (80811 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,4,7,3]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,3,7,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 137/200]  [PASS] test_preempt_flag_follows_migrated_task (80701 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 138/200]  [PASS] test_preempt_flag_follows_migrated_task (80412 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 139/200]  [PASS] test_preempt_flag_follows_migrated_task (80594 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 140/200]  [PASS] test_preempt_flag_follows_migrated_task (80069 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 141/200]  [PASS] test_preempt_flag_follows_migrated_task (80688 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 142/200]  [PASS] test_preempt_flag_follows_migrated_task (80226 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 143/200]  [PASS] test_preempt_flag_follows_migrated_task (81029 us)
+  pdm: moved=17 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,9,0,2]
+  pdm_b: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,8,0,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 144/200]  [PASS] test_preempt_flag_follows_migrated_task (111328 us)
+  pdm: moved=31 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,1,6]
+  pdm_b: runs=11 moved=9 bad=0 (first on cpu 0) cpus=[0,3,2,6]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 145/200]  [PASS] test_preempt_flag_follows_migrated_task (120729 us)
+  pdm: moved=23 runs=12/12/11 bad=0
+  pdm_a: runs=12 moved=4 bad=0 (first on cpu 0) cpus=[0,3,6,3]
+  pdm_b: runs=12 moved=8 bad=0 (first on cpu 0) cpus=[0,6,5,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 146/200]  [PASS] test_preempt_flag_follows_migrated_task (131174 us)
+  pdm: moved=25 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,5,6,0]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,3,8,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 147/200]  [PASS] test_preempt_flag_follows_migrated_task (120740 us)
+  pdm: moved=18 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,9,2,0]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,8,3,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 148/200]  [PASS] test_preempt_flag_follows_migrated_task (120570 us)
+  pdm: moved=24 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,4,7,0]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,4,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 149/200]  [PASS] test_preempt_flag_follows_migrated_task (121025 us)
+  pdm: moved=13 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,3,8,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 150/200]  [PASS] test_preempt_flag_follows_migrated_task (120961 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 151/200]  [PASS] test_preempt_flag_follows_migrated_task (120624 us)
+  pdm: moved=13 runs=10/10/11 bad=0
+  pdm_a: runs=10 moved=1 bad=0 (first on cpu 0) cpus=[0,0,9,1]
+  pdm_b: runs=10 moved=1 bad=0 (first on cpu 0) cpus=[0,0,9,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 152/200]  [PASS] test_preempt_flag_follows_migrated_task (110926 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,0,6,7]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,0,6,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 153/200]  [PASS] test_preempt_flag_follows_migrated_task (80671 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,0,6,7]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,0,6,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 154/200]  [PASS] test_preempt_flag_follows_migrated_task (81091 us)
+  pdm: moved=34 runs=12/13/11 bad=0
+  pdm_a: runs=12 moved=10 bad=0 (first on cpu 0) cpus=[0,0,7,5]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,0,6,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 155/200]  [PASS] test_preempt_flag_follows_migrated_task (80458 us)
+  pdm: moved=35 runs=14/13/11 bad=0
+  pdm_a: runs=14 moved=13 bad=0 (first on cpu 0) cpus=[0,1,7,6]
+  pdm_b: runs=13 moved=11 bad=0 (first on cpu 0) cpus=[0,1,7,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 156/200]  [PASS] test_preempt_flag_follows_migrated_task (90030 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,5,6,2]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,5,6,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 157/200]  [PASS] test_preempt_flag_follows_migrated_task (80332 us)
+  pdm: moved=38 runs=14/13/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,4,7,3]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 158/200]  [PASS] test_preempt_flag_follows_migrated_task (79739 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,6,3]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 159/200]  [PASS] test_preempt_flag_follows_migrated_task (80496 us)
+  pdm: moved=38 runs=14/13/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,4,7,3]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,6,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 160/200]  [PASS] test_preempt_flag_follows_migrated_task (80574 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,6,3]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 161/200]  [PASS] test_preempt_flag_follows_migrated_task (81225 us)
+  pdm: moved=38 runs=13/14/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,5,7,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 162/200]  [PASS] test_preempt_flag_follows_migrated_task (77967 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,6,1]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 163/200]  [PASS] test_preempt_flag_follows_migrated_task (80886 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,6,6,1]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 164/200]  [PASS] test_preempt_flag_follows_migrated_task (80914 us)
+  pdm: moved=38 runs=13/14/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,4,7,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 165/200]  [PASS] test_preempt_flag_follows_migrated_task (81183 us)
+  pdm: moved=38 runs=14/13/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,1,7,6]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,1,7,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 166/200]  [PASS] test_preempt_flag_follows_migrated_task (72173 us)
+  pdm: moved=38 runs=13/14/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,0,6,7]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,0,7,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 167/200]  [PASS] test_preempt_flag_follows_migrated_task (81234 us)
+  pdm: moved=38 runs=14/13/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,0,7,7]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,0,6,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 168/200]  [PASS] test_preempt_flag_follows_migrated_task (79945 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,2,6,5]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,6,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 169/200]  [PASS] test_preempt_flag_follows_migrated_task (81086 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 170/200]  [PASS] test_preempt_flag_follows_migrated_task (80196 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 171/200]  [PASS] test_preempt_flag_follows_migrated_task (80805 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,5,6,2]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,5,6,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 172/200]  [PASS] test_preempt_flag_follows_migrated_task (80635 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,6,3]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 173/200]  [PASS] test_preempt_flag_follows_migrated_task (80726 us)
+  pdm: moved=38 runs=13/14/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,6,3]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,5,7,2]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 174/200]  [PASS] test_preempt_flag_follows_migrated_task (80895 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,2,6,5]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 175/200]  [PASS] test_preempt_flag_follows_migrated_task (80329 us)
+  pdm: moved=37 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,0,6,7]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,3,6,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 176/200]  [PASS] test_preempt_flag_follows_migrated_task (80469 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,6,7,1]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 177/200]  [PASS] test_preempt_flag_follows_migrated_task (80361 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 178/200]  [PASS] test_preempt_flag_follows_migrated_task (80358 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 179/200]  [PASS] test_preempt_flag_follows_migrated_task (79567 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 180/200]  [PASS] test_preempt_flag_follows_migrated_task (77968 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,7,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 181/200]  [PASS] test_preempt_flag_follows_migrated_task (79921 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,3,7,4]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,3,7,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 182/200]  [PASS] test_preempt_flag_follows_migrated_task (79920 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,0,7,7]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,0,7,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 183/200]  [PASS] test_preempt_flag_follows_migrated_task (80340 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,0,7,7]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,0,7,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 184/200]  [PASS] test_preempt_flag_follows_migrated_task (80680 us)
+  pdm: moved=38 runs=14/13/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,3,4,7]
+  pdm_b: runs=13 moved=13 bad=0 (first on cpu 0) cpus=[0,4,3,6]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 185/200]  [PASS] test_preempt_flag_follows_migrated_task (80896 us)
+  pdm: moved=24 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,7,4,0]
+  pdm_b: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,4,7,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 186/200]  [PASS] test_preempt_flag_follows_migrated_task (110982 us)
+  pdm: moved=19 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,8,3,0]
+  pdm_b: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,10,1,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 187/200]  [PASS] test_preempt_flag_follows_migrated_task (121527 us)
+  pdm: moved=24 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,6,5,0]
+  pdm_b: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,5,6,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 188/200]  [PASS] test_preempt_flag_follows_migrated_task (120722 us)
+  pdm: moved=21 runs=10/10/11 bad=0
+  pdm_a: runs=10 moved=5 bad=0 (first on cpu 0) cpus=[0,3,6,1]
+  pdm_b: runs=10 moved=5 bad=0 (first on cpu 0) cpus=[0,3,4,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 189/200]  [PASS] test_preempt_flag_follows_migrated_task (121732 us)
+  pdm: moved=12 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_b: runs=11 moved=1 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 190/200]  [PASS] test_preempt_flag_follows_migrated_task (120139 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,11,0,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 191/200]  [PASS] test_preempt_flag_follows_migrated_task (121305 us)
+  pdm: moved=17 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=2 bad=0 (first on cpu 0) cpus=[0,10,0,1]
+  pdm_b: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,7,0,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,3,4,4]
+  [ITER 192/200]  [PASS] test_preempt_flag_follows_migrated_task (120611 us)
+  pdm: moved=20 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,3,5,3]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,2,5,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 193/200]  [PASS] test_preempt_flag_follows_migrated_task (120824 us)
+  pdm: moved=31 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=9 bad=0 (first on cpu 0) cpus=[0,3,6,2]
+  pdm_b: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 194/200]  [PASS] test_preempt_flag_follows_migrated_task (118881 us)
+  pdm: moved=22 runs=10/11/11 bad=0
+  pdm_a: runs=10 moved=4 bad=0 (first on cpu 0) cpus=[0,0,8,2]
+  pdm_b: runs=11 moved=7 bad=0 (first on cpu 0) cpus=[0,2,5,4]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 195/200]  [PASS] test_preempt_flag_follows_migrated_task (121390 us)
+  pdm: moved=18 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=4 bad=0 (first on cpu 0) cpus=[0,1,6,4]
+  pdm_b: runs=11 moved=3 bad=0 (first on cpu 0) cpus=[0,2,6,3]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 196/200]  [PASS] test_preempt_flag_follows_migrated_task (120664 us)
+  pdm: moved=22 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=6 bad=0 (first on cpu 0) cpus=[0,2,8,1]
+  pdm_b: runs=11 moved=5 bad=0 (first on cpu 0) cpus=[0,2,8,1]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 197/200]  [PASS] test_preempt_flag_follows_migrated_task (121055 us)
+  pdm: moved=11 runs=11/11/11 bad=0
+  pdm_a: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_b: runs=11 moved=0 bad=0 (first on cpu 0) cpus=[0,0,11,0]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 198/200]  [PASS] test_preempt_flag_follows_migrated_task (121215 us)
+  pdm: moved=29 runs=13/13/11 bad=0
+  pdm_a: runs=13 moved=9 bad=0 (first on cpu 0) cpus=[0,0,8,5]
+  pdm_b: runs=13 moved=9 bad=0 (first on cpu 0) cpus=[0,0,8,5]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,3,4]
+  [ITER 199/200]  [PASS] test_preempt_flag_follows_migrated_task (99760 us)
+  pdm: moved=39 runs=14/14/11 bad=0
+  pdm_a: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,0,7,7]
+  pdm_b: runs=14 moved=14 bad=0 (first on cpu 0) cpus=[0,0,7,7]
+  pdm_c: runs=11 moved=11 bad=0 (first on cpu 0) cpus=[0,4,4,3]
+  [ITER 200/200]  [PASS] test_preempt_flag_follows_migrated_task (80344 us)
+
+[FILTER] Summary
+[FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=72173 avg=107813 max=141380
+
+========================================
+Test Suite Summary
+========================================
+[PASS] All test suites passed!
+[INFO] Exiting via semihosting...

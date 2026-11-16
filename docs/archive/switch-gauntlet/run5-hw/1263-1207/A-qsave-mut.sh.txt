@@ -1,0 +1,19 @@
+#!/bin/bash
+# qsave-mut.sh <make stdout file> <dest> <title...> : save a QEMU run of the mutation worktree
+# (.wt/a-mut), with the source difference against .wt/a.
+S=$(dirname "$0")
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt
+src=$1; dst=$2; shift 2
+{
+  echo "# $*"
+  echo "# saved $(date -u +%FT%TZ)"
+  echo "# ---- source difference, .wt/a (left) against .wt/a-mut (right), kernel/sched/sched.c ----"
+  /usr/bin/diff $W/a/kernel/sched/sched.c $W/a-mut/kernel/sched/sched.c
+  echo "# ---- other differing files under kernel/ (none expected) ----"
+  /usr/bin/diff -rq $W/a/kernel $W/a-mut/kernel | grep -v sched/sched.c
+  echo "# ---- make output (last 8 lines) ----"
+  tail -8 "$src"
+  echo "# ---- QEMU serial (build/test-output.log) ----"
+  cat $W/a-mut/build/test-output.log
+} > "$dst"
+echo "$(basename $dst) | $(grep -a -m1 -oE 'build [0-9]{14} \([0-9a-f-]+(dirty)?\)' $dst) | $(grep -a -E '\[FILTER\] \[' $dst | tail -1 | cut -c1-160) | pdm lines with bad=0: $(grep -a 'pdm: ' $dst | grep -c 'bad=0$')"

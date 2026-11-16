@@ -174,3 +174,35 @@
    bin: sha256=503b12695a1c32c003c82b3f3b4d6936c5200fc913364f7fe1c479fcd5034a19 bytes=8958616
    sections: .text=2301880 .rodata=6500586 .data=148048 .bss=36235184 
    built: 2026-11-15T14:19:37Z
+== jet-pdm3-c3ce3885
+   worktree=a head=c3ce3885 tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261116013523 (c3ce3885)
+   elf: sha256=f4358a18e12450b64ce6e7b72f5fc628deb2c58179cb5bbe1cae8123d3e011e3 bytes=12195712
+   bin: sha256=9b0adf2203f0855c6d3a95993535b37ee806c14264d4388f053cd7b6e7b76b01 bytes=10109952
+   sections: .text=2544440 .rodata=7367074 .data=148480 .bss=37451504 
+   built: 2026-11-16T01:36:42Z
+== pi5-pdm3-c3ce3885
+   worktree=a head=c3ce3885 tracked-modified-files=0
+   make kernel-test PLATFORM=RASPI5 TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+   banner:   SLM-OS v0.4.0 build 20261116013644 (c3ce3885)
+   elf: sha256=67bf4af424222bf5583da243fe3a98baa14fa906e35ed0f6ab7cd7d3c5d77be1 bytes=11011952
+   bin: sha256=f671d402c9a7b35a0bdd04410358ee356a8132fa472c9d563d74865d8fbec8f6 bytes=8958616
+   sections: .text=2302328 .rodata=6500698 .data=148048 .bss=36239280 
+   built: 2026-11-16T01:37:54Z
+== jet-suite-c3ce3885
+   worktree=a head=c3ce3885 tracked-modified-files=0
+   make kernel-test PLATFORM=JETSON_ORIN_NANO
+   banner:   SLM-OS v0.4.0 build 20261116013805 (c3ce3885)
+   elf: sha256=da35f9d823591b70e487e0be4ccfa55be2aaa5d924c420e3c94d0dce29d22bc9 bytes=12195576
+   bin: sha256=28bd16742c959a14378d94a72e0ac8a277076b35bb2b748afe4de1b48cc184e9 bytes=10109952
+   sections: .text=2544184 .rodata=7367074 .data=148480 .bss=37451504 
+   built: 2026-11-16T01:39:19Z
+== jet-prod-c3ce3885
+   worktree=a head=c3ce3885 tracked-modified-files=0
+   make kernel PLATFORM=JETSON_ORIN_NANO
+   banner:   SLM-OS v0.4.0 build 20261116013922 (c3ce3885)
+   elf: sha256=fa4abdcf3475b2619b8fb69da9dca9868a3a360315c0611e2366ccfee8a60f01 bytes=10874480
+   bin: sha256=1bf28c4c21654f30be95580f7f1a0d7116510bb46c08359155e91e6672ecc6b4 bytes=8799232
+   sections: .text=2481432 .rodata=6160802 .data=148480 .bss=37433712 
+   built: 2026-11-16T01:40:35Z

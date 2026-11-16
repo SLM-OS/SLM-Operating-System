@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""as-compare.py <A-assert-shares-*.txt>... : per file, from the 'ASSERT-SHARES:' lines of the
+serial section (lines not starting with '#'): verdict counts, and min / median / max over the
+runs of the lowest thief's share and task count and of the best thief's share and task count."""
+import re, sys, os, statistics as st
+for f in sys.argv[1:]:
+    lo_s, lo_t, hi_s, hi_t = [], [], [], []
+    npass = nfail = 0
+    for line in open(f, errors='replace'):
+        if line.startswith('#') or 'ASSERT-SHARES:' not in line:
+            continue
+        npass += 'ASSERT-SHARES: PASS' in line
+        nfail += 'ASSERT-SHARES: FAIL' in line
+        m = re.search(r'lowest thief cpu=\d+ share=([\d.]+)% \((\d+) tasks\), best thief cpu=\d+ share=([\d.]+)% \((\d+) tasks\)', line)
+        if m:
+            lo_s.append(float(m.group(1))); lo_t.append(int(m.group(2)))
+            hi_s.append(float(m.group(3))); hi_t.append(int(m.group(4)))
+    def r(v, fmt):
+        return (fmt + ' / ' + fmt + ' / ' + fmt) % (min(v), st.median(v), max(v)) if v else 'n/a'
+    print('%s | PASS %d FAIL %d | lowest thief share %% min/median/max %s | lowest thief tasks %s | best thief share %% %s | best thief tasks %s'
+          % (os.path.basename(f), npass, nfail, r(lo_s, '%.1f'), r(lo_t, '%g'), r(hi_s, '%.1f'), r(hi_t, '%g')))

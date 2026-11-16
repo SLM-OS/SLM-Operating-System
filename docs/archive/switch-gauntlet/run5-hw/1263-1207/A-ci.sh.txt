@@ -13,6 +13,7 @@ step() { # step <n> <name> <lock|nolock> <command...>
   echo "# /ci step $n ($name) at $L in $B; $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg)" > $out
   echo "# command: $*   ($lk)" >> $out
   rc=1
+  rm -f build/test-output.log   # only this step's own QEMU log is appended below (critic round 2, finding 7)
   for try in 1 2 3 4 5 6; do
     if [ $lk = lock ]; then $LOCK bash -c "echo LOCKED; $*" > $out.body 2>&1; rc=$?; grep -q '^LOCKED' $out.body && break; sleep 30
     else bash -c "$*" > $out.body 2>&1; rc=$?; break; fi

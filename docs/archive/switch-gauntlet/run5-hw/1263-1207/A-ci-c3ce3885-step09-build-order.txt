@@ -1,0 +1,20 @@
+# /ci step 9 (build-order) at c3ce3885 in /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a; 2026-11-16T02:00:22Z; load 6.70 4.31 3.45
+# command: make test-build-order   (lock)
+# exit code: 0
+# ---- output (last 400 lines) ----
+LOCKED
+PASS: QEMU_VIRT kernel: configures after the Rust build
+PASS: QEMU_VIRT kernel: an unchanged rebuild stays configured and quiet
+PASS: QEMU_VIRT kernel: reconfigures after a flag change
+PASS: QEMU_VIRT kernel-test: configures after the Rust build
+PASS: QEMU_VIRT kernel-test: an unchanged rebuild stays configured and quiet
+PASS: QEMU_VIRT kernel-test: reconfigures after a flag change
+PASS: X86_64 kernel-kexec: configures after the Rust build
+PASS: X86_64 kernel-kexec: an unchanged rebuild stays configured and quiet
+PASS: X86_64 kernel-kexec: reconfigures after a flag change
+PASS: X86_64 kernel-bzimage: configures after the Rust build
+PASS: X86_64 kernel-bzimage: an unchanged rebuild stays configured and quiet
+PASS: X86_64 kernel-bzimage: reconfigures after a flag change
+PASS: SD test image: waits for the kernel
+PASS: GRUB ISO: waits for the kernel
+All build-order tests passed

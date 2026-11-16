@@ -1,0 +1,15 @@
+#!/bin/bash
+# qsave.sh <make stdout file> <dest file> <title...> : save a QEMU make-test run as evidence:
+# title, last 8 lines of make's output, then the QEMU serial log of .wt/a.
+S=$(dirname "$0")
+A=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a
+src=$1; dst=$2; shift 2
+{
+  echo "# $*"
+  echo "# saved $(date -u +%FT%TZ)"
+  echo "# ---- make output (last 8 lines) ----"
+  tail -8 "$src"
+  echo "# ---- QEMU serial (build/test-output.log) ----"
+  cat $A/build/test-output.log
+} > "$dst"
+echo "$(basename $dst) | $(grep -a -m1 -oE 'build [0-9]{14} \([0-9a-f-]+(dirty)?\)' $dst) | $(grep -a -E 'PASSED - |FAILED - |TIMEOUT - ' $dst | head -1) | $(grep -a -E 'Tests |\[FILTER\] \[' $dst | tail -1 | cut -c1-160)"

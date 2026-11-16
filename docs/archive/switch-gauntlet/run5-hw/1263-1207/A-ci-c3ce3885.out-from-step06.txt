@@ -1,0 +1,8 @@
+step 6 test-ai-sched rc=0 PASSED - All tests passed (exit code 0) 3 warning lines
+step 7 runtime-test rc=0  0 warning lines
+step 8 braces rc=0  0 warning lines
+step 9 build-order rc=0  0 warning lines
+step 10 jetson-layout rc=0  0 warning lines
+step 11 diff rc=0  0 warning lines
+step 12 test-ws-swodiag rc=0 PASSED - All tests passed (exit code 0) 7 warning lines
+ci done

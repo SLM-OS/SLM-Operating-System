@@ -1,0 +1,4 @@
+A-assert-shares-kexec-ae1399ba-x20.txt | PASS 20 FAIL 0 | lowest thief share % min/median/max 15.7 / 16.3 / 16.5 | lowest thief tasks 156 / 165 / 170 | best thief share % 16.7 / 17.2 / 17.7 | best thief tasks 171 / 174 / 180
+A-assert-shares-kexec-c0612fa7-x20.txt | PASS 20 FAIL 0 | lowest thief share % min/median/max 14.8 / 16.1 / 16.6 | lowest thief tasks 141 / 160.5 / 171 | best thief share % 16.8 / 17.1 / 18.2 | best thief tasks 171 / 172.5 / 175
+A-assert-shares-uefi-ae1399ba-x20-boot01.txt | PASS 20 FAIL 0 | lowest thief share % min/median/max 14.1 / 15.0 / 15.9 | lowest thief tasks 171 / 187 / 203 | best thief share % 17.0 / 17.6 / 18.0 | best thief tasks 215 / 217 / 220
+A-assert-shares-uefi-c3ce3885-x20-boot01.txt | PASS 20 FAIL 0 | lowest thief share % min/median/max 15.3 / 15.9 / 16.4 | lowest thief tasks 188 / 200.5 / 210 | best thief share % 16.9 / 17.3 / 17.9 | best thief tasks 215 / 217 / 220

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""pdm3sum.py <capture>... : summary of the three-worker
+test_preempt_flag_follows_migrated_task (c3ce3885 and later) from its
+'pdm:' and 'pdm_a/b/c:' lines. Comment lines (leading '#') are skipped."""
+import re, sys, os
+for f in sys.argv[1:]:
+    it = 0; npass = nfail = 0; banner = '?'; src = '?'; filt = ''
+    W = {n: {'runs': 0, 'moved': 0, 'bad': 0, 'cpus': [0] * 8, 'it_moved': 0, 'runs_min': None, 'runs_max': 0} for n in 'abc'}
+    badtot = 0; halts = 0; bad_iters = 0
+    for line in open(f, errors='replace'):
+        if line.startswith('#'):
+            continue
+        line = line.rstrip('\r\n')
+        m = re.search(r'build \d{14} \([0-9a-f-]+\)', line)
+        if m and banner == '?':
+            banner = m.group(0)
+        if 'Boot source:' in line and src == '?':
+            src = line.split('Boot source:')[1].strip()
+        if re.search(r'System halted|PAGE FAULT|KERNEL PANIC', line):
+            halts += 1
+        m = re.match(r'\s*pdm: moved=(\d+) runs=(\d+)/(\d+)/(\d+) bad=(\d+)', line)
+        if m:
+            it += 1
+            badtot += int(m.group(5))
+            bad_iters += int(m.group(5)) != 0
+            continue
+        m = re.match(r'\s*pdm_([abc]): runs=(\d+) moved=(\d+) bad=(\d+).*cpus=\[([0-9,]*)\]', line)
+        if m:
+            w = W[m.group(1)]; r = int(m.group(2)); mv = int(m.group(3))
+            w['runs'] += r; w['moved'] += mv; w['bad'] += int(m.group(4))
+            w['it_moved'] += mv > 0
+            w['runs_min'] = r if w['runs_min'] is None else min(w['runs_min'], r)
+            w['runs_max'] = max(w['runs_max'], r)
+            for i, v in enumerate(m.group(5).split(',')):
+                w['cpus'][i] += int(v)
+            continue
+        if re.search(r'\[ITER \d+/\d+\]\s+\[PASS\]', line): npass += 1
+        if re.search(r'\[ITER \d+/\d+\]\s+\[FAIL\]', line): nfail += 1
+        if line.startswith('[FILTER] ['): filt = line
+    print('%s | %s | Boot source: %s' % (os.path.basename(f), banner, src))
+    print('   pdm lines %d | [ITER] PASS %d | [ITER] FAIL %d | %s' % (it, npass, nfail, filt))
+    print('   bad reads, all workers: %d (iterations with bad != 0: %d) | halts: %d' % (badtot, bad_iters, halts))
+    for n in 'abc':
+        w = W[n]
+        kind = 'pinned, rotating CPUs 1-3' if n == 'c' else 'unpinned'
+        print('   pdm_%s (%s): wake-ups %d (per iteration %s to %d) | moves %d | iterations with a move %d of %d | bad %d | wake-ups per CPU %s | on CPUs 4-5: %d'
+              % (n, kind, w['runs'], w['runs_min'], w['runs_max'], w['moved'], w['it_moved'], it, w['bad'],
+                 w['cpus'][:6], w['cpus'][4] + w['cpus'][5]))
+    ab = [W['a']['cpus'][i] + W['b']['cpus'][i] for i in range(8)]
+    tot = sum(ab)
+    if tot:
+        top = max(range(8), key=lambda i: ab[i])
+        print('   unpinned workers together: wake-ups %d, moves %d (%.1f%% of wake-ups), largest share on one CPU: cpu%d %.1f%%'
+              % (tot, W['a']['moved'] + W['b']['moved'], 100.0 * (W['a']['moved'] + W['b']['moved']) / tot, top, 100.0 * ab[top] / tot))

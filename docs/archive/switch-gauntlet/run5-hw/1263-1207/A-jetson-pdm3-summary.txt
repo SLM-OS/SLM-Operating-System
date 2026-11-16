@@ -1,0 +1,14 @@
+A-uefi-pdm3-c3ce3885-x200-boot01.txt | build 20261116013523 (c3ce3885) | Boot source: UEFI-direct (EFI stub)
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=128615 avg=131265 max=131492
+   bad reads, all workers: 0 (iterations with bad != 0: 0) | halts: 0
+   pdm_a (unpinned): wake-ups 2237 (per iteration 11 to 21) | moves 78 | iterations with a move 4 of 200 | bad 0 | wake-ups per CPU [0, 0, 0, 2196, 0, 41] | on CPUs 4-5: 41
+   pdm_b (unpinned): wake-ups 2234 (per iteration 11 to 21) | moves 72 | iterations with a move 4 of 200 | bad 0 | wake-ups per CPU [0, 0, 0, 2196, 0, 38] | on CPUs 4-5: 38
+   pdm_c (pinned, rotating CPUs 1-3): wake-ups 2200 (per iteration 11 to 11) | moves 2200 | iterations with a move 200 of 200 | bad 0 | wake-ups per CPU [0, 800, 800, 600, 0, 0] | on CPUs 4-5: 0
+   unpinned workers together: wake-ups 4471, moves 150 (3.4% of wake-ups), largest share on one CPU: cpu3 98.2%
+A-kexec-pdm3-c3ce3885-x200-boot01.txt | build 20261116013523 (c3ce3885) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=128046 avg=130705 max=130863
+   bad reads, all workers: 0 (iterations with bad != 0: 0) | halts: 0
+   pdm_a (unpinned): wake-ups 2800 (per iteration 11 to 21) | moves 1261 | iterations with a move 61 of 200 | bad 0 | wake-ups per CPU [0, 2139, 0, 0, 240, 421] | on CPUs 4-5: 661
+   pdm_b (unpinned): wake-ups 2802 (per iteration 11 to 21) | moves 1265 | iterations with a move 61 of 200 | bad 0 | wake-ups per CPU [0, 2139, 0, 0, 235, 428] | on CPUs 4-5: 663
+   pdm_c (pinned, rotating CPUs 1-3): wake-ups 2200 (per iteration 11 to 11) | moves 2200 | iterations with a move 200 of 200 | bad 0 | wake-ups per CPU [0, 600, 800, 800, 0, 0] | on CPUs 4-5: 0
+   unpinned workers together: wake-ups 5602, moves 2526 (45.1% of wake-ups), largest share on one CPU: cpu1 76.4%
