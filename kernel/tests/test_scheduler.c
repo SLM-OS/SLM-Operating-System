@@ -2265,124 +2265,195 @@ static void test_task_slot_reuse_under_switch(void)
 
 /* ============================================================================
  * Regression #1229: preempt_disabled follows a task that resumes on another
- * CPU. Two tasks sleep 1 ms in a loop (blocking inside schedule()). When a
+ * CPU. Three tasks sleep 1 ms in a loop (blocking inside schedule()). When a
  * task resumes from schedule() on a new CPU, schedule() must clear the NEW
  * CPU's preempt_disabled, not the CPU it blocked on. Each task checks its own
  * CPU's flag after every wake-up. Before the fix the flag of the CPU it moved
  * to read 1 after the first migration, and that CPU stopped taking preemption
  * ticks (#1219 deadlock under WORK_STEALING).
  *
- * The first task (pdm_a) makes every one of its wake-ups a cross-CPU resume:
- * before each sleep it sets its own cpu_affinity to the next of CPUs 1-3, and
- * scheduler_add_task() places a woken task on its affinity CPU ahead of the
- * policy (a pinned task is not published to a steal deque either). The
- * second task (pdm_b) stays unpinned, so the policy's placement and work
- * stealing still move it when they happen to.
+ * Workers:
+ *   pdm_a, pdm_b  unpinned. The policy's placement and work stealing decide
+ *                 where each wake-up lands, on any CPU. They are the only
+ *                 workers that can resume after a steal. Whether they change
+ *                 CPU at all depends on timing: in some boots every wake-up
+ *                 of both lands on one CPU (#1263), so they do not carry the
+ *                 coverage condition.
+ *   pdm_c         makes every one of its wake-ups a cross-CPU resume: before
+ *                 each sleep it sets its own affinity to the next of CPUs
+ *                 1-3 with sched_set_task_affinity() (for a running task
+ *                 that stores the field only), and scheduler_add_task()
+ *                 places a woken task on its affinity CPU ahead of the
+ *                 policy. A pinned task is never published to a steal deque,
+ *                 so pdm_c covers wake-up placement only, on CPUs 1-3 only.
  *
- * History (#1263): the test used to rely on the wake-up placement landing a
- * task on a different CPU by itself (the heuristic's round-robin cursor, or a
- * steal), and "migrated" the blocked task with sched_migrate_task(), which
- * for a BLOCKED task only rewrites assigned_cpu; the wake path does not read
- * it. With the per-CPU cache-line layout a woken task came back to its
- * previous CPU far more often (Pi 5: 2 to 4 moves in 100 wake-ups; one
- * Jetson boot: 0 in 100, failing the coverage condition below with bad=0).
+ * The check: with IRQs masked, read cpu_id() and that CPU's flag. Masking
+ * keeps the task on one CPU between the two reads; without it a preemption
+ * and a steal in between would read another CPU's flag, which is 1 by
+ * design while that CPU is inside schedule(). What the check sees: the flag
+ * of the CPU the task is on, some time after it resumed there. What it
+ * cannot see: a flag wrongly cleared on the CPU the task left (the other
+ * half of #1229), and a wrong flag that another pass through schedule() on
+ * the same CPU has already corrected before the task reads it.
+ *
+ * The run ends after PDM_C_WAKEUPS wake-ups of pdm_c (or 1 s), so the
+ * unpinned workers get about that many resumes each per run. The coverage
+ * condition is that pdm_c changed CPU; the printed per-worker lines show
+ * whether the unpinned workers did, and on which CPUs they woke.
+ *
+ * History (#1263): the test used to have two unpinned workers only, relied
+ * on the wake-up placement landing a task on a different CPU by itself, and
+ * "migrated" the blocked task with sched_migrate_task(), which for a
+ * BLOCKED task only rewrites assigned_cpu; the wake path does not read it.
+ * With the per-CPU cache-line layout a woken task came back to its previous
+ * CPU far more often (in 4 of 7 hardware boots nearly every wake-up of both
+ * workers was on one CPU), failing the old coverage condition with bad=0.
  * The migration loop is gone because it never steered a wake-up.
  * ============================================================================ */
 
+#define PDM_WORKERS     3
+#define PDM_PINNED      2       /* index of pdm_c */
+#define PDM_C_WAKEUPS   10
+
+/* One line per worker: only that worker writes its row while the test runs. */
+struct pdm_worker {
+    volatile uint32_t runs;             /* wake-ups */
+    volatile uint32_t moved;            /* wake-ups on a CPU other than the last */
+    volatile uint32_t bad;              /* wake-ups that read the flag nonzero */
+    volatile uint32_t bad_cpu;          /* CPU of the first such read */
+    volatile uint32_t cpus[MAX_CPUS];   /* wake-ups per CPU */
+} __attribute__((aligned(64)));
+
+static struct pdm_worker pdm_w[PDM_WORKERS];
 static volatile uint32_t pdm_stop;
-static volatile uint32_t pdm_bad;
-static volatile uint32_t pdm_moved;
-static volatile uint32_t pdm_runs[2];
-static volatile uint32_t pdm_bad_cpu;
 
 static void pdm_task(void *arg)
 {
     uint32_t idx = (uint32_t)(uintptr_t)arg;
+    struct pdm_worker *w = &pdm_w[idx];
     uint32_t last = cpu_id();
     struct task *self = task_current();
     while (!__atomic_load_n(&pdm_stop, __ATOMIC_ACQUIRE)) {
-        if (idx == 0 && self) {
-            /* Steer the next wake-up to another CPU: 1 -> 2 -> 3 -> 1.
-             * Only the field: task_set_affinity() also rewrites
-             * assigned_cpu, which for this running task would then
-             * disagree with the CPU it is on. The wake path sets
-             * assigned_cpu under the target's rq lock when it queues
-             * the task. */
-            self->cpu_affinity = (last % 3) + 1;
+        if (idx == PDM_PINNED && self) {
+            /* Steer the next wake-up to another CPU: 1 -> 2 -> 3 -> 1. */
+            sched_set_task_affinity(self, (last % 3) + 1);
         }
-        /* Block inside schedule(); the wake-up puts pdm_a on the CPU
-         * chosen above and may put pdm_b on another CPU, so schedule()
-         * returns there. */
+        /* Block inside schedule(); the wake-up may put the task on another
+         * CPU (always, for pdm_c), so schedule() returns there. */
         task_sleep_ms(1);
+
+        /* Own CPU and its flag, read as a pair (see the comment above). */
+        irq_flags_t fl = irq_save();
         uint32_t c = cpu_id();
+        int pd = preempt_disabled[c].v;
+        irq_restore(fl);
+
         if (c != last) {
-            __atomic_fetch_add(&pdm_moved, 1, __ATOMIC_RELAXED);
+            w->moved++;
             last = c;
         }
-        if (preempt_disabled[c].v != 0) {
-            if (__atomic_fetch_add(&pdm_bad, 1, __ATOMIC_RELAXED) == 0) {
-                pdm_bad_cpu = c;
+        if (pd != 0) {
+            if (w->bad++ == 0) {
+                w->bad_cpu = c;
             }
         }
-        __atomic_fetch_add(&pdm_runs[idx], 1, __ATOMIC_RELAXED);
+        if (c < MAX_CPUS) {
+            w->cpus[c]++;
+        }
+        w->runs++;
     }
 }
 
-static bool pdm_both_terminated(void *ctx)
+static bool pdm_all_terminated(void *ctx)
 {
     struct task **t = ctx;
-    return __atomic_load_n(&t[0]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED &&
-           __atomic_load_n(&t[1]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED;
+    for (int i = 0; i < PDM_WORKERS; i++) {
+        if (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != TASK_TERMINATED) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void test_preempt_flag_follows_migrated_task(void)
 {
+    static const char *const names[PDM_WORKERS] = { "pdm_a", "pdm_b", "pdm_c" };
+
     if (cpu_count < 4) {
         TEST_ASSERT(1);
         return;
     }
     pdm_stop = 0;
-    pdm_bad = 0;
-    pdm_moved = 0;
-    pdm_runs[0] = pdm_runs[1] = 0;
-    pdm_bad_cpu = 0;
+    for (int i = 0; i < PDM_WORKERS; i++) {
+        pdm_w[i].runs = 0;
+        pdm_w[i].moved = 0;
+        pdm_w[i].bad = 0;
+        pdm_w[i].bad_cpu = 0;
+        for (uint32_t c = 0; c < MAX_CPUS; c++) {
+            pdm_w[i].cpus[c] = 0;
+        }
+    }
 
-    struct task *t[2];
-    t[0] = task_create("pdm_a", pdm_task, (void *)(uintptr_t)0);
-    t[1] = task_create("pdm_b", pdm_task, (void *)(uintptr_t)1);
-    TEST_ASSERT_NOT_NULL(t[0]);
-    TEST_ASSERT_NOT_NULL(t[1]);
-    scheduler_add_task_to_cpu(t[0], 2);
-    scheduler_add_task_to_cpu(t[1], 2);
+    struct task *t[PDM_WORKERS];
+    for (int i = 0; i < PDM_WORKERS; i++) {
+        t[i] = task_create(names[i], pdm_task, (void *)(uintptr_t)i);
+        TEST_ASSERT_NOT_NULL(t[i]);
+    }
+    for (int i = 0; i < PDM_WORKERS; i++) {
+        scheduler_add_task_to_cpu(t[i], 2);
+    }
 
-    /* For up to 1 s let the tasks sleep and resume; pdm_a changes CPU at
-     * every wake-up, and placement or a steal may move pdm_b. Any CPU
-     * change counts. Stop after 5 observed moves. */
+    /* For up to 1 s let the tasks sleep and resume; stop after
+     * PDM_C_WAKEUPS wake-ups of pdm_c. */
     uint64_t f = timer_get_frequency();
     uint64_t t0 = timer_get_count();
-    while (timer_get_count() - t0 < f && pdm_moved < 5) {
+    while (timer_get_count() - t0 < f &&
+           pdm_w[PDM_PINNED].runs < PDM_C_WAKEUPS) {
         yield();
     }
 
     __atomic_store_n(&pdm_stop, 1, __ATOMIC_RELEASE);
-    long long w = test_wait_until("pdm_done", pdm_both_terminated, t,
+    long long w = test_wait_until("pdm_done", pdm_all_terminated, t,
                                   TEST_WAIT_S(1));
-    uart_printf("  pdm: moved=%u runs=%u/%u bad=%u (first on cpu %u)\n",
-                pdm_moved, pdm_runs[0], pdm_runs[1], pdm_bad,
-                pdm_bad_cpu);
+
+    uint32_t moved = 0;
+    uint32_t bad = 0;
+    for (int i = 0; i < PDM_WORKERS; i++) {
+        moved += pdm_w[i].moved;
+        bad += pdm_w[i].bad;
+    }
+    uart_printf("  pdm: moved=%u runs=%u/%u/%u bad=%u\n", moved,
+                pdm_w[0].runs, pdm_w[1].runs, pdm_w[2].runs, bad);
+    for (int i = 0; i < PDM_WORKERS; i++) {
+        uart_printf("  %s: runs=%u moved=%u bad=%u", names[i],
+                    pdm_w[i].runs, pdm_w[i].moved, pdm_w[i].bad);
+        if (pdm_w[i].bad) {
+            uart_printf(" (first on cpu %u)", pdm_w[i].bad_cpu);
+        }
+        uart_printf(" cpus=[");
+        for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+            if (c) {
+                uart_printf(",");
+            }
+            uart_printf("%u", pdm_w[i].cpus[c]);
+        }
+        uart_printf("]\n");
+    }
     if (w < 0) {
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < PDM_WORKERS; i++) {
             if (t[i]->state != TASK_TERMINATED) {
                 scheduler_terminate_task(t[i]);
             }
         }
     }
-    task_destroy(t[0]);
-    task_destroy(t[1]);
+    for (int i = 0; i < PDM_WORKERS; i++) {
+        task_destroy(t[i]);
+    }
 
     TEST_ASSERT_TRUE(w >= 0);
-    TEST_ASSERT_TRUE(pdm_moved > 0);
-    TEST_ASSERT_EQUAL_UINT32(0, pdm_bad);
+    /* Coverage: pdm_c resumed on another CPU at least once. */
+    TEST_ASSERT_TRUE(pdm_w[PDM_PINNED].moved > 0);
+    TEST_ASSERT_EQUAL_UINT32(0, bad);
 }
 
 /* ============================================================================

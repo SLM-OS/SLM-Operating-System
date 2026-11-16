@@ -1266,8 +1266,10 @@ reports 64-byte lines at each data cache level (shell: `coherency regs`).
 
 **Regression test.** `kernel/tests/test_percpu_layout.c` (every platform)
 takes the addresses of elements 0 and 1 of each padded array in the
-running kernel and fails unless both are line-aligned and at least a line
-apart; static arrays reach it through `sched_percpu_layout()`,
+running kernel and fails unless both are line-aligned, the stride equals
+the element size, the element size is a whole number of lines and the
+array has `MAX_CPUS` elements (`layout_ok()`; a second test feeds the
+checker four bad layouts and requires it to reject each); static arrays reach it through `sched_percpu_layout()`,
 `pmu_percpu_layout()` and, in `SLOT_TRACE` builds,
 `slot_trace_percpu_layout()` (test kernels only). Static asserts sit next
 to each type. The test checks the arrays that are listed: a new per-CPU

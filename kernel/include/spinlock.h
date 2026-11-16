@@ -85,11 +85,11 @@ typedef struct {
  * Arrays of spinlocks: one cache line per lock (#1263).
  *
  * `spinlock_t` is a single uint32_t, so consecutive instances share a
- * cache line, which is also one exclusives reservation granule. A CPU
- * taking lock i then loses its LDAXR reservation every time another CPU
- * stores to lock j in the same line, and its STXR fails although lock i is
- * free. In an R3 wake test kernel on Jetson, CPUs 4 and 5 waited up to
- * 6.7 ms for their own free run-queue lock (#1263; docs/scheduler.md).
+ * cache line, which is also one exclusives reservation granule. Measured
+ * (#1263): in an R3 wake test kernel on Jetson CPUs 4 and 5 waited up to
+ * 6.7 ms for their own free run-queue lock; with a line per lock none did.
+ * Inferred, not measured: another CPU's store to lock j in the line clears
+ * the LDAXR reservation on lock i, so its STXR fails (docs/scheduler.md).
  * Aligning the array as a whole does not help: every element needs its
  * own line.
  *

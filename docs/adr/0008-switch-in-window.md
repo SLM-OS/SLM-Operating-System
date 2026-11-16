@@ -389,7 +389,7 @@ Bounds (item 3, item 4).
   `scheduler_add_task`, `scheduler_add_task_to_cpu`, `sched_set_task_affinity`,
   and the requeue itself); the wake path needs the running CPU recorded
   separately from `assigned_cpu` (which `sched_migrate_task` rewrites for a
-  BLOCKED task, as `test_preempt_flag_follows_migrated_task` does); a
+  BLOCKED task, as `test_preempt_flag_follows_migrated_task` did before #1263); a
   refused `sched_set_task_affinity` leaves a task off its affinity. Rejected:
   many sites, and one missed site reopens the window.
 - (b) The waiter spins with no run-queue lock held and re-validates. Fine for
