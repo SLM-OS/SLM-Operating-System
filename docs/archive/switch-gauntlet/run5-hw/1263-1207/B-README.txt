@@ -90,3 +90,8 @@ After the blind critic's round 1 (host only; the lab connection was down): head 
                                                  /ci at 02ebdad8: step 4 failed once on test_litmus_patterns_pass, rerun from step 4 passed
   B-ivac-callers.txt                             every DC IVAC call site that can run on Jetson, and what each can reach
   B-finding-boot04.txt                           corrected: what the boot 04 capture bounds and what it does not
+
+After the critic's round 2: head 122befe0 (comments and docs only)
+  B-text-testkernel-122befe0-vs-02ebdad8.txt     QEMU test-kernel .text identical to 02ebdad8
+  B-qemu-fix-122befe0-fullsuite-run1.txt, B-qemu-fix-122befe0-check-braces.txt   make test once, check-braces
+  B-ivac-callers.txt, B-finding-boot04.txt       second versions: the in-tree record on DC IVAC / DC ISW on these cores, two call sites added

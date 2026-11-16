@@ -38,9 +38,11 @@ happened during test_suite_gpu" and that this ruled out the xHCI hand-over windo
 What follows from the observations
  - The block's header read intact at the walk after test_suite_oplib_gpu_as and read zero at the walk after
    test_suite_gpu. That bounds when the CPU's view of those bytes changed. When the bytes changed in DRAM is not bounded
-   from below: a device that does not snoop the CPU caches can write DRAM under a line the CPU still holds, and a header
-   the PMM wrote can be lost from the cache without being written back (DC IVAC discards dirty lines); in both cases
-   the walks keep reading the cached copy until the line leaves the cache, and then read DRAM.
+   from below: a device that does not snoop the CPU caches can write DRAM under a line the CPU still holds; the walks
+   keep reading the cached copy until the line leaves the cache, and then read DRAM. (A header write lost from the cache
+   without write-back would look the same. It is architecturally possible, but the tree records that Cortex-A76 and
+   A78AE execute DC IVAC as DC CIVAC and DC ISW as a local clean and invalidate, kernel/arch/arm64/mmu.S:46-50,
+   smp_boot.S:205-213, kernel/sched/smp.c:684-688, which excludes it on these cores if that record holds.)
  - So the capture does not exclude a write before test_suite_gpu, including the window in which Linux's xHCI controller
    is still running. It excludes that window only for a write the CPU would have seen at once.
  - What reads zero: both links, and at least the last 64 bytes of the block before and the first 64 of this one. The
@@ -53,16 +55,19 @@ Candidates (none shown)
    hand-off reservation does not cover, or SLM-OS code on that path clearing a buffer.
  - A device left running by Linux across kexec (xHCI, GPU) that wrote the page earlier, seen when the cached line was
    dropped.
- - A lost header write: test_suite_gpu is also the suite that issues DC IVAC (kernel/gpu/cache.c:84-98) from three
-   tests; the call sites as written cover only the tests' own pages (B-ivac-callers.txt), so this is not shown either.
+ - A lost header write: excluded on these cores if the in-tree record above holds. test_suite_gpu does issue DC IVAC
+   (kernel/gpu/cache.c:84-98) from three tests, over the tests' own pages only (B-ivac-callers.txt); on these cores such
+   a call could at most expose an earlier device write by dropping a clean line, and those ranges do not reach a listed
+   block's first line.
  - Whether the once-a-second tick walk runs on this board was not checked separately; the finding came from the suite
    boundary walk.
  - The two earlier halts of this session (f55c5293 boot01 order 7, boot05 order 5) show a list ending after one or two
    pops and nothing more; they have no dump.
 
-Next checks (not run; B-ivac-callers.txt has two more, A and B, that separate a lost write from a write of zeros)
+Next checks (not run; B-ivac-callers.txt section 5 has two more, A and B: what was written, and when DRAM changed)
  - Print, in ga10b_handoff_reserve.c, every reserved range and every buffer address and length the hand-off page carries,
    and compare with the damaged address in a boot that shows a finding.
  - Run the suite with the three MNIST tests skipped on kexec (or the hand-off helper not started): if the finding rate
-   goes to zero over about 30 boots, the writer is confirmed.
+   goes to zero over about 30 boots, that suite's GPU activity is needed for the damage to appear (it would still not
+   say whether it writes the bytes or only makes an earlier write visible).
  - Walk the free lists right after each of those three tests instead of at the suite boundary.

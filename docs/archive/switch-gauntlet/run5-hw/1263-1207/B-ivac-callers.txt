@@ -1,59 +1,92 @@
-#1207: can a cache invalidate without write-back (DC IVAC) make a free-list header read as old DRAM content?
-Code reading at fix/pmm-coalesce 02ebdad8. Nothing here was run on hardware. QEMU TCG has no data cache to lose, so no
-QEMU test can show or exclude this.
+#1207: can a cache invalidate make a free-list header read as old DRAM content? And what else makes a listed block read zero?
+Code reading at fix/pmm-coalesce 122befe0. Nothing here was run on hardware. QEMU TCG has no data cache to lose, so no
+QEMU test can show or exclude any of this.
+Second version (after round 2 of the review): the first one said every DC IVAC call site had been read (two were missed)
+and treated a lost header write as possible on these boards without checking the tree's own record on it.
 
-The idea (from the review of this branch). A header the PMM wrote can stay dirty in the CPU cache for a long time; the
-blocks at and near the head of a list are the ones rewritten most recently (every free_list_add rewrites the old head's
-prev link). A DC IVAC that reaches such a line discards it, and the next read returns what DRAM held before: on a kexec
-boot, whatever Linux left in that page. That is a lost CPU write with no writer in the window, and it would look exactly
-like boot 04 (a listed block reading zero, block_state still "listed"). The same picture results if a device that does
-not snoop the CPU caches wrote DRAM earlier and the cached copy was dropped later. Either way the walk that first sees
-zeros bounds when the CPU's view changed, not when DRAM was written.
+1. What the tree records about these cores
 
-There are two functions with the same name:
-  kernel/gpu/cache.c:84-98      cache_invalidate_range = DC IVAC (discard). Declared in kernel/gpu/gpu.h:159. Bound by files
-                                that include gpu.h: kernel/src/slm_ffi.c, kernel/src/shell_sys.c, kernel/gpu/gpu_nvidia.c,
-                                kernel/gpu/gpu_stub.c, kernel/tests/test_gpu.c.
-  kernel/include/cache.h:64-74  cache_invalidate_range = DC CIVAC (write back, then drop) on Pi 5 and Jetson. Bound by files
-                                that include cache.h: kernel/arch/arm64/nvidia_gsp_platform.c (so gsp_platform->cache_invalidate,
-                                used by kernel/gpu/nvidia/ga10b_bringup.c:2755, 2767, 3409, 3428, 3594, 3684, 3756, 4062, cannot
-                                lose a write), kernel/gpu/nvidia/ga10b_cold.c, kernel/drivers/camera/imx219.c, kernel/drivers/macb.c.
-  kernel/include/cache.h:79-87  cache_discard_range = DC IVAC. Callers: kernel/ai_accel/hailo/hailo_vdma.c:338 (Pi 5 only).
-Both IVAC loops round the start down and the end up to a 64-byte line and go no further.
+ - kernel/arch/arm64/mmu.S:46-50: "On Cortex-A76 and A78AE DC IVAC is executed as DC CIVAC, so a dirty stale line would be
+   written back".
+ - kernel/sched/smp.c:684-688: "Cortex-A76 / A78AE execute DC IVAC as DC CIVAC, which writes back this CPU's dirty line;
+   architecturally an invalidate may discard it".
+ - kernel/arch/arm64/smp_boot.S:205-213: "On these cores DC ISW is a local clean+invalidate, so the loop is harmless but
+   not needed" (citing the A76 and A78AE TRMs and the #1193 audit).
+ If that record holds, no DC IVAC or DC ISW on Pi 5 or Jetson can discard a dirty line, and a header the PMM wrote
+ cannot be lost that way. I did not find the statement in docs/adr/0007-cross-cpu-coherency.md itself (no "IVAC", "ISW"
+ or "discard" in it); the comments above are the record. A lost header write is therefore: architecturally possible,
+ excluded on these cores if the in-tree record holds.
 
-True DC IVAC call sites that can run on Jetson, with the range each gives:
- 1. kernel/tests/test_gpu.c test_cache_invalidate_executes (cache_invalidate_range(buf.cpu_addr, buf.size), one 4096-byte
-    page from gpu_alloc), test_gpu_sync_for_cpu_executes and test_gpu_buffer_workflow (gpu_sync_for_cpu ->
-    nvidia_sync_for_cpu, kernel/gpu/gpu_nvidia.c:248-255, cache_invalidate_range(buf->cpu_addr, buf->size); 4096 and 8192
-    bytes). The range is exactly the pages the test holds: nvidia_alloc sets buf->size = pages * 4096 for the pages it
-    allocated (gpu_nvidia.c:203-210), and for GPU_MEM_ALIGN_2MB the 2 MB at the block start (:187-201). Page-aligned at
-    both ends, called while the buffer is allocated, before gpu_free. The header of the block that a split leaves free
-    next to it starts at the next page and is outside the range. These cannot reach a listed block's first line.
-    They do discard the test page's own lines, including the zeroed header free_list_pop left in it; the page is
-    allocated at that point and its header is rewritten when it is freed.
- 2. kernel/src/slm_ffi.c:753 chan_gate_locked: 4 bytes at g_prog_end_slot, one line, inside the channel's program slot.
-    Not traced: that every byte of that line belongs to the same reserved buffer.
- 3. kernel/src/slm_ffi.c:2102 (slm_runtime_oplib_scratch_read: base_phys + off[slot], bytes rounded up to 4096),
-    :2209, :2283, :2462, :2535 (out_phys, length rounded up to 4096) and :2384 (out_phys, 4096): operator-library
-    dispatch results. The length is rounded up to a page whatever the start's offset in its page, so if out_phys is not
-    page-aligned the range runs into the following page. Not traced: where out_phys and the scratch base come from on a
-    kexec boot (the capture says "no weights pool and no GPU program on this boot", so these paths may not run in the
-    suite at all), and whether the page after them can be a free block's first page.
- 4. kernel/src/shell_sys.c:6327, 6423, 6529, 6597, 6634, 9086 and :3118 (gpu_sync_for_cpu): shell commands, not run by the
-    suite's GPU tests as far as read; not traced.
- 5. kernel/arch/arm64/mmu.S:97, kernel/arch/arm64/smp_boot.S:162-175: boot-time, single lines at fixed symbols.
-None of these is shown to reach the first line of a listed free block. None of 2 to 4 is excluded.
+2. What survives
 
-What stays open regardless of the call sites: the first case above needs no IVAC call at all. Any way a dirty line leaves
-the cache without being written back, or a device writing DRAM under a line the CPU holds, gives the same capture.
+ A device that does not snoop the CPU caches writes DRAM under a line the CPU holds. If the CPU's copy is clean (the
+ header was written back at some point, by eviction or by one of the invalidates above, which clean first), the CPU keeps
+ reading its copy until the line leaves the cache and then reads what the device wrote. If the CPU's copy is dirty, the
+ write-back overwrites the device's data instead. So a walk that first sees zeros bounds when the CPU's view changed, not
+ when DRAM was written; and an invalidate that reaches the line (as clean + drop) is one of the ways the device's data
+ becomes visible. That is the only role the call sites below can have on these cores.
 
-Experiments that separate "lost write / stale DRAM" from "a write of zeros" (not run; the lab is down):
- A. Write every header through to DRAM: DC CVAC on the header's line after each link write in free_list_add,
-    free_list_remove and free_list_pop (diagnostic option). A later discard can then only restore the header itself.
-    If the halt rate stays at 1 to 2 in 10 over about 30 kexec suite boots, a write of zeros reaches the block; if it goes
-    to 0 in 30 (probability 0.008 at a true rate of 0.15), the class is lost writes or stale DRAM.
- B. In the same build, stamp bytes 16..63 of each listed block's first line with a pattern derived from its address and
-    clean it to DRAM. On a finding the dump then shows which it was: pattern intact with stale links (a lost write),
-    all zero (something wrote zeros), or other data (something wrote that data).
- C. Independently of A and B: print every reserved range and hand-off buffer address, and walk the lists after each
-    test of test_suite_gpu, to name the test.
+3. The two functions named cache_invalidate_range
+
+  kernel/gpu/cache.c:84-98      DC IVAC. Declared in kernel/gpu/gpu.h:159. Bound by files that include gpu.h:
+                                kernel/src/slm_ffi.c, kernel/src/shell_sys.c, kernel/gpu/gpu_nvidia.c, kernel/gpu/gpu_stub.c,
+                                kernel/tests/test_gpu.c.
+  kernel/include/cache.h:64-74  DC CIVAC on Pi 5 and Jetson. Bound by files that include cache.h:
+                                kernel/arch/arm64/nvidia_gsp_platform.c (so gsp_platform->cache_invalidate, used by
+                                kernel/gpu/nvidia/ga10b_bringup.c:2755, 2767, 3409, 3428, 3594, 3684, 3756, 4062),
+                                kernel/gpu/nvidia/ga10b_cold.c, kernel/drivers/camera/imx219.c, kernel/drivers/macb.c.
+  kernel/include/cache.h:79-87  cache_discard_range = DC IVAC. Caller: kernel/ai_accel/hailo/hailo_vdma.c:338 (Pi 5 only).
+ Both loops round the start down and the end up to a 64-byte line and go no further.
+
+4. The DC IVAC and DC ISW call sites found that can run on Jetson (a search for "dc ivac", "dc isw",
+   cache_invalidate_range, cache_discard_range, gpu_sync_for_cpu and slm_gpu_sync_for_cpu in kernel/ and runtime/; it is
+   the list of what the search found, not a proof that there are no others)
+
+ a. kernel/tests/test_gpu.c: test_cache_invalidate_executes (cache_invalidate_range(buf.cpu_addr, buf.size), one page),
+    test_gpu_sync_for_cpu_executes and test_gpu_buffer_workflow (gpu_sync_for_cpu -> nvidia_sync_for_cpu,
+    kernel/gpu/gpu_nvidia.c:248-255; 4096 and 8192 bytes). The range is exactly the pages the test holds (nvidia_alloc
+    sets buf->size to the pages it allocated, gpu_nvidia.c:203-210; for GPU_MEM_ALIGN_2MB the 2 MB at the block start,
+    :187-201), page-aligned at both ends, called while the buffer is allocated. They cannot reach a listed block's first
+    line.
+ b. kernel/src/slm_ffi.c:233-243 slm_gpu_sync_for_cpu(addr, size): builds a gpu_buffer from its arguments and calls
+    gpu_sync_for_cpu. Callers in the Rust runtime: runtime/src/mm/model_mem.rs:1580 (gpu_unmap: the handle's pointer and
+    the whole model size) and runtime/src/inference/gpu.rs:259 (the weight lease's pointer and size). The range is the
+    registered model buffer, megabytes long. Not traced: where that buffer comes from (the model memory pool) and whether
+    a handle can outlive its memory; get_ptr / get_size return an Option, so a released handle is expected to stop here.
+    Whether the suite calls either on a kexec boot was not traced.
+ c. kernel/src/slm_ffi.c:753 chan_gate_locked: 4 bytes at g_prog_end_slot, one line. Not traced: that the whole line
+    belongs to one reserved buffer.
+ d. kernel/src/slm_ffi.c:2102 (slm_runtime_oplib_scratch_read: base_phys + off[slot], bytes rounded up to 4096), :2209,
+    :2283, :2462, :2535 (out_phys, length rounded up to 4096) and :2384 (out_phys, 4096): operator-library result reads.
+    The length is rounded up to a page whatever the start's offset in its page, so a start that is not page-aligned makes
+    the range run into the following page. Not traced: where out_phys and the scratch base come from on a kexec boot (the
+    capture says "no weights pool and no GPU program on this boot", so these may not run in the suite), and whether the
+    page after them can be a free block's first page.
+ e. kernel/src/shell_sys.c:3118 (gpu_sync_for_cpu), :6327, :6423, :6529, :6597, :6634, :9086: shell commands. Not traced.
+ f. kernel/arch/arm64/smp_boot.S:246 and :269: DC ISW over every set and way of L1 and L2, on each secondary CPU as it
+    comes up (Pi 5 and Jetson, SETWAY_INVAL default ON). This runs after pmm_init, so the boot CPU has free-list headers
+    in its caches by then. The loops address the executing core's own L1 and L2 (levels 0 and 1 in CSSELR); per the
+    comment at :205-213 they clean and invalidate locally on these cores. Not traced beyond that comment: whether L2 is
+    private per core on both boards.
+ g. kernel/arch/arm64/mmu.S:97 (the image range, before the MMU is on) and kernel/arch/arm64/smp_boot.S:162-175 (single
+    lines at fixed symbols): boot time.
+ None of these is shown to reach the first line of a listed free block. By section 1 none of them can lose a write on
+ these cores; by section 2 any of them that reaches such a line could expose an earlier device write.
+
+5. Experiments (not run; the lab is down)
+
+ The CVAC-and-pattern build proposed in the first version was meant to separate a lost write from a write of zeros.
+ With section 1, a lost write is already excluded on these cores if the record holds, so that separation is worth less.
+ What the build would still give:
+ A. Stamp bytes 16..63 of each listed block's first line with a pattern derived from its address, and clean header and
+    pattern to DRAM after every link write. On a finding the dump shows: pattern intact with zero or stale links (only the
+    16 link bytes changed: a narrow write, or, against section 1, a lost header write); the whole line zero (a write of
+    zeros at least 64 bytes wide, by a device or by the CPU); other data (a write of that data). It does not say when.
+ B. To bound when DRAM changed: have the once-a-second walk drop its cached copy of each header line before reading it
+    (DC CIVAC on the line; the copy is clean in build A, so nothing is written back). The walk then reads DRAM every
+    second, and a finding's time bounds the DRAM write to that second. If findings then appear at boot or right after
+    xhci_init rather than at the end of test_suite_gpu, the writer is a device left running by Linux; if they still appear
+    only during test_suite_gpu, it is that suite's GPU activity.
+ C. Independently: print every reserved range and hand-off buffer address, and walk the lists after each test of
+    test_suite_gpu.
+ About 30 kexec suite boots each; at a true rate of 0.15, 30 boots without a finding have probability 0.008.

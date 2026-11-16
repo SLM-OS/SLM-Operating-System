@@ -1,0 +1,7 @@
+# QEMU test kernel (make kernel-test, no filter, PMM_CHECK off), built in the same worktree (.wt/b) from clean trees at
+# 02ebdad8 and at 122befe0 (comments and docs only; kernel/mm/pmm.c keeps its line count).
+02ebdad8 .text sha256 614877ea616664ba744c825a40de0b21ca3c8cf4b00eea0aacf74a8ef1b40702 bytes 2287640
+122befe0 .text sha256 614877ea616664ba744c825a40de0b21ca3c8cf4b00eea0aacf74a8ef1b40702 bytes 2287640
+differing bytes (cmp -l | wc -l): 0
+# A build of the same edit from a dirty tree differed in 23916 bytes: the banner's "-dirty" suffix lengthens a .rodata
+# string and moves the addresses the code refers to. Compare clean builds only.
