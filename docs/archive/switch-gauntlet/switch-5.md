@@ -2472,3 +2472,101 @@ Started at 01:08 UTC:
   #1266; write down why the changed test's direct write of `cpu_affinity`
   is safe and what the pinned worker no longer covers. The Part A PR and
   the #1262 comment stay unposted until the critic reports.
+
+## Entry 52 (written 01:24 UTC on 2026-11-16, from date): PR #1283 open and ready (Part B); issue #1284; critic A round 2 (FAIL); a further Part A slot
+
+### Part B: PR #1283
+
+`fix/pmm-coalesce` 122befe0 against `main`, stacked on #1265, opened by
+builder B as a draft and marked ready by the orchestrator at 01:14 UTC
+after critic B's round-3 PASS. **It closes nothing:**
+`closingIssuesReferences` is empty (checked after creation, after the
+comments and after marking ready); #1207, #1228, #1109 and #1244 are open.
+The brief asked for a PR closing #1207; the evidence does not support
+that (3 PMM halts in 20 kexec suite boots with the change in). Comments
+posted: #1207 (halt counts, the boot 04 capture as observations, next
+experiments), #1228 (a pointer), #1109 (the two coalescing tests pass in
+20 of 20 Jetson kexec suite boots and 3 of 3 Pi 5 boots and can come off
+the list when #1283 merges).
+
+### Issue #1284 (P1-high), filed by builder A
+
+The `bad=1` observation of Entry 50: on ae1399ba (the head of PR #1266)
+plus a test-only print, one of 1400 iterations of
+`test_preempt_flag_follows_migrated_task` on Jetson UEFI-direct had a
+resumed worker read `preempt_disabled[]` non-zero for its CPU
+(`A-uefi-pdmdiag-U-6439476f-x200-boot02.txt:3012-3017`). Every other `pdm:`
+line in the archive reads `bad=0`. Two readings are open: a kernel defect
+in the resume path, or the test's own race (the worker reads `cpu_id()`
+and then the flag unpinned with interrupts open; the diagnostic print put
+an increment between the two reads). Linked on PR #1266.
+
+### Critic A, round 2: FAIL (`critic-5-1263-A-round2.md`)
+
+A fresh blind critic on Fable (not the round-1 critic's session). It
+derived the A2b rows, the test change and the documents before reading the
+claims and the round-1 findings. Reproduced: the A2b table with all rows
+and per-boot splits; banners and build ids of all 19 A2b captures; 200
+iterations each; `bad=0` in 1400 padded and 1000 changed-test iterations;
+the UEFI and kexec order from the trigger logs with no unsaved boot; the
+d09b063b suite boot; `/ci` at d09b063b 12 steps; the slmstore records (9
+entries and 4 hashes identical). Round-1 findings: 1 to 6, 9, 10 resolved
+in the texts (figures re-derived: 6701 us, 14 of 279, 0 of 822); 7 carried
+plainly (#1279); 8 resolved in code. No kernel code defect.
+
+Findings:
+
+1. HIGH. `bad=1`: no issue number in the PR, an unsupported attribution
+   ("bears on #1266, not on the padding" is not shown), and a comparison
+   that is not like for like (padded boots had 88 to 92% of wake-ups on
+   one CPU; the changed test's pinned worker never runs on CPUs 4 and 5).
+   The critic wrote before #1284 existed.
+2. HIGH. The test change removes exposure to the path where `bad=1` was
+   seen, undisclosed: `pdm_a` is pinned (not stealable, CPUs 1 to 3 only),
+   and on Jetson the unpinned `pdm_b` did not move in the changed test
+   (`A-uefi-pdmnew-d09b063b-x200-boot01.txt`: 0 CPU changes in 1200
+   wake-ups). The test is not vacuous, but no run of it on a kernel with
+   the #1229 fix reverted exists.
+3. MEDIUM. Wrong statements in the PR body: "the two new layout tests
+   pass" (one passes, one is IGNORE on that kernel); "`/ci` not measured
+   after c0612fa7" (it was, at d09b063b); the `SLOT_TRACE=ON` run was on a
+   dirty tree; steal ranges (131 to 164, not 131 to 162).
+4. MEDIUM. The same coverage failure is in the archive on unpadded kernels
+   without the #1234 fix (`c2/hw-base/uefi-r2-boot1.txt`, 88d4d71b, 38 of
+   200; `c2-fix-critic/base-3b369aef-r2-boot02.txt`, 13 of 34). So the
+   one-CPU regime is not new with the padding: present before the #1234
+   fix, absent after it, present again padded. Round 1 missed these too.
+5. MEDIUM. The behaviour change is real and was treated only as test
+   fragility. `moved=0` in 83 of 1400 padded against 0 of 1400 unpadded;
+   the unit is the boot (4 of 7 padded, 0 of 7 unpadded). **Entry 50's
+   steal totals (658 to 1515 against 4974 to 8145) are true and
+   misleading:** failing iterations run 1 s with 200 wake-ups, not 50 ms
+   with 10. Per wake-up: UEFI padded 0.79 to 0.86 against 0.64 to 0.76;
+   kexec 0.77 against 0.65; Pi 5 padded 0.16, 0.64, 0.19 against 0.32 to
+   0.36. There is no five- to eight-fold increase in stealing. What
+   changes is where a woken task runs: padded sticky boots have 88 to 95%
+   of wake-ups on one CPU, unpadded at most 56%. Harm is neither shown nor
+   excluded: no latency or throughput row compares them, and
+   `--assert-shares` x20 ran on kexec only, the path with no sticky boot.
+6. LOW-MEDIUM. The test's flag read is racy for an unpinned worker.
+7. LOW. Evidence defects: two `/ci` step files carry another step's QEMU
+   section; the slmstore "before" hash lines do not show when they were
+   read; the Pi 5 alternation order rests on header text.
+8. LOW. Documents: `spinlock.h` states the reservation-loss mechanism as
+   fact; c0612fa7's commit message keeps stale figures.
+
+### Decisions (orchestrator)
+
+- The test is reworked (test-only; kernel code stays at c0612fa7): `pdm_a`
+  and `pdm_b` unpinned as in the old test, a third worker that rotates its
+  affinity through `sched_set_task_affinity()`, the flag read made with
+  interrupts masked across `cpu_id()` and the read; one mutation run with
+  the #1229 guard reverted.
+- The PR text will state the behaviour change as such, with the archive
+  fact of finding 4 and per-wake-up steal figures.
+- A further lab slot for builder A (A2c), boards re-claimed at 01:20 UTC:
+  the reworked test x200 on Pi 5 (filtered test only, with the `slmstore`
+  record before and after), Jetson UEFI-direct and kexec; the mutation
+  boot if QEMU cannot show it; one suite boot per Jetson path;
+  `--assert-shares` x20 on Jetson UEFI-direct, padded against unpadded.
+- Then critic A round 3, on Fable.
