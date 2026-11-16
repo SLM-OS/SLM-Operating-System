@@ -930,8 +930,14 @@ static void test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson(void)
  * to the window, so the inherited GPU state is untouched.
  * ============================================================================ */
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-#include "cache.h"
 #include "pmm_internal.h"
+static void d1207_civac(uint64_t base, uint64_t bytes)
+{
+    for (uint64_t a = base; a < base + bytes; a += 64u) {
+        __asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+}
 extern uint64_t g_diag1207_mnist_pushbuf_phys;
 #define D1207_BEFORE   0x100000ull
 #define D1207_BYTES    0x400000ull
@@ -960,7 +966,7 @@ static void d1207_snapshot(void)
         return;
     }
     d1207_base = (pb - D1207_BEFORE) & ~0xfffull;
-    cache_invalidate_range((const volatile void *)(uintptr_t)d1207_base, D1207_BYTES);
+    d1207_civac(d1207_base, D1207_BYTES);
     for (uint64_t i = 0; i < D1207_LINES; i++) {
         d1207_hash[i] = d1207_line_hash(
             (const volatile uint64_t *)(uintptr_t)(d1207_base + i * 64u));
@@ -999,7 +1005,7 @@ static void d1207_check(const char *test)
     if (d1207_base == 0u) {
         return;
     }
-    cache_invalidate_range((const volatile void *)(uintptr_t)d1207_base, D1207_BYTES);
+    d1207_civac(d1207_base, D1207_BYTES);
     uint64_t run_first = 0;
     bool in_run = false, run_zero = true;
     unsigned changed = 0;
