@@ -1,0 +1,6 @@
+21:16:38 start mode=kexec n=1 elfs=[/root/slmos-1207-po-76ec16fd.elf] skip_current_boot_id=none pid=324527
+21:18:03 trigger 1/1 elf=/root/slmos-1207-po-76ec16fd.elf boot_id=7e6942e9-1ea7-405e-8643-8acecc65c339 state+uptime=[running 25.59 ] reply=[b11c55f79501764f ]
+21:18:03 end triggers=1
+21:27:22 start mode=kexec n=1 elfs=[/root/slmos-1207-po-76ec16fd.elf] skip_current_boot_id=none pid=398830
+21:28:45 trigger 1/1 elf=/root/slmos-1207-po-76ec16fd.elf boot_id=12293f17-3b51-4c8d-a67c-313d392e12a5 state+uptime=[running 23.41 ] reply=[b11c55f79501764f ]
+21:28:45 end triggers=1
