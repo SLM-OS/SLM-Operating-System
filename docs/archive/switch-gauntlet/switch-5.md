@@ -2829,7 +2829,7 @@ at 02:33 UTC from a fresh read-only mount, after the last lab use),
 (`A-pi5-restore-check-a2c-boot01.txt`). No session image in
 `/var/lib/labctl/images`.
 
-## Entry 55 (written 07:25 UTC on 2026-11-16, from date): PR #1265 and PR #1283 merged on the user's instruction
+## Entry 55 (written 07:09 UTC on 2026-11-16, from date): PR #1265 and PR #1283 merged on the user's instruction
 
 - **PR #1265** squash-merged as `a07a1383` (head e300a46a). #1244 closed
   by it. Its head had moved since Part B was stacked on it (661204e6): two
@@ -2849,8 +2849,8 @@ at 02:33 UTC from a fresh read-only mount, after the last lab use),
   message (as the PR asks, so that e3c22600's overstated sentence does not
   reach `main`). `closingIssuesReferences` was empty before the merge;
   #1207, #1228 and #1109 are open after it.
-- The eight idle builder and critic agents of the session were stopped at
-  about 06:50 UTC. No claims, no scheduled jobs, no session process left.
+- The eight idle builder and critic agents of the session were stopped
+  before the merges (time not recorded). No claims, no scheduled jobs, no session process left.
 - Not done: PR #1285 (Part A) is not merged; its base PR #1266 is open.
   The two coalescing tests can now come off #1109's list (comment already
   on #1109); the list was not edited.
