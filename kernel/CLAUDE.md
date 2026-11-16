@@ -836,6 +836,16 @@ not known (a non-snooping device can write under a line the CPU holds).
 A header write lost to DC IVAC is excluded on these cores if the note in
 `kernel/arch/arm64/mmu.S` holds: A76 and A78AE execute it as DC CIVAC.
 
+**`PMM_POISON` / `PMM_UNMAP` (debug options, #1207, `docs/testing.md`):**
+free pages hold `0xF4EE << 48 | pa` and are reached only through a Normal
+Non-cacheable alias at PA + `0x20_0000_0000` (`PMM_VA()` / `PMM_FB()` in
+`pmm.c`); under `PMM_UNMAP` they also leave the linear map, which is then
+4 KB pages over the heap. With either option on, list code must reach a
+free block's header through `PMM_FB()`, never by casting the list address,
+and must put a block's link words back to the pattern when it leaves a
+list (`PMM_POISON_UNLINKED`). Off, both macros are plain casts and the
+build is byte-identical.
+
 **Statistics API:**
 ```c
 void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);

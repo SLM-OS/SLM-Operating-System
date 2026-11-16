@@ -455,6 +455,90 @@ A list link overwritten by something other than the PMM is therefore
 reported at the first suite boundary after the write, which names the
 suite to look in.
 
+### PMM_POISON and PMM_UNMAP (Free-Page Poison and Unmap)
+
+`make kernel-test PMM_POISON=ON [PMM_UNMAP=ON]` (also `kernel` and `test`;
+CMake `-DPMM_POISON=ON` / `-DPMM_UNMAP=ON`, default OFF, ARM64 only, CMake
+refuses them on x86-64; `PMM_UNMAP` needs `PMM_POISON`) builds the
+diagnostics for #1207, a free block found zeroed on Jetson kexec boots.
+They tell a device write into freed memory from a CPU write through a
+stale pointer. The design and the cache argument are in the comment
+"PMM_POISON / PMM_UNMAP" in `kernel/mm/pmm.c`; in short:
+
+- `PMM_POISON`: every 64-bit word of a free page holds
+  `0xF4EE000000000000 | pa` (its own physical address under a tag: not
+  zero, different in a copied page, and non-canonical if used as a
+  pointer). The PMM reaches free pages only through a Normal Non-cacheable
+  alias of RAM at PA + `0x20_0000_0000` (L1[128..]). Each allocation cleans
+  and invalidates its block, checks every byte, and reports damage:
+
+  ```
+  [pmm-poison] FINDING (allocation 1) at 24269 ms: pmm_alloc_pages allocated block 0x42293000 order 0 (4 KB)
+    last boundary: after test_suite_pmm
+    55 byte(s) differ from the pattern, offsets 0x101 to 0xf87 from 0x42293000; the differing bytes are NOT all zero
+    pages hit: 1 (first 0x42293000, last 0x42293000)
+    first differing line 0x42293100: <8 words>
+    (pattern there: f4ee000042293100, +8 per word)
+    last differing line 0x42293f80: <8 words>
+  [pmm-poison] end of finding
+  ```
+
+  `pmm_poison_scan(where, full)` is the free-list walk plus a check of
+  every free page (`full`) or of the first and last 64 bytes of each; a
+  reported page gets the pattern back. Reports do not stop the kernel; 16
+  are printed in full, 240 more in one line, the rest counted.
+- `PMM_UNMAP`: a free page also has no linear-map entry, so a CPU access
+  faults, and the fault dump adds a line such as
+  `PMM:     FAR is in a PMM-FREE page 0x42291000: free block 0x42291000, order 0 (4 KB), page 0 of it; linear map: UNMAPPED (PMM_UNMAP); last boundary: boot`.
+  The heap's linear map is split into 4 KB pages: the 2 MB block holding
+  the image tail in `vmm_init` before the MMU is on (one static table), the
+  rest when the option arms, with break-before-make per entry and tables
+  from the PMM (about 1 page per 2 MB: 495 on QEMU, about 3,550 (14 MB) on
+  Jetson). `vmm_virt_to_phys` and `vmm_is_mapped` follow the L3 entries.
+- `PMM_UNMAP_SELFTEST=ON` (needs `PMM_UNMAP`): the test kernel frees a
+  page, writes it from `pmm_unmap_selftest_store`, and halts on the fault.
+- Both arm at the end of `pmm_init`, which poisons (and unmaps) every page
+  already free, and print one `[pmm-poison] armed: ...` line.
+
+In a test kernel the harness runs a full scan before the first suite and
+before and after `test_suite_gpu`, and after each test of
+`test_suite_gpu` a scan labelled `after <test name>` of the first and last
+64 bytes of every free page (the bytes #1207's capture found zeroed across
+a block boundary); `PMM_POISON_PER_TEST_FULL=ON` makes those full. Suite
+boundaries keep the plain free-list walk. `test_suite_pmm_poison`
+(`kernel/tests/test_pmm_poison.c`) writes through the alias into free
+pages, standing in for DMA, and checks the allocation and scan reports;
+the end of the run prints
+
+```
+[pmm-poison] summary: armed 1, unmap 1; 1 allocation finding(s), 2 scan finding(s), 3 injected by tests, UNEXPECTED 0; 50 scans, longest 573 ms; 1 list finding(s)
+```
+
+where UNEXPECTED counts findings no test caused (the one list finding is
+`test_verify_reports_a_cleared_link`'s).
+
+**Cost.** QEMU (1 GB, TCG): arming 2.2 s; a full scan of about 145,000
+free pages (570 MB) about 0.5 s, the 64-byte-edges scan about 0.13 s;
+`make test` about 109 s including the build. Jetson (about 6.7 GB free) is
+an estimate until a board prints its own `scan ... ms` lines: reads
+through the Non-cacheable alias are not prefetched, so a full scan is
+bound by uncached read bandwidth, assumed 0.5 to 2 GB/s, giving 3 to 15 s;
+an edges scan reads 3.5 million lines, assumed 0.3 to 1.2 s. With three
+full scans, 46 edge scans in `test_suite_gpu`, arming (clean and fill of
+all free memory, 2 to 5 s) and the allocation checks (the exhaustion test
+reads all free memory once), the suite is estimated to take 0.5 to 2.5
+minutes longer. Frees write their block with IRQs masked under `pmm_lock`
+(a 1 GB free is about 0.5 to 1 s), and 4 KB linear-map pages raise TLB
+misses.
+
+**Known limits.** Without `PMM_UNMAP` the scan does not clean the caches
+first, so a CPU write still dirty in a cache is found at the next
+allocation of that block, not by the scan. Pages `PMM_UNMAP` cannot unmap
+(a 2 MB block it could not split; on Pi 5 the 1 GB block holding the
+image) keep `PMM_POISON`'s rules; the arm line counts them. Code that
+reads or cleans memory after freeing it faults under `PMM_UNMAP`, which is
+the point, but it stops a hardware run at the first such access.
+
 ---
 
 ## Current Test Suites
