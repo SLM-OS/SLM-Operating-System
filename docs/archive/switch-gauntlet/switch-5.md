@@ -2671,3 +2671,160 @@ jetson-nano-2: online; SD Linux, BootCurrent 0001, no BootNext; ESP
 
 Critic A round 3 started at about 02:34 UTC: a fresh blind critic on Fable
 (`critic-a3`).
+
+## Entry 54 (written 03:15 UTC on 2026-11-16, from date): critic A rounds 3 to 5 (PASS); PR #1285 open and ready; final state of the session
+
+### Critic A, rounds 3 to 5 (all on Fable; records `critic-5-1263-A-round3.md`, `-round4.md`, `-round5.md`)
+
+- **Round 3** (a fresh blind critic): FAIL on text only. No kernel or test
+  defect; every table number reproduces; all eight round-2 findings
+  resolved or carried plainly; the three-worker test is acceptable and the
+  mutation reverts the real #1229 line. Failed on: "far fewer cross-CPU
+  resumes" (wrong: 8707 padded against 9071 unpadded summed `moved`; the
+  padded side ran more wake-ups); "stealing does not rise by multiples"
+  (about 2 times in the one Pi 5 boot in the regime); #1284's title and
+  summary favouring the kernel-defect reading; the ledger row without a
+  pointer to the wake-placement change; "any CPU" (no unpinned wake-up
+  landed on CPU 0 in about 25,000); an archive capture cited without
+  saying it is cut; smaller wording.
+- The first builder A did not apply these (it re-sent its answer to round
+  2 and stopped; after 22 hours its context was no longer reliable). A
+  fresh builder (`builder-a2`, on Opus) did: `fix/percpu-cacheline`
+  2be38017 (two documents and the test's header comment; the comment-
+  stripped test source is identical). It found three of the critic's
+  figures inexact and wrote its own, later confirmed: wake-ups 2.9 times
+  overall (3.7 on UEFI-direct only); Jetson steals per wake-up 1.0 to 1.3
+  times; raw steal totals 3.3 to 5.9 times on UEFI-direct and 11 to 12
+  times in the Pi 5 regime boot.
+- **Round 4** (a fresh critic, narrow): FAIL on one claim. "The regime is
+  not new with the padding" rested on two archive boots in which CPUs 4
+  and 5 had panicked and halted before the first `moved=0` line
+  (`c2/hw-base/uefi-r2-boot1.txt`: halts at lines 3047 and 3125, first
+  `moved=0` at 3138; `c2-fix-critic/base-3b369aef-r2-boot02.txt`: halts at
+  1935 and 2014, first at 2020). No unpadded boot with all CPUs alive
+  shows the line. **This withdraws finding 4 of round 2 as recorded in
+  Entry 52** ("present before the #1234 fix, absent after it, present
+  again padded"): on a healthy kernel the sticky-wake pattern has been
+  seen only with the padded layout. The five `coherency: FAIL (N rows)`
+  lines in the make-test log are expected output of fault-injection tests
+  that pass.
+- The fresh builder corrected `docs/scheduler.md` and the PR text
+  (87061023, one document file), pushed the cited logs to the evidence
+  branch (`gauntlet-5-hw-jetson` 4efd7e68) and reworded two comment
+  openings on #1284. `make test` at 87061023: 3051 PASS, 0 FAIL
+  (`A-qemu-arm-make-test-87061023.txt`).
+- **Round 5** (the round-4 critic, continued by message; spawned on
+  Fable): **PASS**, no remaining findings. Open items it confirms are
+  stated plainly in the PR: the cost of the wake-placement change is not
+  measured; #1284 is open; superseded commit-message sentences are named
+  with the instruction to use the PR body as the squash message; `/ci` in
+  full was last run at c3ce3885; the ledger row awaits the user's
+  acceptance.
+
+### PR #1285 (Part A)
+
+`fix/percpu-cacheline` 87061023 against `main`, stacked on #1266, opened
+as a draft by the orchestrator at 03:11 UTC and marked ready after the
+round-5 PASS. `closingIssuesReferences` = 1263 only. Comment posted on
+#1262 (evidence about #1262, no fix claim; issuecomment-6906242307).
+#1262, #1263 and #1284 are open.
+
+## Final report of the session (2026-11-15 04:45 UTC to 2026-11-16 03:15 UTC)
+
+### Part A, #1263: PR #1285, ready, closes #1263; critic PASS at round 5
+
+| Row | Result | Files (`run5-hw/1263-1207/`) |
+|---|---|---|
+| R3 wake x1000, `SWO_DIAG`, Jetson kexec, 3 boots a side | unpadded: slow finishes 11, 9, 4; prelude reports 20, 12, 8; slowest 819 to 834 ms. Padded: 0, 0, 0; 0, 0, 0; 315 ms | `A-kexec-r3w-{U-ae1399ba,P-c0612fa7}-x1000-boot01..03.txt` |
+| R3 wake x1000, Jetson UEFI-direct, 3 boots a side | unpadded: 32, 34, 19; 37, 60, 37; 828 to 833 ms. Padded: 0, 0, 0; 0, 0, 0; 315 to 319 ms | `A-uefi-r3w-{U,P}-*-x1000-boot01..03.txt` |
+| Totals | 109 slow finishes in 6000 unpadded iterations, 0 in 6000 padded; no NOT-FINISHED on either side | `A-r3w-summary.txt`, `A-r3w-detail.txt` |
+| `bench context`, Jetson kexec, 6 runs a side | 96.83 to 98.50 ns (+1.67 ns, +1.7%), ranges overlap | `A-bench-context-summary-jetson.txt` |
+| `bench context`, Pi 5, 6 runs a side | 107.67 to 107.33 ns (-0.33 ns, -0.3%), ranges overlap | `A-bench-context-summary-pi5.txt` |
+| `boot_test` x10 at c0612fa7 | Jetson kexec 10 of 10, Jetson UEFI-direct 10 of 10, Pi 5 10 of 10 | `A-kexec-prod-*`, `A-uefi-prod-*`, `A-pi5-prod-*` |
+| `--assert-shares` x20 | 20 of 20 on Jetson kexec and UEFI-direct, padded and unpadded | `A-assert-shares-compare.txt` |
+| Suite | 3 boots per path at c0612fa7 (one new failure, the migration test's coverage condition, 1 boot); 1 boot per Jetson path at c3ce3885 with the reworked test: known failures only | `A-*-suite-*` |
+| `/ci` | 12 steps at c0612fa7, d09b063b, c3ce3885 (one retry of step 6 on #1230 at c3ce3885); `make test` at 2be38017 and 87061023 | `A-ci-*`, `A-qemu-arm-make-test-*` |
+
+Ledger row (`docs/perf/context-switch.md`): "#1263 (awaits acceptance)",
+Jetson +1.67 ns / +1.7%, Pi 5 -0.33 ns / -0.3%, no difference shown on
+either board at 6 runs a side (a cost up to about 5% on Jetson is not
+excluded), with a pointer to the wake-placement observation.
+
+**What the padding changes besides the slow finishes:** on the padded
+kernel a woken task lands on one CPU in most wake-ups in some boots (88 to
+98% in the affected boots; at most 56% unpadded); `moved=0` in 83 of 1400
+padded iterations of the old migration test against 0 of 1400 unpadded.
+Its cost is not measured (`--assert-shares` does not test it). The
+migration test was reworked to three workers in this PR.
+
+Not established: which padded array removes the slow finishes; the
+mechanism (inferred); anything about #1262's 2 s stall (not seen on either
+side).
+
+### Part B, #1207: PR #1283, ready, closes nothing; critic PASS at round 3
+
+| Row | Result | Files |
+|---|---|---|
+| QEMU loops (coalescing pair x50, checkerboard + exhaustion x50, new tests x50) | 0 failures at every head | `B-qemu-fix-*` |
+| QEMU full suite | PMM suite clean in every run; litmus (#1230) failures 4 of 25 at base against 2 of 25 at the head in the interleaved pairs | `B-qemu-ab*-`, `B-qemu-fix-*-fullsuite-*` |
+| Jetson kexec suite, old allocator, `PMM_CHECK` on, 2 boots | 0 halts; no unaligned reserve, no unmerged buddy pair | `B-kexec-chk-oldalloc-17daedda-boot01,02.txt` |
+| Jetson kexec suite, f55c5293, 10 boots | **2 PMM halts** | `B-kexec-suite-f55c5293-boot01..10.txt` |
+| Jetson kexec suite, 647c2c33 (verifier), 10 boots | **1 PMM halt**, with the damaged block captured | `B-kexec-suite-647c2c33-boot01..10.txt`, `B-finding-boot04.txt` |
+| Pi 5 suite, 647c2c33, 3 boots | complete, the 18 known failures | `B-pi5-suite-647c2c33-boot01..03.txt` |
+| `/ci` | passes at f55c5293, 647c2c33; at 02ebdad8 with one retry of step 4 on #1230; not rerun at 122befe0 (comments only) | `B-ci-*` |
+
+**#1207 is not fixed and not root-caused: 3 halts in 20 kexec suite boots
+with the change in (2 in 10 before it).** The merge defect of run 5's
+hypothesis reproduces the signature in QEMU and is fixed, but is not what
+halts the board. One boot shows a listed free block whose header and the
+64 bytes before it read zero after `test_suite_gpu` and intact after the
+suite before; when memory changed is not bounded. The two coalescing
+tests were a test defect and pass in 20 of 20 Jetson kexec boots and 3 of
+3 Pi 5 boots. #1228 is not linked beyond the signature.
+
+### Tracker delta
+
+- Opened: PR #1283, PR #1285; #1278 (P2, Lua GC abort in a QEMU baseline
+  run); #1279 (P3, global scheduler counters and unpadded standalone
+  locks); **#1284 (P1-high: one `bad=1` in 1400 iterations of the
+  migration test on the head of PR #1266 plus a print; two readings, not
+  investigated)**.
+- Comments: #1262, #1207, #1228, #1109, #1240, #1266, #1279, #1284.
+- Still open: #1263 (until #1285 merges), #1262, #1207, #1228, #1284,
+  #1274, #1109.
+- Nothing merged.
+
+### What could not be done, and what went wrong
+
+- Part B does not close #1207 as the brief asked.
+- The user's `0:/slmstore/` rule arrived after builder A's three Pi 5
+  suite boots and reached builder B after its three: six Pi 5 suite boots
+  ran with no before-record. The later filtered-test boots were recorded
+  before and after (identical). `files.lfs` was never hashed.
+- labctl: an `sdwire_cat` of an 8.4 MB file closed the session's MCP
+  connection for two hours; the session's claims lapsed and were retaken.
+  There is no labctl way to hash a card file without reading it out.
+- A usage limit stopped the session for 6.5 hours (14:22 to 20:55 UTC);
+  from 01:05 UTC on 2026-11-16 the orchestrator and builders ran on Opus,
+  critics on Fable.
+- Builders ended turns while waiting on their own background jobs three
+  times; nothing resumes them. About 1 h 40 min of lab time was lost the
+  first time.
+- The old migration test has no three-pair kexec row; the mutation run is
+  QEMU only; the reworked test has no unpadded hardware row; `/ci` in full
+  was not rerun at the last two document-only heads of either branch.
+- Hardware rows for Part B stop at 647c2c33; the two later commits have
+  QEMU rows only.
+- Log errors corrected in later entries: guessed times (Entries 46, 53),
+  "three earlier halts" and the bracket claim (Entry 48), the steal-total
+  comparison (Entry 50), the archive claim (Entry 52).
+
+### Lab end state
+
+Both boards restored, powered on and released (no active claims at 03:13
+UTC). jetson-nano-2: SD Linux, no BootNext, ESP `SLMOS.efi` 789cba62 (read
+at 02:33 UTC from a fresh read-only mount, after the last lab use),
+`/root/slmos.elf` 098f3163, 14 `*.elf*` files. pi-5-1: original
+`kernel_2712.img`, restore-check banner b42b2c1d
+(`A-pi5-restore-check-a2c-boot01.txt`). No session image in
+`/var/lib/labctl/images`.
