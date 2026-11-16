@@ -45,7 +45,15 @@ _start:
     ccmp    x18, #0, #0xd, pl   /* code0: PE/COFF "MZ" magic + harmless NOP */
     b       real_start          /* code1: branch to actual entry point */
     .quad   0                   /* text_offset: load offset (0 = any 2MB aligned) */
-    .quad   _kernel_file_size   /* image_size: actual file size (excludes BSS) */
+    .quad   _kernel_size        /* image_size: memory the image uses from its
+                                 * load address, .bss and the boot stack
+                                 * included, up to __kernel_end (as Linux's
+                                 * _end - _text). A loader must leave it free:
+                                 * kexec-tools places the DTB at the first
+                                 * free page above image_base + image_size.
+                                 * With the file size here the DTB landed
+                                 * below __kernel_end (#1244). UEFI does not
+                                 * read this field (it uses SizeOfImage). */
     .quad   0x0a                /* flags: LE kernel, 4KB pages, anywhere in RAM */
     .quad   0                   /* res2: reserved */
     .quad   0                   /* res3: reserved */

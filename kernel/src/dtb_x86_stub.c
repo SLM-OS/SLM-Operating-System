@@ -6,16 +6,19 @@
  * info struct or the bzImage parameter block, not from a flattened
  * device tree.
  *
- * Two helpers are still referenced from platform-neutral code:
+ * Three helpers are still referenced from platform-neutral code:
  *
- *   - `dtb_get_memreserves` (called from `pmm_add_region_split` to
+ *   - `dtb_get_memreserves` (called from `pmm_collect_reserves` to
  *     carve firmware-reserved ranges out of new regions)
+ *   - `dtb_get_blob_range` (called from `pmm_collect_reserves` and
+ *     `pmm_init` to reserve the DTB blob itself and check it, #1244)
  *   - `dtb_get_chosen` (called from `kernel_main` to seed lwip's RNG
  *     with `/chosen` entropy)
  *
- * On x86-64 there is no DTB and no /chosen node, so both stubs report
- * "no entries" and the platform-neutral callers fall through their
- * "no firmware reserves / no entropy" paths cleanly.
+ * On x86-64 there is no DTB and no /chosen node, so every stub reports
+ * "no entries" (or no blob) and the platform-neutral callers fall
+ * through their "no firmware reserves / no blob / no entropy" paths
+ * cleanly.
  */
 
 #include "dtb.h"
@@ -25,6 +28,13 @@ int dtb_get_memreserves(dtb_memreserve_t *out, int max)
     (void)out;
     (void)max;
     return 0;
+}
+
+bool dtb_get_blob_range(uint64_t *addr, uint64_t *size)
+{
+    (void)addr;
+    (void)size;
+    return false;       /* no DTB on x86-64 */
 }
 
 const dtb_chosen_t *dtb_get_chosen(void)

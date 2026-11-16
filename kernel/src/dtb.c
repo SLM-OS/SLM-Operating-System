@@ -657,6 +657,22 @@ const void *dtb_get_blob(void)
     return g_dtb_blob;
 }
 
+bool dtb_get_blob_range(uint64_t *addr, uint64_t *size)
+{
+    if (!g_dtb_blob || !addr || !size) {
+        return false;
+    }
+    const struct fdt_header *hdr = g_dtb_blob;
+    uint32_t total = be32_to_cpu(hdr->totalsize);
+    if (be32_to_cpu(hdr->magic) != FDT_MAGIC || total == 0 ||
+        total > DTB_MAX_BLOB_SIZE) {
+        return false;
+    }
+    *addr = (uint64_t)(uintptr_t)g_dtb_blob;
+    *size = total;
+    return true;
+}
+
 int dtb_get_memreserves(dtb_memreserve_t *out, int max)
 {
     if (!out || max <= 0) return 0;
