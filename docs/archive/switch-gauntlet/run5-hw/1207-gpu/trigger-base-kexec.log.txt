@@ -27,3 +27,8 @@ mktemp: failed to create file via template ‘/tmp/claude-1000/-home-john-projec
 20:25:45 trigger 2/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=4ffb5c1a-532b-4711-b233-02b4edbd3e6a state+uptime=[running 23.51 ] reply=[8c608c78db9520e2 ]
 20:35:05 trigger 3/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=27ec7318-49bd-4925-85cb-e2fc78be048d state+uptime=[running 24.14 ] reply=[8c608c78db9520e2 ]
 20:35:05 end triggers=3
+20:41:54 start mode=kexec n=3 elfs=[/root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf] skip_current_boot_id=none pid=89800
+20:43:18 trigger 1/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=be6eafd3-691a-437e-a6eb-929569408381 state+uptime=[running 24.63 ] reply=[8c608c78db9520e2 ]
+20:49:52 trigger 2/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=c0d0206a-5358-4a8a-936c-7b1ac2ca2397 state+uptime=[running 26.95 ] reply=[8c608c78db9520e2 ]
+20:56:24 trigger 3/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=09b3ed49-ba79-4508-a1f2-1ffd7d611ffc state+uptime=[running 23.67 ] reply=[8c608c78db9520e2 ]
+20:56:24 end triggers=3
