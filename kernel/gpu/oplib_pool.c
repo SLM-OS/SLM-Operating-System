@@ -334,6 +334,42 @@ void oplib_pool_unstage(void)
     g_cbuf_gpu_va = 0;
 }
 
+/* ---- Test-only: save and restore the staging state (#1281) ----
+ *
+ * test_oplib_gpu_as.c stages and unstages a pool through a fake address
+ * space. After a UEFI-direct boot the cold bring-up has already staged
+ * the real pool, and oplib_pool_unstage() at the end of those tests
+ * dropped it for the rest of the boot. The suite saves the real state
+ * before its first test and puts it back after its last one, whatever
+ * the tests did in between (a failed assertion included, #512). Only the
+ * bookkeeping is saved: no page is freed or mapped by either call. */
+void oplib_pool_test_save_state(struct oplib_pool_saved_state *s)
+{
+    s->staged       = g_staged;
+    s->stage_rc     = g_stage_rc;
+    s->gpu_va       = g_sass_pool_gpu_va;
+    s->n_pages      = g_sass_pool_n_pages;
+    s->base_phys    = g_sass_pool_base_phys;
+    s->scratch_off  = g_scratch_off;
+    s->cbuf_phys    = g_cbuf_phys;
+    s->cbuf_gpu_va  = g_cbuf_gpu_va;
+}
+
+void oplib_pool_test_restore_state(const struct oplib_pool_saved_state *s)
+{
+    /* Same order as stage_publish: unpublish, write the fields, publish. */
+    g_staged = false;
+    g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+    g_sass_pool_gpu_va    = s->gpu_va;
+    g_sass_pool_n_pages   = s->n_pages;
+    g_sass_pool_base_phys = s->base_phys;
+    g_scratch_off         = s->scratch_off;
+    g_cbuf_phys           = s->cbuf_phys;
+    g_cbuf_gpu_va         = s->cbuf_gpu_va;
+    g_stage_rc = s->stage_rc;
+    g_staged   = s->staged;
+}
+
 size_t oplib_pool_sass_region_len(void)
 {
     return (g_initialized && g_init_rc == 0) ? g_handle.sass_region_len : 0;

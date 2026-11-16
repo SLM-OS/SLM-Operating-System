@@ -46,4 +46,22 @@ static inline bool boot_source_is_uefi(void)
     return slmos_boot_source == BOOT_SOURCE_UEFI;
 }
 
+/*
+ * Second record of a UEFI-direct boot, for the boot test only (#1231).
+ * efi_stub_entry() writes EFI_STUB_MARKER_RAN at the same point as it
+ * writes slmos_boot_source; every other entry path leaves the
+ * initialiser. test_boot_source_matches_stub_marker checks that the boot
+ * source reads UEFI exactly when the marker says the stub ran, so a stray
+ * store to either one fails the test on every boot path instead of being
+ * mistaken for the path itself. Drivers keep using boot_source_is_uefi().
+ *
+ * Defined in kernel/arch/arm64/efi_stub.c (a different object from
+ * slmos_boot_source in main.c) and kept in .data by its non-zero
+ * initialiser, for the reason given above for slmos_boot_source. Exists
+ * only where efi_stub.c is built (not Pi 5, not x86-64).
+ */
+#define EFI_STUB_MARKER_UNSET 0x534c4d4f53444952ull   /* "SLMOSDIR" */
+#define EFI_STUB_MARKER_RAN   0x534c4d4f53554546ull   /* "SLMOSUEF" */
+extern volatile uint64_t slmos_efi_stub_marker;
+
 #endif /* BOOT_SOURCE_H */

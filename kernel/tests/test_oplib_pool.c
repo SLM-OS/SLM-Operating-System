@@ -18,6 +18,7 @@
 #include "unity.h"
 #include "../include/oplib_pool.h"
 #include "../include/operator_library.h"
+#include "../include/boot_source.h"
 
 void test_oplib_pool_init_succeeds(void)
 {
@@ -67,9 +68,22 @@ void test_oplib_pool_lookup_after_init_returns_well_defined(void)
  * any state. The lookup `oplib_pool_get_sass_gpu_va` then always
  * returns NULL because the SASS pool isn't staged. */
 
+/* #1231: after a UEFI-direct boot the cold bring-up has already staged
+ * the pool (oplib_cold.c), so the "unstaged" checks below do not apply.
+ * Both halves are needed: a kexec or QEMU boot with a staged pool is a
+ * real failure and must stay one, and a UEFI-direct boot whose staging
+ * failed still runs the checks. */
+#define SKIP_IF_STAGED_BY_COLD_BRINGUP()                                       \
+    do {                                                                      \
+        if (boot_source_is_uefi() && oplib_pool_gpu_va_base() != 0) {         \
+            TEST_IGNORE_MESSAGE("operator library already staged by the cold bring-up"); \
+        }                                                                     \
+    } while (0)
+
 void test_oplib_pool_get_sass_gpu_va_unstaged_returns_null(void)
 {
     (void)oplib_pool_init();
+    SKIP_IF_STAGED_BY_COLD_BRINGUP();
     uint64_t gpu_va = 0xdeadbeefdeadbeefull;
     size_t size = 0xdead;
     int rc = oplib_pool_get_sass_gpu_va(0, 0, 0, &gpu_va, &size);
@@ -91,6 +105,7 @@ void test_oplib_pool_get_sass_gpu_va_rejects_null_out_params(void)
 
 void test_oplib_pool_gpu_va_base_zero_when_unstaged(void)
 {
+    SKIP_IF_STAGED_BY_COLD_BRINGUP();
     /* Pre-stage, the cached GPU VA is zero. */
     TEST_ASSERT_EQUAL_UINT64((uint64_t)0, oplib_pool_gpu_va_base());
 }
@@ -104,9 +119,11 @@ void test_oplib_pool_scratch_base_unstaged(void)
     uint64_t phys = 0x1234u, va = 0x5678u;
     TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(NULL, &va));
     TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(&phys, NULL));
-    TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(&phys, &va));
     TEST_ASSERT_EQUAL_UINT64((uint64_t)0, oplib_pool_scratch_off(0));
     TEST_ASSERT_EQUAL_UINT64((uint64_t)OPLIB_POOL_MIN_BYTES, oplib_pool_self_bytes(1));
+    /* The checks above hold staged or not; the one below needs unstaged. */
+    SKIP_IF_STAGED_BY_COLD_BRINGUP();
+    TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(&phys, &va));
 }
 
 #if !defined(PLATFORM_JETSON_ORIN_NANO)

@@ -211,16 +211,28 @@ static void test_mem_type_free_after_ebs(void)
     TEST_ASSERT_FALSE(efi_mem_type_free_after_ebs(EFI_MEMORY_MAPPED_IO));
 }
 
-/* The test kernel is loaded with QEMU -kernel, not through the EFI
- * stub, so the boot source must still read DIRECT. A UEFI value here
- * would mean the default was lost (e.g. the variable moved to .bss and
- * a stray store set it) and xhci_init would wrongly skip USB on kexec
- * boots. The UEFI side is checked by `make test-qemu-uefi`, which
- * looks for "Boot source: UEFI-direct" on the console. */
-static void test_boot_source_default_is_direct(void)
+/* The boot source must read UEFI exactly when the EFI stub ran (#1231).
+ * The stub writes two records at the same point (efi_stub.c): the boot
+ * source drivers use (slmos_boot_source, main.c) and a marker that only
+ * this test reads (slmos_efi_stub_marker, efi_stub.c, a different
+ * object). A QEMU -kernel or kexec boot leaves both at their
+ * initialisers, a UEFI-direct boot sets both, and anything else, such as
+ * a stray store or the record moved to .bss, fails here. With the marker
+ * alone a UEFI-direct boot that lost its boot source would fail too:
+ * xhci_init would touch unpowered XUSB. The UEFI side across the
+ * relocation is also checked by `make test-qemu-uefi`, which looks for
+ * "Boot source: UEFI-direct" on the console. */
+static void test_boot_source_matches_stub_marker(void)
 {
-    TEST_ASSERT_EQUAL_UINT32(BOOT_SOURCE_DIRECT, slmos_boot_source);
-    TEST_ASSERT_FALSE(boot_source_is_uefi());
+    uint64_t marker = slmos_efi_stub_marker;
+    if (marker == EFI_STUB_MARKER_RAN) {
+        TEST_ASSERT_EQUAL_UINT32(BOOT_SOURCE_UEFI, slmos_boot_source);
+        TEST_ASSERT_TRUE(boot_source_is_uefi());
+    } else {
+        TEST_ASSERT_EQUAL_HEX64(EFI_STUB_MARKER_UNSET, marker);
+        TEST_ASSERT_EQUAL_UINT32(BOOT_SOURCE_DIRECT, slmos_boot_source);
+        TEST_ASSERT_FALSE(boot_source_is_uefi());
+    }
 }
 
 int test_suite_efi_reloc(void)
@@ -238,6 +250,6 @@ int test_suite_efi_reloc(void)
     RUN_TEST(test_reloc_honours_desc_size_stride);
     RUN_TEST(test_reloc_rejects_overflowing_descriptor);
     RUN_TEST(test_mem_type_free_after_ebs);
-    RUN_TEST(test_boot_source_default_is_direct);
+    RUN_TEST(test_boot_source_matches_stub_marker);
     return UnityEnd();
 }

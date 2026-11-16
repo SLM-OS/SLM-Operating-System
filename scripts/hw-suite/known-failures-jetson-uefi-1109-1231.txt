@@ -1,20 +1,17 @@
-# Known test-kernel failures: Jetson Orin Nano, UEFI-direct boot path. 21 tests:
-# 12 shared with the kexec path (#1109) plus 9 that fail only after a UEFI-direct boot (#1231).
+# Known test-kernel failures: Jetson Orin Nano, UEFI-direct boot path. 15 tests:
+# 10 shared with the kexec path (#1109) plus 5 that fail only after a UEFI-direct boot (#1231).
+# The other four #1231 tests are no longer failures: test_boot_source_matches_stub_marker
+# checks the boot source against the EFI stub's marker, and the three oplib "unstaged"
+# tests skip when the cold bring-up has staged the pool.
 # The two PMM coalescing tests (#1207) fail on kexec only and are not listed here.
 # Format and rules: see known-failures-jetson-1109.txt.
 gpu: capabilities detect valid	#1270
-test_boot_source_default_is_direct	#1231
 test_builtin_commands_grouped_and_sorted	#1269
 test_every_command_has_help_entry	#1268
 test_gpu_get_info_valid	#1270
 test_gpu_jetson_uses_stub_driver	#1270
-test_multiple_cores_isolated	#1272
 test_net_driver_registered	#1273
 test_no_models_means_no_mount	#1231
-test_oplib_pool_get_sass_gpu_va_unstaged_returns_null	#1231
-test_oplib_pool_gpu_va_base_zero_when_unstaged	#1231
-test_oplib_pool_scratch_base_unstaged	#1231
-test_round_robin_distributes_tasks	#1272
 test_session_open_failures	#1231
 test_slm_gpu_run_mnist_returns_negative_off_jetson	#1271
 test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson	#1271
