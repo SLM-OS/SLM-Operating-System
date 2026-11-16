@@ -2272,6 +2272,12 @@ static void test_task_slot_reuse_under_switch(void)
  * blocked on. Each task checks its own CPU's flag after every wake-up. Before the fix the flag of
  * the CPU it moved to read 1 after the first migration, and that CPU
  * stopped taking preemption ticks (#1219 deadlock under WORK_STEALING).
+ *
+ * The CPU id and the flag are read as a pair with local interrupts masked
+ * (#1284): with interrupts open a tick between the two reads could preempt
+ * the task and another CPU could take it, and it would then read the flag
+ * of the CPU it had left, which is 1 by design while that CPU is inside
+ * schedule().
  * ============================================================================ */
 
 static volatile uint32_t pdm_stop;
@@ -2279,6 +2285,19 @@ static volatile uint32_t pdm_bad;
 static volatile uint32_t pdm_moved;
 static volatile uint32_t pdm_runs[2];
 static volatile uint32_t pdm_bad_cpu;
+
+/* Mask every interrupt class that can deliver a tick (FIQ too where the
+ * Pi 5 tick is an FIQ), as schedule() does (ADR 0008 part 1). */
+static inline irq_flags_t pdm_irq_save(void)
+{
+#if defined(PI5_FIQ_TIMER) && !defined(PLATFORM_X86_64)
+    irq_flags_t f;
+    __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(f) :: "memory");
+    return f;
+#else
+    return irq_save();
+#endif
+}
 
 static void pdm_task(void *arg)
 {
@@ -2290,12 +2309,16 @@ static void pdm_task(void *arg)
          * migration while blocked) can put the task on another CPU, so
          * schedule() returns there. */
         task_sleep_ms(1);
+        /* No migration between the two reads (#1284). */
+        irq_flags_t pf = pdm_irq_save();
         uint32_t c = cpu_id();
+        int pd = preempt_disabled[c];
+        irq_restore(pf);
         if (c != last) {
             __atomic_fetch_add(&pdm_moved, 1, __ATOMIC_RELAXED);
             last = c;
         }
-        if (preempt_disabled[c] != 0) {
+        if (pd != 0) {
             if (__atomic_fetch_add(&pdm_bad, 1, __ATOMIC_RELAXED) == 0) {
                 pdm_bad_cpu = c;
             }
