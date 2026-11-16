@@ -962,7 +962,14 @@ static void d1207_report_run(const char *test, uint64_t first, uint64_t last,
     uint64_t pb = g_diag1207_mnist_pushbuf_phys;
     uint64_t a = d1207_base + first * 64u;
     uint64_t b = d1207_base + (last + 1u) * 64u;
-    if (d1207_runs_printed++ >= 60u) {
+    bool free_a = pmm_test_dump_readable((uintptr_t)a);
+    bool free_b = pmm_test_dump_readable((uintptr_t)(b - 64u));
+    /* Changes in allocated, non-zeroed lines are live data (task stacks
+     * and the like): count them, print only free-page or all-zero runs. */
+    if (!free_a && !free_b && !all_zero) {
+        return;
+    }
+    if (d1207_runs_printed++ >= 400u) {
         return;
     }
     const volatile uint64_t *w = (const volatile uint64_t *)(uintptr_t)a;
@@ -973,8 +980,8 @@ static void d1207_report_run(const char *test, uint64_t first, uint64_t last,
                 a >= pb ? "+" : "-", (unsigned long)(a >= pb ? a - pb : pb - a),
                 (unsigned long)(b - pb),
                 all_zero ? "all zero" : "NOT all zero",
-                pmm_test_dump_readable((uintptr_t)a) ? "free" : "not free",
-                pmm_test_dump_readable((uintptr_t)(b - 64u)) ? "free" : "not free",
+                free_a ? "free" : "not free",
+                free_b ? "free" : "not free",
                 (unsigned long)w[0], (unsigned long)w[1],
                 (unsigned long)w[2], (unsigned long)w[3]);
 }
