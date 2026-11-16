@@ -1,0 +1,30 @@
+# image: /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad/b/img/slmos-test-jetson-1207-snapshot-f378d28b.elf
+# head: f378d28b129ee28466888cf77c44902a9417e8f9 (PMM_POISON: per-test scans in test_suite_oplib_gpu_as; GPU page-table lookup of )
+# date: 2026-11-16T22:57:45Z
+sha256: b2508a3bea1c947997c1024962aa1a163a85cc39329400bc48b942de3b969293
+banner: SLM-OS v0.4.0 build 20261116225616 (f378d28b-dirty)
+banner string in ELF:   SLM-OS v0.4.0 build 20261116225616 (f378d28b-dirty)
+--- sections (aarch64-none-elf-size -A)
+.text             2574232   2147483648
+.rodata           7378338   2150057984
+.text.user           4096   2157436928
+.data              148480   2157445120
+.bss             37517040   2157641728
+Total            48739294
+__kernel_end: 0000000082d80000
+--- CMake cache options
+CMAKE_BUILD_TYPE:STRING=Release
+COOP_PREEMPT:BOOL=OFF
+ENABLE_AI_SCHEDULER:BOOL=ON
+JETSON_HW_TICK:BOOL=ON
+OPLIB_BLOB:FILEPATH=
+PLATFORM:STRING=JETSON_ORIN_NANO
+PMM_CHECK:BOOL=OFF
+PMM_POISON:BOOL=ON
+PMM_POISON_PER_TEST_FULL:BOOL=OFF
+PMM_POISON_SNAPSHOT:BOOL=ON
+PMM_UNMAP:BOOL=OFF
+PMM_UNMAP_SELFTEST:BOOL=OFF
+SECONDARY_PREEMPT:BOOL=ON
+TEST_FILTER:STRING=
+operator library embedded: operator_library.bin
