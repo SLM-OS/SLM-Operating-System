@@ -1018,6 +1018,8 @@ struct pmm_pdiff {
     size_t first_line, last_line;
     size_t pages_hit;
     uintptr_t first_page, last_page;
+    size_t snap_lines;          /* changed 64-byte lines in snapshot pages */
+    bool snap_unlocated;        /* a page hash changed, no line checksum did */
 };
 
 /* Write the pattern over [pa, pa + len) through the alias (len a multiple
@@ -1084,6 +1086,182 @@ static bool pmm_p_find_block(uintptr_t a, uintptr_t *blk, unsigned int *order)
     return false;
 }
 
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+/*
+ * PMM_POISON_SNAPSHOT: pages already free when the option arms keep their
+ * contents. On Jetson kexec boots some of them hold state that Linux left
+ * for devices still in use (the inherited GPU channel failed to come up
+ * after they were poisoned: "[GA10B-INHERIT] FECS not ready"). For each
+ * such page arming records a 64-bit hash of bytes 16..4095 and an 8-bit
+ * checksum of each 64-byte line (line 0 from byte 16: the first 16 bytes
+ * of a free page are the PMM's link words whenever it heads a block).
+ * Allocation and the scans compare a snapshot page with its record, so a
+ * change is found and placed to a 64-byte line (a changed line whose
+ * checksum happens to match, 1 in 256, is missed in the placement but not
+ * in the page hash). Allocation drops the record; pages freed after
+ * arming get the pattern. Memory: 72 bytes per heap page, from the PMM at
+ * arming (Jetson: about 1.82 M pages, 16 MB + 128 MB blocks; QEMU 2 MB +
+ * 16 MB); arming reads every free page once through the NC alias.
+ */
+static uint64_t *pmm_snap_hash;     /* per heap page, 0 = no snapshot */
+static uint8_t *pmm_snap_sum;       /* per heap page, 64 line checksums */
+static uintptr_t pmm_snap_hash_pa, pmm_snap_sum_pa;
+static size_t pmm_snap_hash_pages, pmm_snap_sum_pages;
+
+#define PMM_SNAP_K  0x9E3779B97F4A7C15UL
+
+static uint8_t pmm_s_line(const uint64_t *w, unsigned line)
+{
+    uint64_t x = line;
+    for (unsigned k = line == 0 ? 2 : 0; k < 8; k++) {
+        x = (x ^ w[line * 8 + k]) * PMM_SNAP_K;
+    }
+    return (uint8_t)(x >> 56);
+}
+
+/* Hash and line checksums of the page at pa, through the alias. */
+static uint64_t pmm_s_compute(uintptr_t pa, uint8_t sums[64])
+{
+    const uint64_t *w = (const uint64_t *)PMM_VA(pa);
+    uint64_t h = 0x6A09E667F3BCC908UL;
+    for (unsigned k = 2; k < PAGE_SIZE / 8; k++) {
+        h = (h ^ w[k]) * PMM_SNAP_K;
+        h ^= h >> 29;
+    }
+    for (unsigned l = 0; l < 64; l++) {
+        sums[l] = pmm_s_line(w, l);
+    }
+    return h | 1;
+}
+
+static void pmm_s_take(uintptr_t pa, size_t idx)
+{
+    pmm_snap_hash[idx] = pmm_s_compute(pa, &pmm_snap_sum[idx * 64]);
+}
+
+static bool pmm_s_has(size_t idx)
+{
+    return pmm_snap_hash != NULL && pmm_snap_hash[idx] != 0;
+}
+
+static void pmm_s_drop(size_t idx, size_t n)
+{
+    if (pmm_snap_hash != NULL) {
+        for (size_t k = 0; k < n; k++) {
+            pmm_snap_hash[idx + k] = 0;
+        }
+    }
+}
+
+/* Mark line l of the snapshot page at pa (offsets from base) changed. */
+static void pmm_s_mark_line(uintptr_t base, uintptr_t pa, unsigned l,
+                            struct pmm_pdiff *d)
+{
+    const uint64_t *w = (const uint64_t *)PMM_VA(pa);
+    size_t off = (pa - base) + (size_t)l * 64;
+    if (!d->any) {
+        d->any = true;
+        d->first = off;
+        d->first_line = off;
+    }
+    d->last = off + 63;
+    d->last_line = off;
+    d->nbytes += 64;
+    d->snap_lines++;
+    for (unsigned k = l == 0 ? 2 : 0; k < 8; k++) {
+        if (w[l * 8 + k] != 0) {
+            d->nonzero = true;
+        }
+    }
+}
+
+/* Compare the snapshot page at pa with its record: every line (full) or
+ * the first and last line. */
+static void pmm_s_check(uintptr_t base, uintptr_t pa, size_t idx, bool full,
+                        struct pmm_pdiff *d)
+{
+    const uint8_t *rec = &pmm_snap_sum[idx * 64];
+    if (!full) {
+        const uint64_t *w = (const uint64_t *)PMM_VA(pa);
+        if (pmm_s_line(w, 0) != rec[0]) {
+            pmm_s_mark_line(base, pa, 0, d);
+        }
+        if (pmm_s_line(w, 63) != rec[63]) {
+            pmm_s_mark_line(base, pa, 63, d);
+        }
+        return;
+    }
+    uint8_t now[64];
+    if (pmm_s_compute(pa, now) == pmm_snap_hash[idx]) {
+        return;
+    }
+    size_t before = d->snap_lines;
+    for (unsigned l = 0; l < 64; l++) {
+        if (now[l] != rec[l]) {
+            pmm_s_mark_line(base, pa, l, d);
+        }
+    }
+    if (d->snap_lines == before) {
+        /* The hash changed but no checksum did: the whole page. */
+        d->snap_unlocated = true;
+        for (unsigned l = 0; l < 64; l++) {
+            pmm_s_mark_line(base, pa, l, d);
+        }
+    }
+}
+#else
+static bool pmm_s_has(size_t idx)
+{
+    (void)idx;
+    return false;
+}
+#define pmm_s_drop(idx, n)  ((void)0)
+#endif
+
+/*
+ * Check the free page pg (heap index idx) against what it should hold:
+ * the pattern from byte `skip` (16 for a listed head, else 0), or, for a
+ * PMM_POISON_SNAPSHOT page, its arming record. full false: the first and
+ * last 64 bytes only. Adds to *d (offsets from base). True on a change.
+ */
+static bool pmm_p_check_page(uintptr_t base, uintptr_t pg, size_t idx,
+                             size_t skip, bool full, struct pmm_pdiff *d)
+{
+    size_t before = d->nbytes;
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+    if (pmm_s_has(idx)) {
+        pmm_s_check(base, pg, idx, full, d);
+    } else
+#endif
+    if (full) {
+        pmm_p_check(base, pg + skip, PAGE_SIZE - skip, d);
+    } else {
+        pmm_p_check(base, pg + skip, 64 - skip, d);
+        pmm_p_check(base, pg + PAGE_SIZE - 64, 64, d);
+    }
+    if (d->nbytes == before) {
+        return false;
+    }
+    if (d->pages_hit++ == 0) {
+        d->first_page = pg;
+    }
+    d->last_page = pg;
+    return true;
+}
+
+/* After a scan reported it: the pattern again, or a new snapshot. */
+static void pmm_p_restore_page(uintptr_t pg, size_t idx, size_t skip)
+{
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+    if (pmm_s_has(idx)) {
+        pmm_s_take(pg, idx);
+        return;
+    }
+#endif
+    (void)idx;
+    pmm_p_fill(pg + skip, PAGE_SIZE - skip);
+}
+
 /* The MNIST (kind 0) hand-off pushbuf on a Jetson kexec boot, or 0
  * (ga10b_handoff_reserve.c overrides this). #1207's damaged blocks sat
  * 1.0 to 1.2 MB above it, so reports give the offset. */
@@ -1106,6 +1284,10 @@ static void pmm_p_print_ref(uintptr_t first, uintptr_t last)
 /* One 64-byte line through the alias, with what the pattern would be. */
 static void pmm_p_dump_line(const char *label, uintptr_t line)
 {
+    if (pmm_s_has(addr_to_block_index(line & ~(uintptr_t)(PAGE_SIZE - 1)))) {
+        uart_printf("  (%s is in a snapshot page: its content at arming was not "
+                    "kept, only checksums)\n", label);
+    }
     const volatile uint64_t *w = (const volatile uint64_t *)PMM_VA(line);
     uart_printf("  %s 0x%lx: %016lx %016lx %016lx %016lx\n", label,
                 (unsigned long)line, (unsigned long)w[0], (unsigned long)w[1],
@@ -1167,6 +1349,16 @@ static void pmm_p_report(bool scan, const char *where, uintptr_t block,
                     (unsigned long)(d->last - d->first + 1),
                     d->nonzero ? "NOT all zero" : "all zero");
         pmm_p_print_ref(base + d->first, base + d->last);
+        if (d->snap_lines) {
+            uart_printf("  of those, %lu byte(s) are %lu whole 64-byte line(s) of "
+                        "snapshot pages whose checksum changed%s (placed to the "
+                        "line; the bytes they held at arming are not known)\n",
+                        (unsigned long)(d->snap_lines * 64),
+                        (unsigned long)d->snap_lines,
+                        d->snap_unlocated ? ", and a page whose hash changed with no "
+                                            "line checksum changed (whole page counted)"
+                                          : "");
+        }
         uart_printf("  pages hit: %lu (first 0x%lx, last 0x%lx)\n",
                     (unsigned long)d->pages_hit, (unsigned long)d->first_page,
                     (unsigned long)d->last_page);
@@ -1205,17 +1397,11 @@ static void pmm_p_on_alloc(uintptr_t addr, unsigned int order, const char *who)
     struct pmm_pdiff d = {0};
 
     cache_invalidate_range((const void *)PMM_VA(addr), order_to_size(order));
+    size_t idx0 = addr_to_block_index(addr);
     for (size_t p = 0; p < pages; p++) {
-        uintptr_t pg = addr + (p << PAGE_SHIFT);
-        size_t before = d.nbytes;
-        pmm_p_check(addr, pg, PAGE_SIZE, &d);
-        if (d.nbytes != before) {
-            if (d.pages_hit++ == 0) {
-                d.first_page = pg;
-            }
-            d.last_page = pg;
-        }
+        (void)pmm_p_check_page(addr, addr + (p << PAGE_SHIFT), idx0 + p, 0, true, &d);
     }
+    pmm_s_drop(idx0, pages);
     if (d.any) {
         pmm_p_report(false, who, addr, (int)order, addr, &d);
     }
@@ -1240,6 +1426,7 @@ static void pmm_p_on_free(uintptr_t addr, unsigned int order)
     }
 #endif
     cache_invalidate_range((const void *)PMM_VA(addr), size);
+    pmm_s_drop(addr_to_block_index(addr), order_to_pages(order));
     pmm_p_fill(addr, size);
     __asm__ volatile("dsb sy" ::: "memory");
 }
@@ -1253,9 +1440,13 @@ static void pmm_p_unlinked(uintptr_t addr)
     }
 }
 
+/* Tables the options need are taken from the lowest free addresses
+ * (pmm_alloc_pages_low), just above the image, and arming prints where:
+ * on a kexec boot, "free" pages can hold device state Linux left
+ * (PMM_POISON_SNAPSHOT), so the overwritten range should be known. */
 static void *pmm_p_table_page(void)
 {
-    return pmm_alloc_pages(1);
+    return pmm_alloc_pages_low(1);
 }
 
 static void pmm_poison_arm(void)
@@ -1272,6 +1463,23 @@ static void pmm_poison_arm(void)
 #if defined(CONFIG_PMM_UNMAP)
     l3 = vmm_pmm_split_linear(buddy_state.heap_start, buddy_state.heap_end,
                               pmm_p_table_page, &missed);
+#endif
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+    pmm_snap_hash_pages = (buddy_state.total_pages * sizeof(uint64_t) +
+                           PAGE_SIZE - 1) / PAGE_SIZE;
+    pmm_snap_sum_pages = (buddy_state.total_pages * 64 + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t *hash = pmm_alloc_pages_low(pmm_snap_hash_pages);
+    uint8_t *sum = pmm_alloc_pages_low(pmm_snap_sum_pages);
+    if (hash == NULL || sum == NULL) {
+        irq_restore(irq);
+        WARN("PMM_POISON_SNAPSHOT: no memory for the snapshot tables; not armed");
+        return;
+    }
+    for (size_t i = 0; i < buddy_state.total_pages; i++) {
+        hash[i] = 0;
+    }
+    pmm_snap_hash_pa = (uintptr_t)hash;
+    pmm_snap_sum_pa = (uintptr_t)sum;
 #endif
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
@@ -1314,6 +1522,16 @@ static void pmm_poison_arm(void)
         i += n ? n : 1;
     }
     pmm_alias = VMM_PMM_ALIAS_OFFSET;
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+    /* (3) Record every free page; nothing is written to them. */
+    pmm_snap_hash = hash;
+    pmm_snap_sum = sum;
+    for (size_t i = 0; i < buddy_state.total_pages; i++) {
+        if (block_state[i] != BLOCK_ALLOCATED) {
+            pmm_s_take(block_index_to_addr(i), i);
+        }
+    }
+#else
     /* (3) The pattern, except the link words of listed heads. */
     for (size_t i = 0; i < buddy_state.total_pages; i++) {
         uint8_t st = block_state[i];
@@ -1323,6 +1541,7 @@ static void pmm_poison_arm(void)
         size_t skip = (st & BLOCK_FREE_HEAD) ? 2 * sizeof(uint64_t) : 0;
         pmm_p_fill(block_index_to_addr(i) + skip, PAGE_SIZE - skip);
     }
+#endif
     __asm__ volatile("dsb sy" ::: "memory");
 #if defined(CONFIG_PMM_UNMAP)
     pmm_poison_unmap_on = true;
@@ -1337,11 +1556,23 @@ static void pmm_poison_arm(void)
     pmm_pstats.l3_tables = l3;
     pmm_pstats.l3_missed = missed;
     pmm_pstats.arm_ms = pmm_now_ms() - t0;
-    uart_printf("[pmm-poison] armed: %lu free pages poisoned (pattern %016lx | pa), "
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+    pmm_pstats.snapshot = true;
+    uart_printf("[pmm-poison] snapshot mode: the %lu pages free at arming were NOT "
+                "written; each has a page hash and 64 line checksums (tables "
+                "0x%lx +%lu pages and 0x%lx +%lu pages, from the lowest free "
+                "addresses); pages freed from now on get the pattern\n",
+                (unsigned long)free_pages, (unsigned long)pmm_snap_hash_pa,
+                (unsigned long)pmm_snap_hash_pages, (unsigned long)pmm_snap_sum_pa,
+                (unsigned long)pmm_snap_sum_pages);
+#endif
+    uart_printf("[pmm-poison] armed: %lu free pages %s (pattern %016lx | pa), "
                 "alias at PA+0x%lx (Normal NC); unmap %s: %lu L3 tables, %lu "
                 "2 MB blocks not split, %lu free pages unmapped, %lu left mapped; "
                 "%lu ms\n",
-                (unsigned long)free_pages, (unsigned long)PMM_POISON_TAG,
+                (unsigned long)free_pages,
+                pmm_snap_mode() ? "snapshotted" : "poisoned",
+                (unsigned long)PMM_POISON_TAG,
                 (unsigned long)VMM_PMM_ALIAS_OFFSET,
                 pmm_poison_unmap_on ? "on" : "off", (unsigned long)l3,
                 (unsigned long)missed,
@@ -1373,14 +1604,8 @@ unsigned pmm_poison_scan(const char *where, bool full)
             uintptr_t pg = block_index_to_addr(i);
             size_t skip = (st & BLOCK_FREE_HEAD) ? 2 * sizeof(uint64_t) : 0;
             struct pmm_pdiff d = {0};
-            if (full) {
-                pmm_p_check(pg, pg + skip, PAGE_SIZE - skip, &d);
-            } else {
-                pmm_p_check(pg, pg + skip, 64 - skip, &d);
-                pmm_p_check(pg, pg + PAGE_SIZE - 64, 64, &d);
-            }
             checked++;
-            if (!d.any) {
+            if (!pmm_p_check_page(pg, pg, i, skip, full, &d)) {
                 continue;
             }
             /* Damage: check and report the whole free block holding the
@@ -1391,23 +1616,16 @@ unsigned pmm_poison_scan(const char *where, bool full)
             bool have = pmm_p_find_block(pg, &blk, &bo);
             size_t npages = have ? order_to_pages(bo) : 1;
             struct pmm_pdiff bd = {0};
+            size_t bidx = addr_to_block_index(blk);
             for (size_t p = 0; p < npages; p++) {
-                uintptr_t bp = blk + (p << PAGE_SHIFT);
                 size_t bskip = p == 0 && have ? 2 * sizeof(uint64_t) : skip;
-                size_t before = bd.nbytes;
-                pmm_p_check(blk, bp + bskip, PAGE_SIZE - bskip, &bd);
-                if (bd.nbytes != before) {
-                    if (bd.pages_hit++ == 0) {
-                        bd.first_page = bp;
-                    }
-                    bd.last_page = bp;
-                }
+                (void)pmm_p_check_page(blk, blk + (p << PAGE_SHIFT), bidx + p,
+                                       bskip, true, &bd);
             }
             pmm_p_report(true, where, blk, have ? (int)bo : -1, blk, &bd);
             for (size_t p = 0; p < npages; p++) {
-                uintptr_t bp = blk + (p << PAGE_SHIFT);
                 size_t bskip = p == 0 && have ? 2 * sizeof(uint64_t) : skip;
-                pmm_p_fill(bp + bskip, PAGE_SIZE - bskip);
+                pmm_p_restore_page(blk + (p << PAGE_SHIFT), bidx + p, bskip);
             }
             found++;
             /* Skip the rest of the block in this chunk; pages past the
@@ -1436,6 +1654,28 @@ unsigned pmm_poison_scan(const char *where, bool full)
                 "finding(s), %lu ms\n", where, full ? "full" : "first+last 64 B",
                 (unsigned long)checked, found, bad, (unsigned long)ms);
     return bad + found;
+}
+
+bool pmm_snap_mode(void)
+{
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+    return true;
+#else
+    return false;
+#endif
+}
+
+uintptr_t pmm_poison_find_snapshot_page(void)
+{
+    uintptr_t found = 0;
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    for (size_t i = 0; i < buddy_state.total_pages && found == 0; i++) {
+        if (block_state[i] == BLOCK_FREE && pmm_s_has(i)) {
+            found = block_index_to_addr(i);
+        }
+    }
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return found;
 }
 
 void pmm_poison_get_stats(struct pmm_poison_stats *out)

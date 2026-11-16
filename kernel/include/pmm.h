@@ -295,7 +295,7 @@ unsigned pmm_check_walk(const char *where);
  */
 #if defined(CONFIG_PMM_POISON)
 struct pmm_poison_stats {
-    bool armed, unmap;
+    bool armed, unmap, snapshot;
     unsigned alloc_findings;    /* allocation checks that found damage */
     unsigned scan_findings;     /* damaged free pages found by scans */
     unsigned injected;          /* findings the tests caused on purpose */
@@ -335,6 +335,10 @@ void pmm_poison_describe_fault(uint64_t far);
 uintptr_t pmm_poison_alias_of(uintptr_t pa);
 int pmm_poison_identity_state(uintptr_t pa);
 void pmm_poison_note_injected(unsigned n);
+/* PMM_POISON_SNAPSHOT: true in that mode; a free page (not a listed head)
+ * that still has its arming snapshot, or 0. */
+bool pmm_snap_mode(void);
+uintptr_t pmm_poison_find_snapshot_page(void);
 #if defined(CONFIG_PMM_UNMAP_SELFTEST)
 void pmm_unmap_selftest(void);
 #endif

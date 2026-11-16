@@ -328,6 +328,88 @@ static void test_poison_scan_reports_whole_block_extent(void)
     pmm_free_pages(b, 4);
 }
 
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+/* Snapshot mode leaves the pages free at arming as they were: one of them
+ * does not hold the pattern. */
+static void test_snapshot_keeps_pages_free_at_arming(void)
+{
+    struct pmm_poison_stats ps;
+    pmm_poison_get_stats(&ps);
+    TEST_ASSERT_TRUE(ps.snapshot);
+    TEST_ASSERT_TRUE(pmm_snap_mode());
+    uintptr_t pa = pmm_poison_find_snapshot_page();
+    TEST_ASSERT_TRUE(pa != 0);
+    const volatile uint64_t *a = (const volatile uint64_t *)pmm_poison_alias_of(pa);
+    size_t pattern_words = 0;
+    for (size_t i = 2; i < PAGE_SIZE / 8; i++) {
+        if (a[i] == (POISON_TAG | (uint64_t)(pa + i * 8))) {
+            pattern_words++;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT(0, pattern_words);
+}
+
+/*
+ * A raw write into a page that still has its arming snapshot (standing in
+ * for a device left running by Linux) is found by the full scan and placed
+ * to its two 64-byte lines; the page is then recorded again, so the next
+ * scan is clean. The page's content is left as written.
+ */
+static void test_snapshot_scan_places_change_to_lines(void)
+{
+    struct pmm_poison_stats before, after;
+    struct pmm_poison_report rep;
+    uintptr_t pa = pmm_poison_find_snapshot_page();
+    TEST_ASSERT_TRUE(pa != 0);
+    pmm_poison_get_stats(&before);
+    volatile uint64_t *a = (volatile uint64_t *)pmm_poison_alias_of(pa);
+    uint64_t old5 = a[5 * 8 + 3], old6 = a[6 * 8 + 1];
+    a[5 * 8 + 3] = old5 ^ 0x00007ffffa016100UL;
+    a[6 * 8 + 1] = old6 ^ 0x0800000014300000UL;
+    barrier_sy();
+    pmm_poison_note_injected(1);
+
+    (void)pmm_poison_scan("test_snapshot_scan_places_change_to_lines", true);
+    pmm_poison_get_stats(&after);
+    TEST_ASSERT_EQUAL_UINT(before.scan_findings + 1, after.scan_findings);
+    pmm_poison_last_report(&rep);
+    TEST_ASSERT_TRUE(rep.scan);
+    TEST_ASSERT_TRUE(rep.block <= pa);
+    TEST_ASSERT_EQUAL_UINT((pa - rep.block) + 5 * 64, rep.first);
+    TEST_ASSERT_EQUAL_UINT((pa - rep.block) + 7 * 64 - 1, rep.last);
+    TEST_ASSERT_EQUAL_UINT(128, rep.nbytes);
+    TEST_ASSERT_FALSE(rep.all_zero);
+    TEST_ASSERT_EQUAL_UINT(1, rep.pages_hit);
+    TEST_ASSERT_EQUAL_HEX64(pa, rep.first_page);
+    /* Recorded again: clean, and the write is still there. */
+    (void)pmm_poison_scan("test_snapshot_scan_places_change_to_lines (again)", true);
+    pmm_poison_get_stats(&before);
+    TEST_ASSERT_EQUAL_UINT(after.scan_findings, before.scan_findings);
+    TEST_ASSERT_EQUAL_HEX64(old5 ^ 0x00007ffffa016100UL, a[5 * 8 + 3]);
+}
+
+/* The cheap scan checks a snapshot page's first and last line: flipping
+ * the bits of the last word is found and placed to the last line. */
+static void test_snapshot_edge_scan_checks_last_line(void)
+{
+    struct pmm_poison_stats before, after;
+    struct pmm_poison_report rep;
+    uintptr_t pa = pmm_poison_find_snapshot_page();
+    TEST_ASSERT_TRUE(pa != 0);
+    volatile uint64_t *a = (volatile uint64_t *)pmm_poison_alias_of(pa);
+    pmm_poison_get_stats(&before);
+    a[63 * 8 + 7] = ~a[63 * 8 + 7];
+    barrier_sy();
+    pmm_poison_note_injected(1);
+    (void)pmm_poison_scan("test_snapshot_edge_scan_checks_last_line", false);
+    pmm_poison_get_stats(&after);
+    TEST_ASSERT_EQUAL_UINT(before.scan_findings + 1, after.scan_findings);
+    pmm_poison_last_report(&rep);
+    TEST_ASSERT_EQUAL_UINT((pa - rep.block) + 63 * 64, rep.first);
+    TEST_ASSERT_EQUAL_UINT((pa - rep.block) + PAGE_SIZE - 1, rep.last);
+}
+#endif
+
 #if defined(CONFIG_PMM_UNMAP)
 static void *split_table_page(void)
 {
@@ -445,6 +527,11 @@ int test_suite_pmm_poison(void)
     POISON_TEST(test_poison_scan_reports_raw_write);
     POISON_TEST(test_poison_edge_scan_reports_write_near_start);
     POISON_TEST(test_poison_scan_reports_whole_block_extent);
+#if defined(CONFIG_PMM_POISON_SNAPSHOT)
+    POISON_TEST(test_snapshot_keeps_pages_free_at_arming);
+    POISON_TEST(test_snapshot_scan_places_change_to_lines);
+    POISON_TEST(test_snapshot_edge_scan_checks_last_line);
+#endif
 #if defined(CONFIG_PMM_UNMAP)
     POISON_TEST(test_unmap_block_round_trip);
     POISON_TEST(test_unmap_split_l1_block_above_4gb);

@@ -41,7 +41,7 @@
  * instead: an order-11 block, naturally 8 MB aligned, allocated at the
  * start of test_suite_vmm and freed at its end.
  */
-static uint64_t vmm_test_region;
+static uint64_t vmm_test_region;    /* 8 MB, 8 MB aligned, below 4 GB */
 #define TEST_VA     (vmm_test_region)
 #define TEST_PA1    (vmm_test_region)
 #define TEST_PA2    (vmm_test_region + 0x200000)
@@ -1346,7 +1346,10 @@ int test_suite_vmm(void)
 {
     UnityBegin("VMM/TLB Functional Tests");
 #if defined(CONFIG_PMM_POISON)
-    vmm_test_region = (uint64_t)(uintptr_t)pmm_alloc_pages(2048);
+    /* Lowest free addresses: on Jetson these are below 4 GB, where RAM is
+     * mapped through L2 tables as test_l1_block_mapping_detection expects
+     * (above 4 GB it is 1 GB L1 blocks). */
+    vmm_test_region = (uint64_t)(uintptr_t)pmm_alloc_pages_low(2048);
     if (vmm_test_region == 0) {
         uart_puts("  test_suite_vmm: no 8 MB block for the remap tests\n");
         return UnityEnd();
