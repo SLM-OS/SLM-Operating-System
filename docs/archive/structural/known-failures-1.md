@@ -676,3 +676,181 @@ Opus. Critics stay on Fable: each critic is spawned with the model set to
 fable, as its brief says. If a critic hits a Fable usage limit, it is paused
 and the user is told; it is not switched to Opus. The blind critic in section 9
 ran on Fable, before this change.
+
+## 15. #1285 rebased, checked and merged; two follow-up issues (2026-11-16)
+
+On the user's instruction, after #1266 merged (b435a19f, 11:14:58Z).
+
+- **Rebase.** #1285 (`fix/percpu-cacheline`) was stacked on #1266's head ae1399ba.
+  Its nine commits (c0612fa7..87061023) were replayed onto `main` b435a19f with
+  `git rebase --onto origin/main ae1399ba`. There was one conflict, in
+  `kernel/tests/test_scheduler.c`: `main` had #1266's two-worker
+  `test_preempt_flag_follows_migrated_task` with the #1284 masked read. It was
+  resolved by keeping #1285's three-worker test with its own masked read: at
+  c0612fa7 by applying the masked pair to the padded cell (`preempt_disabled[c].v`),
+  at 5c4bcdda by taking that commit's file. Check: the rebased branch differs
+  from 87061023 by exactly `main`'s changes since ae1399ba, file for file and
+  line for line (ignoring hunk offsets), and its `test_scheduler.c` equals
+  87061023's.
+- **Ledger.** `docs/perf/context-switch.md`, row `#1263 (#1285)`: "Accepted by the
+  user (2026-11-16)" (68e862fe). The PR body says the same, and its "stacked on
+  #1266" paragraph was replaced by the rebase record (old and new commit ids).
+- **`/ci` at 68e862fe:** every step passed.
+  - ARM64, x86-64 and Jetson real-weights builds (only the existing Lua and
+    `lua_slm.c` warnings and two linker notes).
+  - `make test` ARM64, x86-64 and `AI_SCHED=ON`: PASSED.
+  - Runtime host tests: 308 and 328 passed.
+  - Braces: 0 violations, all twelve configurations parsed.
+  - Build order: passed. Jetson layout: passed, no `!` line. `test-qemu-uefi`: PASS.
+  - Diff: no build artifacts.
+- **jetson-nano-2 UEFI-direct, one boot,
+  `TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=1000`**
+  (bin d28ebce0, banner 68e862fe, captured from MB1): 1000 of 1000 passed, and all
+  4000 `pdm` lines (`pdm`, `pdm_a`, `pdm_b`, `pdm_c`) read `bad=0`. The ESP image
+  was kept in `/root` on the board's SD Linux and copied back after the boot.
+  Board end state: SD Linux, ESP `SLMOS.efi` 789cba62 (fsck 6 files,
+  2196/130892 clusters), `/root/slmos.elf` 098f3163; identical to the
+  pre-state apart from the read time.
+- **Merged.** #1285 was squash-merged as e1441e8d (11:52:47Z), with the PR body as
+  the message. The report-only build matrix (#1251) was still pending and does
+  not gate. #1263 closed (completed, 11:52:49Z). #1284 stays open.
+- **Filed (Backlog, `origin:review`, `kind:gap`):**
+  - #1287 (P3): land `PD_WITNESS` on `main` with a wrong-CPU-set mutation run.
+  - #1288 (P2): the padded layout's wake-placement skew (Entries 50 and 52 to
+    53 of `switch-5.md`). The text takes the corrected figures from
+    `docs/scheduler.md`: at most about 2 times more steals per wake-up, and the
+    two archived pre-#1234 `moved=0` boots had CPUs 4 and 5 halted.
+
+## 16. Phase 2 of the #1109 end state (2026-11-16)
+
+Base: `main` e1441e8d (after #1265, #1283, #1266, #1285). Branch
+`tests/known-failures-issues`, rebased onto it and pushed (2ccf4d20). PR #1282
+is updated and marked ready. It closes #1274, #1272 and #1281, and nothing
+merges. Lab work started after `list_claims` showed no claims. The boards were
+used one at a time: pi-5-1 from 12:13 to 12:41 UTC, jetson-nano-2 from 12:41
+to 14:10 UTC. Single-agent session on Opus; no critic was used.
+
+### 16.1 Changes (13.1 to 13.4, as specified, with these differences)
+
+- **13.1 #1274:** as written: `boot_media_test_set_no_device()`, set around
+  `test_suite_blob_autoload()`, plus the counting-hook test. The switch is not
+  suite-wide in the harness. QEMU's `make test` attaches a scratch SD card, and
+  the kernel admin (`kernel stage`/`promote`) tests reach it through the normal
+  boot-media path.
+- **13.2 #1272:** as written. In addition, two state checks
+  (`test_isolation_test_left_state_clean`, `test_round_robin_left_state_clean`)
+  run right after the two tests: no CPU isolated, IRQs unmasked, and no task of
+  the test's name left in `task_slot()`.
+- **13.3:** done as the user decided: a consistency check, not a skip.
+  `slmos_efi_stub_marker` is defined in `efi_stub.c`. The test is renamed
+  `test_boot_source_matches_stub_marker`, because "default is direct" is
+  wrong on a UEFI boot.
+- **13.4:** as written. The two state-independent checks in
+  `test_oplib_pool_scratch_base_unstaged` also run before the skip.
+- **#1281**, fixed with the skips: `oplib_pool_test_save_state()` /
+  `_restore_state()`, saved and restored around `test_suite_oplib_gpu_as`, plus
+  the check `test_suite_restored_boot_staging`.
+
+Commits: 3d56c44c (#1274), 0caf57ed (#1272), 0a4693f9 (#1231 and #1281), 2ccf4d20
+(lists and `docs/testing.md` after the hardware rows).
+
+### 16.2 QEMU
+
+- **Before row for #1274:** the new test, with the suite switch not yet added,
+  failed: `create calls=4`.
+- **`make test` at 0a4693f9:** PASSED, with every new and changed test `[PASS]`.
+- **Mutation runs** (temporary edits, reverted from HEAD; each run's diff, make
+  output and serial log are kept in the scratch evidence):
+  - m1, new #1272 code with the assert forced to fail: the test FAILs and the
+    state check PASSes.
+  - m2, `main`'s old test with the same forced failure: the test FAILs and the
+    state check FAILs (isolation leaked).
+  - m3, round-robin forced to fail: the test FAILs and its state check PASSes.
+  - m4, stray `slmos_boot_source = UEFI`: the consistency check FAILs.
+  - m5, stray marker: FAILs.
+  - m6, UEFI boot source with no staged pool: the three oplib tests run and
+    PASS, not IGNORE.
+- **`/ci` at 0a4693f9:** every step passed. Step 5 (`make test AI_SCHED=ON`)
+  failed once on `test_litmus_patterns_pass` (#1230, `test_coherency.c:594`)
+  and passed on the rerun from step 5.
+
+### 16.3 Hardware rows (test kernels at 0a4693f9)
+
+Images: Pi 5 bin 22ac3658, Jetson suite bin 8f9c62ee / elf 13ef33c3, Jetson
+filtered bin 9dbd25ba / elf 3fe474b8.
+
+| Path | Before (close-out, 6a4cfa93) | After | Unlisted |
+|---|---|---|---|
+| Pi 5, 5 full boots | 18 (3 in the boot where the card did not probe) | 3 in each | none |
+| Jetson kexec, 3 boots | 14 | 10, 11, 10 | `test_slm_uptime_us` in boot 1 (#1124, now listed) |
+| Jetson UEFI-direct, 3 boots | 21 | 15, 15, 15 | none |
+
+- **Pi 5:**
+  - Captures come from `boot_test` with `output_dir` under
+    `/var/lib/labctl/output/triage-0a4693f9-pi5-full0N/`. That is the only
+    writable path; an output directory in the scratchpad was refused.
+  - A first boot with the pattern `slmos>` matched after 11.8 s, on a shell test
+    inside the suite. Its remainder was captured separately as a partial, not
+    counted (3 failures, the same as the full boots).
+  - In every boot the card probed once, in the kernel admin suite
+    (`test_status_runs_without_card_or_stage`), never inside the blob_autoload
+    suite. That test passed with the card unavailable in close-out boot 04.
+- **Jetson:**
+  - Kexec through a separate `/root/slmos-triage.elf` (the board's
+    `/root/slmos.elf` was not touched), each boot after a power cycle to SD
+    Linux.
+  - UEFI-direct: the board's `SLMOS.efi` was kept in `/root` on the SD Linux
+    and put back at the end; the staged hash was checked from a fresh read-only
+    mount before each BootNext. Captures run from MB1 to the end of the suite.
+  - In all 6 suite boots the #1272 tests and their state checks pass.
+    `test_boot_source_matches_stub_marker` passes ("Boot source: UEFI-direct"
+    on UEFI-direct, "direct load" on kexec). `test_suite_restored_boot_staging`
+    passes.
+  - On UEFI-direct the three oplib tests skip with the reason. On kexec they run
+    and pass.
+- **#1272 with the #1238 migration test**
+  (`TEST_FILTER=test_preempt_flag_follows_migrated_task,test_multiple_cores_isolated,test_isolation_test_left_state_clean TEST_REPEAT=200`):
+  - Each pass runs the three tests in that order, so from pass 2 on the
+    migration test runs right after the isolation test.
+  - UEFI-direct: 200 of 200 for each test; all 800 `pdm` lines `bad=0`.
+  - Kexec: the same.
+- **List changes from these rows:**
+  - #1207 (kexec): its two tests passed in 3 of 3 boots since #1283. Their lines
+    come off; #1207 stays open for the halts.
+  - #1275 (Pi 5): passed in 5 of 5 boots. Its lines come off; #1275 stays open
+    for the selftest's isolation (comment 6918123904).
+  - #1124: `test_slm_uptime_us` is listed on both Jetson lists. Kexec boot 1 ran
+    about 3220 s after power-on, in the negative half of the 2^32 µs wrap that
+    #1124's comment of 2026-11-06 traced to `LUA_32BITS`. Comment 6918122933.
+
+### 16.4 `0:/slmstore/` on pi-5-1
+
+- **Method:** records come from this session's own labctl results
+  (`sdwire_ls` recursive, `sdwire_cat` base64), parsed out of the transcript by
+  a script adapted from run 5's `A-slmstore-record.py.txt`.
+- **Full records** (listing plus sha256 of the 4 non-empty small files, plus the
+  2 empty ones): before suite boot 1, after the partial boot 1, after full boot
+  1, after full boot 5.
+- **Listings only:** after full boots 2, 3 and 4. #1274's fix was in the image
+  from the first boot, which ends the user's per-boot requirement.
+- **Result:** every record is identical to the first. The 4 hashes equal run 5's.
+  Nothing was restored.
+- **Limit:** `files.lfs` (8388608 B) and `files.lfs.delta` (6209568 B) are
+  recorded by size and mtime only. labctl `sdwire_cat` has no offset or length
+  argument, so "first and last 4 KB" cannot be read through labctl, and reading
+  either file whole was excluded. This is a labctl gap; nothing was worked
+  around.
+
+### 16.5 End state
+
+- pi-5-1: original `kernel_2712.img` (6935256 B, mtime 2026-10-29T04:54:04Z)
+  back, no `.prev` left, restore-check boot banner b42b2c1d, powered on as
+  found. The staged image `pi5-triage-0a4693f9-suite.img` is removed from
+  `/var/lib/labctl/images`.
+- jetson-nano-2: SD Linux. ESP `SLMOS.efi` 789cba62 (fsck 6 files,
+  2196/130892 clusters), `/root/slmos.elf` 098f3163, 14 `*.elf*`, nothing of the
+  session in `/tmp` or `/root`. The pre/post records differ only in their read
+  time.
+- Both boards released. No QEMU or build process of this session running.
+- Not done: a Pi 5 boot in which the card failed to probe (none occurred); a
+  critic pass on the PR.
