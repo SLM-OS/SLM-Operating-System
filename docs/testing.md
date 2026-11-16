@@ -484,8 +484,12 @@ stale pointer. The design and the cache argument are in the comment
   ```
 
   `pmm_poison_scan(where, full)` is the free-list walk plus a check of
-  every free page (`full`) or of the first and last 64 bytes of each; a
-  reported page gets the pattern back. Reports do not stop the kernel; 16
+  every free page (`full`) or of the first and last 64 bytes of each. A
+  damaged page makes the scan check the whole free block holding it and
+  report it once, with the first and last differing offset across the
+  block, the PA range, the extent and the pages hit (on a Jetson kexec boot
+  also the offset from the MNIST hand-off pushbuf); the block then gets the
+  pattern back. Reports do not stop the kernel; 16
   are printed in full, 240 more in one line, the rest counted.
 - `PMM_UNMAP`: a free page also has no linear-map entry, so a CPU access
   faults, and the fault dump adds a line such as
@@ -511,7 +515,7 @@ pages, standing in for DMA, and checks the allocation and scan reports;
 the end of the run prints
 
 ```
-[pmm-poison] summary: armed 1, unmap 1; 1 allocation finding(s), 2 scan finding(s), 3 injected by tests, UNEXPECTED 0; 50 scans, longest 573 ms; 1 list finding(s)
+[pmm-poison] summary: armed 1, unmap 1; 1 allocation finding(s), 3 scan finding(s), 4 injected by tests, UNEXPECTED 0; 52 scans, longest 573 ms; 1 list finding(s)
 ```
 
 where UNEXPECTED counts findings no test caused (the one list finding is
@@ -519,12 +523,12 @@ where UNEXPECTED counts findings no test caused (the one list finding is
 
 **Cost.** QEMU (1 GB, TCG): arming 2.2 s; a full scan of about 145,000
 free pages (570 MB) about 0.5 s, the 64-byte-edges scan about 0.13 s;
-`make test` about 109 s including the build. Jetson (about 6.7 GB free) is
+the QEMU run of `make test` 99 s with both options on. Jetson (about 6.7 GB free) is
 an estimate until a board prints its own `scan ... ms` lines: reads
 through the Non-cacheable alias are not prefetched, so a full scan is
 bound by uncached read bandwidth, assumed 0.5 to 2 GB/s, giving 3 to 15 s;
 an edges scan reads 3.5 million lines, assumed 0.3 to 1.2 s. With three
-full scans, 46 edge scans in `test_suite_gpu`, arming (clean and fill of
+full scans, 44 edge scans in `test_suite_gpu`, arming (clean and fill of
 all free memory, 2 to 5 s) and the allocation checks (the exhaustion test
 reads all free memory once), the suite is estimated to take 0.5 to 2.5
 minutes longer. Frees write their block with IRQs masked under `pmm_lock`
