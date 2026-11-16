@@ -1,0 +1,55 @@
+# /ci step 11 (diff) at d09b063b in /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Lab-Session-1263/.wt/a; 2026-11-15T14:38:07Z; load 1.52 1.85 1.60
+# command: git diff origin/main...HEAD --stat   (nolock)
+# exit code: 0
+# ---- output (last 400 lines) ----
+ CMakeLists.txt                    |  26 ++
+ Makefile                          |   3 +
+ docs/adr/0008-switch-in-window.md | 575 ++++++++++++++++++++++++++++
+ docs/adr/README.md                |   7 +-
+ docs/architecture.md              |  28 +-
+ docs/perf/context-switch.md       | 109 ++++++
+ docs/pi5-baremetal-status.md      |   4 +-
+ docs/scheduler.md                 | 199 +++++++++-
+ docs/shell.md                     |   2 +-
+ docs/smp.md                       |   2 +-
+ docs/testing.md                   |   2 +-
+ docs/work-stealing-bench.md       |   2 +-
+ kernel/CLAUDE.md                  |  14 +-
+ kernel/arch/arm64/pmu.c           |  26 +-
+ kernel/arch/arm64/vectors.S       |  22 +-
+ kernel/arch/x86_64/platform_x86.c |   7 +-
+ kernel/arch/x86_64/x86_smp.h      |   6 +
+ kernel/gpu/cache.c                |  10 +-
+ kernel/include/admin_telemetry.h  |   4 +-
+ kernel/include/cache.h            |   4 +-
+ kernel/include/cacheline.h        |  73 ++++
+ kernel/include/cpu_supervisor.h   |   2 +-
+ kernel/include/percpu_layout.h    |  38 ++
+ kernel/include/preempt.h          |   9 +-
+ kernel/include/sched.h            |  79 +++-
+ kernel/include/sched_diag.h       |  49 ++-
+ kernel/include/slot_trace.h       |   7 +-
+ kernel/include/spinlock.h         |  46 ++-
+ kernel/include/steal_deque.h      |   4 +-
+ kernel/include/switch_check.h     |  78 ++++
+ kernel/sched/cpu_supervisor.c     |  12 +-
+ kernel/sched/preempt.c            |  36 +-
+ kernel/sched/sched.c              | 787 +++++++++++++++++++++++++++++++++-----
+ kernel/sched/slot_trace.c         |  47 ++-
+ kernel/sched/steal_trace.h        |   4 +-
+ kernel/sched/switch_check.c       | 173 +++++++++
+ kernel/sched/task.c               |  21 +-
+ kernel/src/admin_telemetry.c      |  43 +--
+ kernel/src/lua_slm.c              |   4 +-
+ kernel/src/main.c                 |   2 +-
+ kernel/src/shell_sys.c            |  83 ++--
+ kernel/tests/test_harness.c       |   2 +
+ kernel/tests/test_harness.h       |   1 +
+ kernel/tests/test_integration.c   |  40 +-
+ kernel/tests/test_mpidr_lookup.c  |   2 +-
+ kernel/tests/test_nc_axis.c       |  15 +-
+ kernel/tests/test_percpu_layout.c | 300 +++++++++++++++
+ kernel/tests/test_scheduler.c     | 675 ++++++++++++++++++++++++++++++--
+ kernel/tests/test_x86_boot.c      |  34 +-
+ scripts/check-build-signatures.sh |   2 +-
+ 50 files changed, 3308 insertions(+), 412 deletions(-)

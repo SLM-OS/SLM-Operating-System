@@ -1,0 +1,47 @@
+A-uefi-pdmdiag-P-6247f73a-x200-boot01.txt | build 20261115135009 (6247f73a) | Boot source: UEFI
+   pdm lines 200 | [ITER] PASS 169 | [ITER] FAIL 31 | [FILTER] [FAIL] test_preempt_flag_follows_migrated_task: runs=200 passed=169 failed=31 ignored=0 us min=30398 avg=208384 max=1031319
+   moved=0: 31 | moved<5: 33 | bad!=0: 0 | halts: 0
+   moved distribution: 31 x moved=0; 2 x moved=2; 3 x moved=6; 91 x moved=7; 73 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 163; 26-50: 1; 51-99: 3; 100+: 33; 
+   steals: total 6954 over 200 iterations, iterations with steals=0: 0
+   wake-ups per CPU, worker a: cpu0=0 cpu1=6 cpu2=2 cpu3=3843 cpu4=60 cpu5=272  | worker b: cpu0=0 cpu1=0 cpu2=1 cpu3=3814 cpu4=219 cpu5=107 
+A-uefi-pdmdiag-P-6247f73a-x200-boot02.txt | build 20261115135009 (6247f73a) | Boot source: UEFI
+   pdm lines 200 | [ITER] PASS 197 | [ITER] FAIL 3 | [FILTER] [FAIL] test_preempt_flag_follows_migrated_task: runs=200 passed=197 failed=3 ignored=0 us min=30615 avg=155378 max=1031253
+   moved=0: 3 | moved<5: 20 | bad!=0: 0 | halts: 0
+   moved distribution: 3 x moved=0; 8 x moved=2; 9 x moved=4; 6 x moved=6; 174 x moved=7; 
+   runs (larger of a/b) bands: 1-5: 173; 26-50: 1; 51-99: 6; 100+: 20; 
+   steals: total 4974 over 200 iterations, iterations with steals=0: 0
+   wake-ups per CPU, worker a: cpu0=0 cpu1=28 cpu2=2800 cpu3=9 cpu4=344 cpu5=11  | worker b: cpu0=0 cpu1=12 cpu2=2732 cpu3=0 cpu4=336 cpu5=0 
+A-uefi-pdmdiag-P-6247f73a-x200-boot03.txt | build 20261115135009 (6247f73a) | Boot source: UEFI
+   pdm lines 200 | [ITER] PASS 171 | [ITER] FAIL 29 | [FILTER] [FAIL] test_preempt_flag_follows_migrated_task: runs=200 passed=171 failed=29 ignored=0 us min=31178 avg=182113 max=1031353
+   moved=0: 29 | moved<5: 30 | bad!=0: 0 | halts: 0
+   moved distribution: 29 x moved=0; 1 x moved=2; 6 x moved=6; 164 x moved=7; 
+   runs (larger of a/b) bands: 1-5: 169; 11-25: 1; 100+: 30; 
+   steals: total 6181 over 200 iterations, iterations with steals=0: 0
+   wake-ups per CPU, worker a: cpu0=0 cpu1=0 cpu2=0 cpu3=0 cpu4=3263 cpu5=339  | worker b: cpu0=0 cpu1=0 cpu2=0 cpu3=0 cpu4=3293 cpu5=335 
+A-uefi-pdmdiag-U-6439476f-x200-boot01.txt | build 20261115135007 (6439476f) | Boot source: UEFI
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=24244 avg=57256 max=301509
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 13 x moved=5; 69 x moved=6; 101 x moved=7; 17 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 160; 6-10: 31; 11-25: 8; 26-50: 1; 
+   steals: total 1489 over 200 iterations, iterations with steals=0: 1
+   wake-ups per CPU, worker a: cpu0=0 cpu1=191 cpu2=31 cpu3=499 cpu4=109 cpu5=173  | worker b: cpu0=0 cpu1=191 cpu2=39 cpu3=448 cpu4=133 cpu5=153 
+A-uefi-pdmdiag-U-6439476f-x200-boot02.txt | build 20261115135007 (6439476f) | Boot source: UEFI
+   pdm lines 200 | [ITER] PASS 199 | [ITER] FAIL 1 | [FILTER] [FAIL] test_preempt_flag_follows_migrated_task: runs=200 passed=199 failed=1 ignored=0 us min=28563 avg=60884 max=332886
+   moved=0: 0 | moved<5: 0 | bad!=0: 1 | halts: 0
+   moved distribution: 13 x moved=5; 52 x moved=6; 126 x moved=7; 9 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 150; 6-10: 34; 11-25: 14; 26-50: 2; 
+   steals: total 1515 over 200 iterations, iterations with steals=0: 0
+   wake-ups per CPU, worker a: cpu0=0 cpu1=119 cpu2=82 cpu3=560 cpu4=173 cpu5=159  | worker b: cpu0=0 cpu1=94 cpu2=108 cpu3=529 cpu4=201 cpu5=139 
+A-uefi-pdmdiag-U-6439476f-x200-boot03.txt | build 20261115135007 (6439476f) | Boot source: UEFI
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=28508 avg=54398 max=121648
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 18 x moved=5; 61 x moved=6; 114 x moved=7; 7 x moved=8; 
+   runs (larger of a/b) bands: 1-5: 160; 6-10: 39; 11-25: 1; 
+   steals: total 1170 over 200 iterations, iterations with steals=0: 1
+   wake-ups per CPU, worker a: cpu0=0 cpu1=342 cpu2=274 cpu3=31 cpu4=93 cpu5=199  | worker b: cpu0=0 cpu1=310 cpu2=277 cpu3=24 cpu4=91 cpu5=197 
+A-uefi-pdmnew-d09b063b-x200-boot01.txt | build 20261115141549 (d09b063b) | Boot source: UEFI
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=61293 avg=61371 max=65837
+   moved=0: 0 | moved<5: 0 | bad!=0: 0 | halts: 0
+   moved distribution: 200 x moved=6; 
+   runs (larger of a/b) bands: 6-10: 200; 

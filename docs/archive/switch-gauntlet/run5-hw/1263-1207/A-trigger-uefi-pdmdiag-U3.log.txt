@@ -1,0 +1,4 @@
+00:11:15 start mode=uefistage n=1 elfs=[] skip_current_boot_id=none pid=2155479
+00:12:42 stage: 23:54:26 staged SLMOS.efi sha256=86384001fae8 (fresh ro mount verified); /dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2500/130892 clusters; no BootNext 
+00:12:42 trigger 1/1 elf=ESP:86384001fae8 boot_id=c792365d-69e2-497e-a20b-abc97ce51f31 state+uptime=[running 23.45 ] reply=[BootNext: 000E ]
+00:12:42 end triggers=1
