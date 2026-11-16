@@ -33,7 +33,10 @@ for line in open(T, encoding='utf-8', errors='replace'):
                 continue
             if not isinstance(r, dict) or r.get('sbc_name') != 'pi-5-1':
                 continue
-            ts = o.get('timestamp', '?')
+            # The tool result itself carries no time; the transcript entry may. Without one, the
+            # record states when it was written: it is always written right after the reads.
+            ts = o.get('timestamp') or ('no timestamp in the transcript entry; record written right after, at '
+                                        + datetime.datetime.now(datetime.timezone.utc).strftime('%FT%TZ'))
             if r.get('path') == '/slmstore' and 'entries' in r:
                 ls = (ts, r)
             elif 'content' in r and r.get('encoding') == 'base64' and str(r.get('path', '')).startswith('/slmstore/'):

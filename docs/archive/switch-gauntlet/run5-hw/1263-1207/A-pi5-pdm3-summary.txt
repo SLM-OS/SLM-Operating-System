@@ -1,0 +1,7 @@
+A-pi5-pdm3-c3ce3885-x200-boot01.txt | build 20261116013644 (c3ce3885) | Boot source: direct load
+   pdm lines 200 | [ITER] PASS 200 | [ITER] FAIL 0 | [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=200 passed=200 failed=0 ignored=0 us min=126695 avg=129752 max=129981
+   bad reads, all workers: 0 (iterations with bad != 0: 0) | halts: 0
+   pdm_a (unpinned): wake-ups 2196 (per iteration 10 to 11) | moves 195 | iterations with a move 26 of 200 | bad 0 | wake-ups per CPU [0, 91, 102, 2003, 0, 0] | on CPUs 4-5: 0
+   pdm_b (unpinned): wake-ups 2196 (per iteration 10 to 11) | moves 219 | iterations with a move 27 of 200 | bad 0 | wake-ups per CPU [0, 101, 97, 1998, 0, 0] | on CPUs 4-5: 0
+   pdm_c (pinned, rotating CPUs 1-3): wake-ups 2200 (per iteration 11 to 11) | moves 2200 | iterations with a move 200 of 200 | bad 0 | wake-ups per CPU [0, 793, 781, 626, 0, 0] | on CPUs 4-5: 0
+   unpinned workers together: wake-ups 4392, moves 414 (9.4% of wake-ups), largest share on one CPU: cpu3 91.1%
