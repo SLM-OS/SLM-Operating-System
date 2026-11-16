@@ -964,6 +964,6 @@ Gaps it listed, none of them defects:
 
 - main is at b548f29d. The worktree was used detached at main for `/ci`, then
   returned to `structural/known-failures-1`.
-- The branch `tests/known-failures-issues` remains on the remote, which still
-  needs deleting after the squash merge.
+- The remote branch `tests/known-failures-issues` was deleted at the user's
+  request after the squash merge; its head was 2ccf4d20, the merged PR head.
 - No lab work was done, and no claim was taken.
