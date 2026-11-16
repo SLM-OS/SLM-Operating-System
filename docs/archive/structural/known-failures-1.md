@@ -854,3 +854,116 @@ filtered bin 9dbd25ba / elf 3fe474b8.
 - Both boards released. No QEMU or build process of this session running.
 - Not done: a Pi 5 boot in which the card failed to probe (none occurred); a
   critic pass on the PR.
+
+## 17. Final steps of the #1109 end state (2026-11-16)
+
+The user authorised merging #1282 and closing #1109 if the critic passed.
+Nothing else was merged, and no lab work was done.
+
+### 17.1 labctl ticket
+
+The ticket was filed in labctl's own repository, johnjezl/Embedded-Lab-Control.
+That repository is the one named in the project `CLAUDE.md`, and its
+description matches the labctl MCP server.
+
+- Ticket: johnjezl/Embedded-Lab-Control#78, "sdwire_cat needs offset/length
+  (or a hash operation) for large card files".
+- It cites run 5's `switch-5.md` Entry 48 (the dropped connection), §16.4 of
+  this log (size and mtime only), and SLM-OS#1274.
+- It proposes any of three fixes:
+  - `offset`/`length` arguments on `sdwire_cat`;
+  - a `sdwire_hash` operation computed on the server;
+  - a size limit that returns an error instead of dropping the connection.
+
+### 17.2 Blind critic on the boot-path change
+
+- One critic on model `fable`, read-only.
+- Scope: the `efi_stub.c` and `boot_source.h` changes and
+  `test_boot_source_matches_stub_marker`, at 2ccf4d20.
+- It was given the code and the evidence paths, not this log's conclusions.
+- **Verdict: PASS.** No defect was found.
+
+Its code-only findings, each with file and line citations:
+
+- **Written before the copy.** The marker is stored next to
+  `slmos_boot_source` (`efi_stub.c:732-733`), before
+  `efi_dcache_clean_inval` (`:735`).
+- **Inside the copied range.** `boot.S` copies `[_start, _start +
+  _kernel_file_size)`, and `_kernel_file_size = __data_end - _start` in both
+  linker scripts. When the load address equals the link address the copy is
+  skipped and the value stays in place.
+- **Not cleared with .bss.** The marker is in `.data`: it has a non-zero
+  initialiser and no section attribute, and it sits before `__data_end`. The
+  `.bss` clear covers only `__bss_start..__bss_end`.
+- **One writer.** The tree has one definition, one store, one `extern` and one
+  read of the marker, and no reference to it from assembly.
+- **RAN arises only in the stub.** Both values are non-zero ASCII tags that
+  differ in their low 32 bits. The only RAN store is inside `efi_stub_entry`.
+  The symbol is not built for Pi 5 or x86-64; the test is gated on the same
+  condition (`CMakeLists.txt:651,1277`, `test_harness.c:244-247`).
+- **The test fails in both stray cases:**
+  - a stray boot source fails the DIRECT assert;
+  - a stray marker fails, either as RAN (the UEFI assert) or as any third
+    value (the 64-bit `TEST_ASSERT_EQUAL_HEX64` against UNSET).
+- **Not vacuous.** Both objects are `volatile` and live in different
+  translation units, so the compiler cannot fold the checks away.
+- **No other leak.** The only other writer of the boot source,
+  `test_camera.c:103-107`, restores it with no assert in between.
+
+Its evidence findings:
+
+- m4 failed at the DIRECT assert, and m5 failed at the UEFI assert.
+- The unmutated QEMU run passes with "direct load".
+- 3 kexec boots pass with "direct load".
+- 3 UEFI-direct boots pass with "UEFI-direct (EFI stub)". These are the only
+  run evidence for the RAN branch and for the marker surviving the copy.
+- `git diff 0a4693f9 2ccf4d20` touches only the lists and
+  `docs/testing.md`, so the captured kernels contain the marker code.
+- §16.3 matches the captures.
+
+Gaps it listed, none of them defects:
+
+1. **No Pi 5 coverage.** Neither the test nor the marker is built for Pi 5, so
+   the Pi 5 path has no such check. Neither the PR text nor §16.3 claims one;
+   this was checked against the PR body.
+2. **Two cases have no run:**
+   - a third marker value, covered by the code only;
+   - the test under QEMU UEFI (`make test-qemu-uefi` checks only the console
+     line).
+3. **Losing both stores passes the test.** If both stores were lost together on
+   a UEFI boot, the test would pass; only the "Boot source: UEFI-direct"
+   console check would catch it. The test comment's "or the record moved to
+   .bss" holds only when one record moves. It was left as is, because the
+   critic did not classify it as a defect and a wording change would need
+   another `/ci` run.
+
+### 17.3 #1282 merged
+
+- **Before the merge:**
+  - main was still at e1441e8d, so no rebase was needed;
+  - #1282 was MERGEABLE at head 2ccf4d20;
+  - the PR text's only closing keywords are for #1274, #1272 and #1281.
+- **Merge:** squash-merged as **b548f29d**, with the head pinned to 2ccf4d20.
+- **Issues:** #1274, #1272 and #1281 closed from the merge. #1272 and #1281
+  showed OPEN at the first check, seconds after the merge, and CLOSED at the
+  next.
+- **`/ci` on main b548f29d:** every step passed on the first run, including
+  step 5 (`AI_SCHED=ON`) and `make test-qemu-uefi` (in-place and relocated
+  boots, model delivery). Runtime host tests: 308 and 328 passed. The layout
+  check printed no skipped (`!`) line.
+
+### 17.4 #1109 closed
+
+- Comment 6924195113: every known failure now names its own open issue in the
+  `scripts/hw-suite/known-failures-*.txt` files as of b548f29d. It links §4 of
+  this log at b9a99b27 and states that an entry is removed when its issue
+  closes.
+- #1109 is closed as completed. #1272, #1274 and #1281 are closed as completed.
+
+### 17.5 End state
+
+- main is at b548f29d. The worktree was used detached at main for `/ci`, then
+  returned to `structural/known-failures-1`.
+- The branch `tests/known-failures-issues` remains on the remote, which still
+  needs deleting after the squash merge.
+- No lab work was done, and no claim was taken.
