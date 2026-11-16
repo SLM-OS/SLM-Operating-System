@@ -33,7 +33,8 @@
 #include "string.h"             /* strcmp for shell-table scanners */
 #include "x86_lapic_consts.h"   /* LAPIC_TIMER_VECTOR */
 #include "ioapic.h"             /* ioapic_irq_is_masked */
-#include "x86_smp.h"            /* x86_ap_entry_misaligned */
+#include "x86_smp.h"            /* x86_ap_entry_misaligned, smp_resched_ipi_count */
+#include "sched.h"              /* preempt_disabled[], sched_diag[] */
 
 /* ============================================================================
  * External Symbols from Boot Code
@@ -898,8 +899,7 @@ static void test_scheduler_tick_callable(void)
  */
 static void test_preempt_disabled_cleared_in_task(void)
 {
-    extern volatile int preempt_disabled[];
-    TEST_ASSERT_EQUAL_INT(0, preempt_disabled[cpu_id()]);
+    TEST_ASSERT_EQUAL_INT(0, preempt_disabled[cpu_id()].v);
 }
 
 /*
@@ -1071,9 +1071,8 @@ static volatile uint8_t sched_new_task_ran;
 static void sched_new_task_observer(void *arg)
 {
     (void)arg;
-    extern volatile int preempt_disabled[];
     sched_new_task_cpu_seen = cpu_id();
-    sched_new_task_observed_preempt = preempt_disabled[cpu_id()];
+    sched_new_task_observed_preempt = preempt_disabled[cpu_id()].v;
     sched_new_task_ran = 1;
 }
 
@@ -1364,7 +1363,6 @@ static void test_tss_per_cpu_distinct(void)
 static void test_resched_ipi_delivers(void)
 {
     extern uint32_t cpu_count;
-    extern volatile uint64_t smp_resched_ipi_count[];
     extern void smp_notify_cpu(uint32_t logical_cpu);
     extern void sleep_ms(uint32_t ms);
 
@@ -1373,16 +1371,16 @@ static void test_resched_ipi_delivers(void)
         return;
     }
 
-    uint64_t before = smp_resched_ipi_count[1];
+    uint64_t before = smp_resched_ipi_count[1].v;
     smp_notify_cpu(1);
 
     /* Give the IPI up to 50 ms to propagate and the target's handler to
      * run. In practice this takes microseconds even in QEMU. */
-    for (int i = 0; i < 5 && smp_resched_ipi_count[1] == before; i++) {
+    for (int i = 0; i < 5 && smp_resched_ipi_count[1].v == before; i++) {
         sleep_ms(10);
     }
 
-    TEST_ASSERT_TRUE(smp_resched_ipi_count[1] > before);
+    TEST_ASSERT_TRUE(smp_resched_ipi_count[1].v > before);
 }
 
 /*
@@ -1391,15 +1389,14 @@ static void test_resched_ipi_delivers(void)
  */
 static void test_resched_ipi_self_is_noop(void)
 {
-    extern volatile uint64_t smp_resched_ipi_count[];
     extern void smp_notify_cpu(uint32_t logical_cpu);
 
     uint32_t self = cpu_id();
-    uint64_t before = smp_resched_ipi_count[self];
+    uint64_t before = smp_resched_ipi_count[self].v;
     smp_notify_cpu(self);
     /* There is no synchronization here because the API is defined as
      * a no-op on self — so the counter must remain unchanged. */
-    TEST_ASSERT_EQUAL_UINT64(before, smp_resched_ipi_count[self]);
+    TEST_ASSERT_EQUAL_UINT64(before, smp_resched_ipi_count[self].v);
 }
 
 /*
@@ -1468,7 +1465,7 @@ static void test_cross_cpu_dispatch_latency(void)
  * Test: every CPU's LAPIC timer fires under load (B2 / P2-2).
  *
  * Spawns one busy-loop worker per CPU (pinned via cpu_affinity),
- * sleeps on the parent, and asserts that every CPU's sched_diag_tick[]
+ * sleeps on the parent, and asserts that every CPU's sched_diag[].tick
  * counter advanced by at least 3 (≥ 30 ms of 100 Hz ticks). Pre-B2
  * there was no integration test exercising this — if an AP's
  * timer_percpu_init silently failed, or the ISR handler stopped
@@ -1497,9 +1494,8 @@ static void b2_tight_loop_worker(void *arg)
 static void test_all_cpus_timer_preempt_under_load(void)
 {
     extern uint32_t cpu_count;
-    /* sched_diag_tick is a cacheable BSS array on every platform
+    /* sched_diag[].tick is a cacheable BSS array on every platform
      * (sched_diag.h). */
-    extern volatile uint32_t sched_diag_tick[];
     extern struct task *task_create(const char *name, void (*entry)(void *), void *arg);
     extern void scheduler_add_task(struct task *task);
     extern void sleep_ms(uint32_t ms);
@@ -1515,10 +1511,10 @@ static void test_all_cpus_timer_preempt_under_load(void)
     }
     b2_worker_stop = 0;
 
-    /* Snapshot sched_diag_tick[] before, then after the busy window. */
+    /* Snapshot sched_diag[].tick before, then after the busy window. */
     uint32_t ticks_before[8] = {0};
     for (uint32_t i = 0; i < cpu_count && i < 8; i++) {
-        ticks_before[i] = sched_diag_tick[i];
+        ticks_before[i] = sched_diag[i].tick;
     }
 
     /* Spawn one pinned worker on each AP (skip CPU 0 — the parent
@@ -1537,10 +1533,10 @@ static void test_all_cpus_timer_preempt_under_load(void)
      * iteration, then task_entry_trampoline -> task_exit cleans them up). */
     b2_worker_stop = 1;
 
-    /* Each AP's timer ISR must have fired — sched_diag_tick[i]
+    /* Each AP's timer ISR must have fired — sched_diag[i].tick
      * is incremented inside scheduler_tick. */
     for (uint32_t i = 1; i < cpu_count && i < 8; i++) {
-        uint32_t delta = sched_diag_tick[i] - ticks_before[i];
+        uint32_t delta = sched_diag[i].tick - ticks_before[i];
         TEST_ASSERT_TRUE(delta >= 3);
     }
 

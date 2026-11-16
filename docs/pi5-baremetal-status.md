@@ -14,7 +14,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 2. RP1 UART TX via PL011 flag register polling (works after MMU enable)
 3. Serial console output at 115200 baud on GPIO14/15
 4. Platform-specific VMM mappings (1GB L1 block descriptors for RAM, L2 tables for MMIO)
-5. Cooperative preemption driven by `CNTPCT_EL0` (`PI5_COOP_PREEMPT`); `sched_diag_tick` advances on all 4 CPUs, AI scheduler `policy->tick` fires
+5. Cooperative preemption driven by `CNTPCT_EL0` (`PI5_COOP_PREEMPT`); `sched_diag[].tick` advances on all 4 CPUs, AI scheduler `policy->tick` fires
 6. Cross-CPU dispatch (`bench smp`): 3/3 target CPUs complete
 7. All subsystems boot: PMM, VMM, GIC, scheduler, IPC, VFS, LittleFS, Rust, Lua
 8. Automated deploy via SDWireC + labctl on SDWire-equipped boards
@@ -77,7 +77,7 @@ Full test suite runs on Pi 5 hardware with zero failures:
 - PMM (1): `test_split_creates_buddies` — small blocks already available, no split triggered
 - Net (1): platform-specific test not applicable to Pi 5
 
-**Cross-CPU integration tests:** 15 of 15 pass on any boot where all secondary CPUs wake normally. `test_work_stealing_distributes_load` now asserts "tasks ran off the owner CPU" rather than "≥ 2 distinct CPUs ran tasks" — the latter was a proxy that flaked whenever only one stealer was alive (a single awake stealer grabs all tasks before others wake, but stealing still worked). `test_isolated_core_latency` cleans up stuck tasks on timeout so it no longer leaks. On some boots (~20 % observed during the April 16 investigation) one or more secondaries stay dormant post-boot — `sched_diag_schedule[c]` never increments — which can knock out several multi-CPU tests. Tracked in issue #216.
+**Cross-CPU integration tests:** 15 of 15 pass on any boot where all secondary CPUs wake normally. `test_work_stealing_distributes_load` now asserts "tasks ran off the owner CPU" rather than "≥ 2 distinct CPUs ran tasks" — the latter was a proxy that flaked whenever only one stealer was alive (a single awake stealer grabs all tasks before others wake, but stealing still worked). `test_isolated_core_latency` cleans up stuck tasks on timeout so it no longer leaks. On some boots (~20 % observed during the April 16 investigation) one or more secondaries stay dormant post-boot — `sched_diag[c].schedule` never increments — which can knock out several multi-CPU tests. Tracked in issue #216.
 
 **Key bugs fixed to achieve reliable cross-CPU dispatch:**
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM

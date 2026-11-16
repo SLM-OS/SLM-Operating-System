@@ -16,6 +16,7 @@
 #include "uart.h"
 #include "semihosting.h"
 #include <stddef.h>
+#include "percpu_layout.h"
 
 #define SLOT_TRACE_LEN 512U     /* entries per CPU (power of two) */
 
@@ -35,10 +36,10 @@ struct slot_trace_ent {
 };
 
 static struct slot_trace_ent slot_trace_ring[MAX_CPUS][SLOT_TRACE_LEN];
-static volatile uint32_t slot_trace_idx[MAX_CPUS];
+static percpu_u32_t slot_trace_idx[MAX_CPUS];
 static volatile uint32_t slot_trace_seq;
 static volatile uint32_t slot_trace_frozen;
-volatile uint8_t slot_trace_rq_holder[MAX_CPUS];
+percpu_u8_t slot_trace_rq_holder[MAX_CPUS];
 
 /* Emergency stacks for the bad-SP vector path (vectors.S). */
 #define SLOT_TRACE_EMERG_STACK 16384
@@ -98,7 +99,7 @@ void slot_trace_rec(uint32_t ev, const struct task *t,
     uint64_t daif;
     __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(daif) :: "memory");
 
-    uint32_t i = slot_trace_idx[cpu];
+    uint32_t i = slot_trace_idx[cpu].v;
     /* Fold an identical consecutive record (a yield loop's requeue ADDs,
      * a thief's repeated preempt_disabled skips) into the previous one,
      * so floods do not push the history out of the ring. */
@@ -125,14 +126,14 @@ void slot_trace_rec(uint32_t ev, const struct task *t,
     e->id = t ? t->id : 0;
     uint32_t h = 0;
     for (uint32_t k = 0; k < 4 && k < MAX_CPUS; k++) {
-        h |= ((uint32_t)slot_trace_rq_holder[k] & 0xF) << (4 * k);
+        h |= ((uint32_t)slot_trace_rq_holder[k].v & 0xF) << (4 * k);
     }
     e->holders = h;
     e->rep = 0;
     e->a = a;
     e->b = b;
     e->c = c;
-    slot_trace_idx[cpu] = i + 1;
+    slot_trace_idx[cpu].v = i + 1;
 
     __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
 }
@@ -215,7 +216,7 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
     uint32_t ncpu = cpu_count < 4 ? cpu_count : 4;
     uart_printf_unlocked("  format: ST c<cpu> #<seq> t=<cntvct> <ev> slot gen id st a b c rq=<holder nibbles cpu3..cpu0>\n");
     for (uint32_t k = 0; k < ncpu; k++) {
-        uint32_t n = slot_trace_idx[k];
+        uint32_t n = slot_trace_idx[k].v;
         uint32_t first = n > SLOT_TRACE_LEN ? n - SLOT_TRACE_LEN : 0;
         uart_printf_unlocked("SLOTTRACE-CPU %u entries=%u shown=%u\n",
                              k, n, n - first);
@@ -236,7 +237,7 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
     for (uint32_t k = 0; k < ncpu; k++) {
         struct cpu_runqueue *rq = sched_cpu_rq(k);
         uart_printf_unlocked("  cpu%u: rq_holder=%u\n", k,
-                             (unsigned)slot_trace_rq_holder[k]);
+                             (unsigned)slot_trace_rq_holder[k].v);
         st_print_task("current", task_current_on_cpu(k));
         if (rq) {
             st_print_task("rq.head", rq->head);
@@ -254,7 +255,7 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
 }
 
 #define SLOT_TRACE_PD_STUCK_TICKS 300U   /* 3 s at 100 Hz */
-static uint32_t slot_trace_pd_ticks[MAX_CPUS];
+static percpu_u32_t slot_trace_pd_ticks[MAX_CPUS];
 
 void slot_trace_pd_tick(uint32_t cpu, int pd)
 {
@@ -262,18 +263,17 @@ void slot_trace_pd_tick(uint32_t cpu, int pd)
         return;
     }
     if (!pd) {
-        slot_trace_pd_ticks[cpu] = 0;
+        slot_trace_pd_ticks[cpu].v = 0;
         return;
     }
-    if (++slot_trace_pd_ticks[cpu] == SLOT_TRACE_PD_STUCK_TICKS) {
-        extern volatile int preempt_disabled[];
+    if (++slot_trace_pd_ticks[cpu].v == SLOT_TRACE_PD_STUCK_TICKS) {
         SLOT_TRACE(ST_PD_STUCK, task_current_on_cpu(cpu), cpu,
-                   slot_trace_pd_ticks[cpu], 0);
+                   slot_trace_pd_ticks[cpu].v, 0);
         uart_printf_unlocked("\nSLOTTRACE-FAULT preempt_disabled[%u] stuck for %u ticks "
-                             "(pd=%d/%d/%d/%d)\n", cpu, slot_trace_pd_ticks[cpu],
-                             preempt_disabled[0], preempt_disabled[1],
-                             preempt_disabled[2], preempt_disabled[3]);
-        slot_trace_dump("pd_stuck", cpu, slot_trace_pd_ticks[cpu], 0);
+                             "(pd=%d/%d/%d/%d)\n", cpu, slot_trace_pd_ticks[cpu].v,
+                             preempt_disabled[0].v, preempt_disabled[1].v,
+                             preempt_disabled[2].v, preempt_disabled[3].v);
+        slot_trace_dump("pd_stuck", cpu, slot_trace_pd_ticks[cpu].v, 0);
     }
 }
 
@@ -301,5 +301,20 @@ void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
     }
     slot_trace_dump("el1_sync_bad_sp", orig_sp, esr, elr);
 }
+
+#if defined(ENABLE_BOOT_TESTS)
+/* Test hook (#1263): this file's padded per-CPU arrays, for
+ * test_percpu_layout.c. */
+size_t slot_trace_percpu_layout(const struct percpu_layout_ent **tab)
+{
+    static const struct percpu_layout_ent ents[] = {
+        PERCPU_LAYOUT_ENT(slot_trace_idx),
+        PERCPU_LAYOUT_ENT(slot_trace_rq_holder),
+        PERCPU_LAYOUT_ENT(slot_trace_pd_ticks),
+    };
+    *tab = ents;
+    return sizeof(ents) / sizeof(ents[0]);
+}
+#endif /* ENABLE_BOOT_TESTS */
 
 #endif /* CONFIG_SLOT_TRACE */

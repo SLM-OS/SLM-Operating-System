@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include "config.h"
+#include "cacheline.h"
 
 #if defined(SECONDARY_PREEMPT)
 
@@ -30,7 +31,7 @@
  *
  * Allocated from NC memory in scheduler_init() for cross-CPU visibility.
  */
-extern volatile uint32_t *reschedule_pending;
+extern percpu_u32_t *reschedule_pending;
 
 /*
  * Per-CPU saved ELR_EL1 / SPSR_EL1 at the point the trampoline was
@@ -41,8 +42,8 @@ extern volatile uint32_t *reschedule_pending;
  * same CPU (the trampoline). No cross-CPU race, but placed in NC memory
  * for simplicity and debuggability.
  */
-extern volatile uint64_t *orig_elr;
-extern volatile uint64_t *orig_spsr;
+extern percpu_u64_t *orig_elr;
+extern percpu_u64_t *orig_spsr;
 
 /* Assembly entry point for the deferred-scheduling trampoline. */
 void resched_trampoline(void);
@@ -59,7 +60,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf);
  * preempt_init has not run). For tests: lets the #750 test exercise
  * the NULL bail without making the shared global NULL. */
 void maybe_arm_resched_trampoline_on(struct trap_frame *tf,
-                                     volatile uint32_t *pending);
+                                     percpu_u32_t *pending);
 
 /* Initialize per-CPU preemption state. Called from scheduler_init(). */
 void preempt_init(void);

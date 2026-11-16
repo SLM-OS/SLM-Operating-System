@@ -1243,6 +1243,8 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_coherency.c>
     # CPU-shared scheduler state is cacheable; NC block serves DMA (#1193).
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_nc_axis.c>
+    # One cache line per per-CPU lock / word (#1263). Every platform.
+    kernel/tests/test_percpu_layout.c
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net_http.c>
     # USB core tests (Phase 1 of #266). Platform-neutral — the mock

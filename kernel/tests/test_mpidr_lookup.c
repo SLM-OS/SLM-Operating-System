@@ -163,7 +163,7 @@ static void test_maybe_arm_resched_trampoline_null_safe(void)
      * scheduler tick wrote through it (sched.c), and once #1198 moved
      * the boot IRQ unmask after gic_init the one-shot warning printed
      * inside that window and every CPU faulted. */
-    volatile uint32_t *saved = reschedule_pending;
+    percpu_u32_t *saved = reschedule_pending;
     struct trap_frame tf;
     /* zero-init: ELR / SPSR fields aren't touched on the bail path,
      * but giving them deterministic values makes the diagnostic

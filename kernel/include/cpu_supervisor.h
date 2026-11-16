@@ -33,7 +33,7 @@ struct cpu_supervisor_stats {
 
 /*
  * Start the supervisor. Spawns a task pinned to CPU 0 that samples
- * sched_diag_idle_loops once per second and triggers resurrection
+ * sched_diag[].idle_loops once per second and triggers resurrection
  * when a secondary CPU's counter is frozen for SUPERVISOR_FROZEN_THRESHOLD
  * consecutive samples. No-op on single-CPU systems.
  */

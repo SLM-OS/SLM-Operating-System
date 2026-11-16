@@ -11,6 +11,7 @@
 #include "el_regs.h"
 #include "cpu_id_asm.h"
 #include "trap.h"
+#include "cacheline.h"      /* CACHE_LINE_SHIFT: stride of the padded per-CPU arrays */
 
 .section .text
 
@@ -579,15 +580,20 @@ resched_trampoline:
     ARM64_GET_LOGICAL_CPU x0, x1, x2, x3   /* x0 = cpu */
 
     /* Snapshot orig_elr[cpu] / orig_spsr[cpu] to stack locals.
-     * `orig_elr` and `orig_spsr` are global pointers into NC memory
-     * (assigned by preempt_init()); `adrp + ldr` loads the pointer
-     * value, then we index by cpu. */
+     * `orig_elr` and `orig_spsr` are global pointers to arrays of
+     * per-CPU cells (assigned by preempt_init()); `adrp + ldr` loads the
+     * pointer value, then we index by cpu. Each cell is one cache line
+     * (cacheline.h, #1263), so the stride is 1 << CACHE_LINE_SHIFT and
+     * the value is at offset 0; so is preempt_disabled[] below.
+     * test_percpu_layout.c checks both. */
     adrp    x1, orig_elr
     ldr     x1, [x1, #:lo12:orig_elr]
-    ldr     x3, [x1, x0, lsl #3]    /* x3 = orig_elr[cpu] */
+    add     x1, x1, x0, lsl #CACHE_LINE_SHIFT
+    ldr     x3, [x1]                /* x3 = orig_elr[cpu].v */
     adrp    x2, orig_spsr
     ldr     x2, [x2, #:lo12:orig_spsr]
-    ldr     x4, [x2, x0, lsl #3]    /* x4 = orig_spsr[cpu] */
+    add     x2, x2, x0, lsl #CACHE_LINE_SHIFT
+    ldr     x4, [x2]                /* x4 = orig_spsr[cpu].v */
     stp     x3, x4, [sp, #168]
 
     /* Mark preempt_disabled[cpu] = 1 before unmasking IRQs so any
@@ -596,7 +602,8 @@ resched_trampoline:
     adrp    x5, preempt_disabled
     add     x5, x5, #:lo12:preempt_disabled
     mov     w6, #1
-    str     w6, [x5, x0, lsl #2]
+    add     x5, x5, x0, lsl #CACHE_LINE_SHIFT
+    str     w6, [x5]                /* preempt_disabled[cpu].v = 1 */
     /* #1216 trace: open a 'T' window (x0 = cpu). Clobbers x0-x18 and
      * x30, all saved in the frame above; nothing below reads them
      * before bl schedule. */
@@ -619,7 +626,8 @@ resched_trampoline:
     ARM64_GET_LOGICAL_CPU x0, x1, x2, x3
     adrp    x5, preempt_disabled
     add     x5, x5, #:lo12:preempt_disabled
-    str     wzr, [x5, x0, lsl #2]
+    add     x5, x5, x0, lsl #CACHE_LINE_SHIFT
+    str     wzr, [x5]               /* preempt_disabled[cpu].v = 0 */
     /* #1216 trace: close the window if one is still open (x0 = cpu).
      * Every register it clobbers is reloaded from the frame below. */
     bl      steal_pdwin_clear_asm

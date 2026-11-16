@@ -3,7 +3,7 @@
  *
  * `bench stealing` on jetson-nano-2 showed a non-owner CPU making 10 to
  * 16 steal attempts and 0 successes in cacheable builds. The existing
- * sched_diag_steal_* counters say an attempt failed but not why. This
+ * sched_diag[].steal_* counters say an attempt failed but not why. This
  * trace records, for every sched_try_steal() call, how each victim
  * visit ended and how the attempt as a whole ended, plus a few
  * timestamps, so a stalled thief can be told apart from a thief that
@@ -18,7 +18,7 @@
  *   - Both live in ordinary cacheable BSS on every platform. The bench
  *     reads them on CPU 0 after every task has completed. Cross-CPU
  *     visibility relies on the hardware coherence ADR 0007 measured on
- *     Pi 5 and Jetson; `att` duplicates sched_diag_steal_attempts so a
+ *     Pi 5 and Jetson; `att` duplicates sched_diag[].steal_attempts so a
  *     reader can check one against the other.
  *
  * Counters run forever; the bench reports deltas. Timestamps and the

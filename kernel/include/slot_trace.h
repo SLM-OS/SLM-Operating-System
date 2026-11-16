@@ -29,6 +29,7 @@
 #define SLOT_TRACE_H
 
 #include <stdint.h>
+#include "cacheline.h"
 
 /* Event codes. */
 #define ST_CREATE_ALLOC     1   /* a=stack base, b=caller                     */
@@ -72,14 +73,14 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
 void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
     __attribute__((noreturn));
 
-extern volatile uint8_t slot_trace_rq_holder[];
+extern percpu_u8_t slot_trace_rq_holder[];   /* one cache line per CPU (#1263) */
 
 #define SLOT_TRACE(ev, t, a, b, c) \
     slot_trace_rec((ev), (t), (uint64_t)(a), (uint64_t)(b), (uint64_t)(c))
 #define SLOT_TRACE_PACK(t)          slot_trace_pack(t)
 #define SLOT_TRACE_ONLY(...)        __VA_ARGS__
-#define SLOT_TRACE_RQ_LOCKED(cpu)   (slot_trace_rq_holder[(cpu)] = (uint8_t)(cpu_id() + 1))
-#define SLOT_TRACE_RQ_UNLOCKING(cpu) (slot_trace_rq_holder[(cpu)] = 0)
+#define SLOT_TRACE_RQ_LOCKED(cpu)   (slot_trace_rq_holder[(cpu)].v = (uint8_t)(cpu_id() + 1))
+#define SLOT_TRACE_RQ_UNLOCKING(cpu) (slot_trace_rq_holder[(cpu)].v = 0)
 /* Tick-side watchdog: dumps the rings once preempt_disabled[cpu] has
  * stayed 1 for SLOT_TRACE_PD_STUCK_TICKS consecutive ticks (#1229). */
 void slot_trace_pd_tick(uint32_t cpu, int pd);

@@ -43,7 +43,7 @@
 #define RESCHED_VECTOR  49
 
 /* Diagnostic counter exported for tests. */
-volatile uint64_t smp_resched_ipi_count[MAX_CPUS];
+percpu_u64_t smp_resched_ipi_count[MAX_CPUS];   /* one cache line per CPU (#1263); declared in x86_smp.h */
 
 extern void schedule(void);
 extern void lapic_eoi(void);
@@ -54,7 +54,7 @@ static void resched_ipi_handler(uint8_t irq)
     (void)irq;
     uint32_t cpu = cpu_id();
     if (cpu < MAX_CPUS) {
-        smp_resched_ipi_count[cpu]++;
+        smp_resched_ipi_count[cpu].v++;
     }
     /* Do not re-enter schedule() while this CPU is inside its switch
      * window (#1236). preempt_disabled[cpu] is set from before switch_to
@@ -70,8 +70,7 @@ static void resched_ipi_handler(uint8_t irq)
      * its queue until the CPU's next schedule(): its next timer tick
      * (scheduler_tick schedules once the flag clears) or the running
      * task's next yield. */
-    extern volatile int preempt_disabled[];
-    if (cpu < MAX_CPUS && preempt_disabled[cpu]) {
+    if (cpu < MAX_CPUS && preempt_disabled[cpu].v) {
         return;
     }
     schedule();

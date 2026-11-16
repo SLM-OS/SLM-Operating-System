@@ -9,6 +9,7 @@
 #define SPINLOCK_H
 
 #include <stdint.h>
+#include "cacheline.h"  /* CACHE_LINE_SIZE: one line per SPINLOCK_ARRAY element */
 #include "platform.h"   /* For PLATFORM_JETSON_ORIN_NANO (SPINLOCK_SKIP_LOCKING) */
 
 /*
@@ -81,28 +82,41 @@ typedef struct {
 } spinlock_t;
 
 /*
- * Cacheline-alignment for arrays:
+ * Arrays of spinlocks: one cache line per lock (#1263).
  *
- * `spinlock_t` is a single uint32_t — multiple consecutive instances
- * share a cacheline, so two CPUs spinning on neighbouring locks
- * ping-pong the same line. Always declare arrays of spinlocks with
- * the SPINLOCK_ARRAY macro, which aligns the array to 64 bytes (one
- * Cortex-A76 / x86 cacheline):
+ * `spinlock_t` is a single uint32_t, so consecutive instances share a
+ * cache line, which is also one exclusives reservation granule. Measured
+ * (#1263): in an R3 wake test kernel on Jetson CPUs 4 and 5 waited up to
+ * 6.7 ms for their own free run-queue lock; with a line per lock none did.
+ * Inferred, not measured: another CPU's store to lock j in the line clears
+ * the LDAXR reservation on lock i, so its STXR fails (docs/scheduler.md).
+ * Aligning the array as a whole does not help: every element needs its
+ * own line.
+ *
+ * Always declare an array of spinlocks with SPINLOCK_ARRAY and reach an
+ * element through SPINLOCK_AT, which yields the `spinlock_t *` every
+ * spin_* function takes:
  *
  *     static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
+ *     spin_lock(SPINLOCK_AT(rq_lock, cpu));
  *
- * 64 is hardcoded here (rather than #include cache.h's
- * CACHE_LINE_SIZE) to keep spinlock.h self-contained — pulling in
- * cache.h would add a transitive dependency to every TU that uses
- * spinlocks. Same value, same precedent as
- * `kernel/include/sched.h: __attribute__((aligned(64)))`.
+ * The element is a struct, so `&rq_lock[cpu]` passed to spin_lock() is a
+ * compile error rather than a silently packed lock.
  *
- * The same alignment concern applies if a struct ever embeds a
- * spinlock_t adjacent to other frequently-written data — pad or
- * align to avoid false sharing.
+ * The same concern applies when a struct embeds a spinlock_t next to
+ * data other CPUs write: align the struct to CACHE_LINE_SIZE and keep
+ * the lock's line free of unrelated hot words.
  */
-#define SPINLOCK_ARRAY(name, count) \
-    spinlock_t name[count] __attribute__((aligned(64)))
+typedef struct {
+    spinlock_t lock;
+} CACHE_LINE_ALIGNED spinlock_padded_t;
+
+_Static_assert(sizeof(spinlock_padded_t) == CACHE_LINE_SIZE &&
+               _Alignof(spinlock_padded_t) == CACHE_LINE_SIZE,
+               "each SPINLOCK_ARRAY element must be exactly one cache line");
+
+#define SPINLOCK_ARRAY(name, count)     spinlock_padded_t name[count]
+#define SPINLOCK_AT(name, index)        (&(name)[(index)].lock)
 
 #define SPINLOCK_INIT { .lock = 0 }
 
