@@ -1,0 +1,17 @@
+# pi-5-1 card record, session #1284 (labctl sdwire_ls of this session, as returned; read 2026-11-16 ~10:15 UTC before, ~10:48 UTC after)
+# Root as found: single FAT32 partition "SLMOS"; kernel_2712.img 6935256 bytes mtime 2026-10-29T04:54:04Z (kernel8.img same size/mtime, untouched).
+# Sequence: rename kernel_2712.img -> kernel_2712.img.orig-1284; copy kernel_2712-1284-A-c93f0891.img (sha256 6c48eb63...) -> kernel_2712.img;
+#           one boot (A-pi5-c93f0891-x1000-boot01.txt); delete kernel_2712.img; rename kernel_2712.img.orig-1284 -> kernel_2712.img;
+#           restore-check boot (A-pi5-restore-check-boot01.txt, banner b42b2c1d).
+# /slmstore listing (path size mtime), identical before and after (9 entries); no file contents read:
+files.lfs.tmp 0 2026-04-27T09:25:48Z
+files.lfs 8388608 2026-04-25T00:00:00Z
+files.lfs.delta.tmp 0 2026-04-25T00:00:00Z
+files.lfs.delta 6209568 2026-04-25T00:00:00Z
+autoload/ (dir) 2026-04-27T09:25:48Z
+blob_autoload.conf 382 2026-04-25T00:00:00Z
+autoload/eviction-xgboost.blob 90 2026-04-25T00:00:00Z
+autoload/eviction-mlp.blob 17700 2026-04-25T00:00:00Z
+autoload/eviction-cacheus_config.blob 48 2026-04-25T00:00:00Z
+# Limit: listing (size + mtime) only, no hashes; the filtered-test capture has no blob_autoload or 0:/slmstore line:
+0
