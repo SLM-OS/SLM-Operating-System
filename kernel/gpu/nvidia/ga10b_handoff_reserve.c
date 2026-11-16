@@ -1052,8 +1052,50 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
  * Orchestrator.
  * --------------------------------------------------------------- */
 
+/* DIAGNOSTIC ONLY (diag/1207-l2early, #1207 experiment E3, never merged):
+ * flush and invalidate the GA10B L2 before pmm_init writes any free-list
+ * header, so dirty L2 lines left by Linux land in DRAM now instead of
+ * over pages the PMM hands out later. Same four UFLUSH ops as
+ * ga10b_l2_evict_sysmem (BAR0 + 0x70000 / 0x70010 / 0x70004 / 0x70000),
+ * by direct MMIO because the GSP platform vtable is not installed yet. */
+static int e3_uflush(uint32_t off, const char *name)
+{
+    volatile uint32_t *r = (volatile uint32_t *)(uintptr_t)(GA10B_BAR0_BASE + off);
+    *r = 1u;
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (int i = 0; i < 20000; i++) {
+        uint32_t v = *r;
+        if ((v & 3u) == 0u) {
+            uart_printf("[1207-e3] %s done after %d polls\n", name, i);
+            return 0;
+        }
+        for (volatile int k = 0; k < 7500; k++) { }
+    }
+    uart_printf("[1207-e3] %s TIMED OUT (0x%08x)\n", name, (unsigned)*r);
+    return -1;
+}
+
+static void e3_early_l2_flush(void)
+{
+    uint32_t ctx = *(volatile uint32_t *)(uintptr_t)
+        (GA10B_BAR0_BASE + GA10B_GR_FECS_CURRENT_CTX_OFFSET);
+    if ((ctx & 0xFFFF0000u) == 0xbadf0000u || ctx == 0u) {
+        uart_printf("[1207-e3] FECS_CURRENT_CTX=0x%08x: no inherited GPU, early L2 flush skipped\n",
+                    (unsigned)ctx);
+        return;
+    }
+    uart_printf("[1207-e3] early L2 flush before pmm_init (FECS_CURRENT_CTX=0x%08x)\n",
+                (unsigned)ctx);
+    if (e3_uflush(0x00070000u, "fb_flush[1]") == 0 &&
+        e3_uflush(0x00070010u, "l2_flush_dirty") == 0 &&
+        e3_uflush(0x00070004u, "l2_sysmem_invalidate") == 0) {
+        (void)e3_uflush(0x00070000u, "fb_flush[2]");
+    }
+}
+
 void ga10b_kexec_handoff_register_reserves(void)
 {
+    e3_early_l2_flush();
     /* Read FECS_CURRENT_CTX and reserve the resident channel's inst
      * block. When this skips (poison MMIO, target=0, outside DRAM,
      * PMM table full) there is no live GR context to anchor the
