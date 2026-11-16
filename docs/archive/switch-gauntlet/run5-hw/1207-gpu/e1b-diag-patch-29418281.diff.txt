@@ -1,0 +1,29 @@
+diff --git a/kernel/gpu/nvidia/ga10b_bringup.c b/kernel/gpu/nvidia/ga10b_bringup.c
+index 4332bae1..7b3cff97 100644
+--- a/kernel/gpu/nvidia/ga10b_bringup.c
++++ b/kernel/gpu/nvidia/ga10b_bringup.c
+@@ -1151,12 +1151,22 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
+     GA10B_PROGRESS("[GA10B-INHERIT] GPCCS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                    (unsigned long)gpccs_cpuctl, (unsigned long)gpccs_mbox0);
+ 
+-    if (fecs_mbox0 != GR_FECS_MAILBOX_PASS) {
++    /* DIAGNOSTIC ONLY (diag/1207-elpg, #1207 experiment E1b, never
++     * merged): with ELPG disabled on Linux before kexec, FECS mailbox 0
++     * reads 0x4, not 0x1, and the inherit is refused, so the inherited
++     * MNIST path never runs. Accept 0x4 too, so the experiment can run
++     * MNIST with ELPG off and ask whether the zeroed free pages of #1207
++     * still appear. */
++    if (fecs_mbox0 == 0x4u) {
++        uart_printf("[GA10B-INHERIT] E1b diag: FECS mailbox0=0x4 accepted\n");
++    } else if (fecs_mbox0 != GR_FECS_MAILBOX_PASS) {
+         uart_printf("[GA10B-INHERIT] FECS not ready (expected 1, got 0x%lx)\n",
+                     (unsigned long)fecs_mbox0);
+         return -1;
+     }
+-    if (gpccs_mbox0 != GR_FECS_MAILBOX_PASS) {
++    if (gpccs_mbox0 == 0x4u) {
++        uart_printf("[GA10B-INHERIT] E1b diag: GPCCS mailbox0=0x4 accepted\n");
++    } else if (gpccs_mbox0 != GR_FECS_MAILBOX_PASS) {
+         uart_printf("[GA10B-INHERIT] GPCCS not ready (expected 1, got 0x%lx)\n",
+                     (unsigned long)gpccs_mbox0);
+         return -1;

@@ -1,0 +1,6 @@
+22:04:29 start mode=kexec n=3 elfs=[/root/slmos-1207-e1b-db61c7d5.elf /root/slmos-1207-e1b-db61c7d5.elf /root/slmos-1207-e1b-db61c7d5.elf] skip_current_boot_id=c4de917b-5965-42ec-9799-158cf99539fd pid=698856
+22:05:51 trigger 1/3 elf=/root/slmos-1207-e1b-db61c7d5.elf boot_id=07314efc-4862-4aca-9541-104477ce3549 state+uptime=[running 25.64 ] reply=[elpg=0,aelpg=0,entries=0 1b14f2e1795426c7 ]
+22:13:44 MANUAL trigger (boot_test o1207-e1b-0103 run 2; image replaced after run 1 showed GPCCS 0x4) elf=/root/slmos-1207-e1b-29418281.elf reply=[boot_id=f3963bc9-7586-4dbd-94bb-3740e5cc20ac uptime=103.36 elpg=0,aelpg=0,entries=12 6ea4c123577f12d3 ]
+22:14:00 start mode=kexec n=1 elfs=[/root/slmos-1207-e1b-29418281.elf] skip_current_boot_id=none pid=764087
+22:21:31 trigger 1/1 elf=/root/slmos-1207-e1b-29418281.elf boot_id=3ee42898-9732-4649-b699-aa456106c1f1 state+uptime=[running 25.51 ] reply=[elpg=0,aelpg=0,entries=8 6ea4c123577f12d3 ]
+22:21:31 end triggers=1

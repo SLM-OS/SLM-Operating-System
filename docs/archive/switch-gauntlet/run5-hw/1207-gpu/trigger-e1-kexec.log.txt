@@ -1,0 +1,2 @@
+21:38:49 start mode=kexec n=3 elfs=[/root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf /root/slmos-1207-base-b548f29d.elf] skip_current_boot_id=cc2fb5c6-66f5-4269-9564-0914d80ed08d pid=504112
+21:40:15 trigger 1/3 elf=/root/slmos-1207-base-b548f29d.elf boot_id=6b51bf68-1724-4460-9f01-e3c0a46acc3e state+uptime=[running 24.07 ] reply=[elpg=0,aelpg=0,entries=0 8c608c78db9520e2 ]
