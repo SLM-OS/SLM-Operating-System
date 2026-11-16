@@ -337,6 +337,9 @@ static void reserve_handoff_dmabuf(uint64_t handoff_phys)
  * collectively well under the PMM user-reserve table cap.
  * Read the (volatile) handoff fields into locals first so the
  * struct-initializer fits a static helper table cleanly. */
+/* DIAGNOSTIC ONLY (diag/1207-window, #1207): read by test_gpu.c. */
+uint64_t g_diag1207_mnist_pushbuf_phys;
+
 static void reserve_helper_buffers(const volatile struct ga10b_channel_handoff *h)
 {
     uint64_t userd_p   = h->userd_phys;
@@ -1016,6 +1019,10 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
             (uintptr_t)handoff_phys;
 
         reserve_handoff_inst_block(h, resident_inst_phys);
+        /* DIAGNOSTIC ONLY (diag/1207-window, #1207, never merged). */
+        if (kind == 0u) {
+            g_diag1207_mnist_pushbuf_phys = h->pushbuf_phys;
+        }
         reserve_helper_buffers(h);
         reserve_per_op_shaders(h);
         reserve_gr_ctx_extents(h);
