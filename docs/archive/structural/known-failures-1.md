@@ -667,3 +667,12 @@ condition is not satisfied or defeated by another test's side effect.
 board carries no adapter. The remaining entries are fixes in their own issues
 (#1267 to #1271, #1275, the five non-skip tests in #1231, and the two PMM
 tests in #1207).
+
+## 14. Model change (2026-11-15)
+
+Sections 1 to 13 were written on Fable. From this point the session runs on
+Opus, to conserve Fable usage, and builders and other helper subagents inherit
+Opus. Critics stay on Fable: each critic is spawned with the model set to
+fable, as its brief says. If a critic hits a Fable usage limit, it is paused
+and the user is told; it is not switched to Opus. The blind critic in section 9
+ran on Fable, before this change.
