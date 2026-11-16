@@ -2331,3 +2331,122 @@ checksum of a card file without returning its content.
 and Jetson UEFI-direct, the changed test x200, one Jetson suite boot at
 d09b063b), with the user's `slmstore` rule applied before and after its
 Pi 5 boots (small files only; no full-suite boot on Pi 5).
+
+## Entry 50 (written 00:45 UTC on 2026-11-16, from date): critic B rounds 2 and 3 (PASS); builder A phase A2b (the migration-test experiment); boards restored and released; session paused at the user's request
+
+### Critic B
+
+- Round 2 (`critic-5-1207-B-round2.md`): FAIL, narrowly. No code defect
+  blocks a merge; every number checked is right; round-1 findings 3, 4, 5,
+  8, 9 resolved. Remaining: the drafts said every DC IVAC call site was
+  read, and two were missed (`slm_gpu_sync_for_cpu`, `slm_ffi.c:233-243`,
+  called from `runtime/src/mm/model_mem.rs:1580` and
+  `runtime/src/inference/gpu.rs:259`; the `dc isw` loops in
+  `smp_boot.S:246,269`); the tree itself records that Cortex-A76 and
+  A78AE execute DC IVAC as DC CIVAC (`mmu.S:46-50`, `smp.c:684-688`,
+  `smp_boot.S:205-213`), so a lost header write is excluded on these cores
+  if that record holds (the critic notes this corrects its own round-1
+  suggestion); the eight boots "lost at
+  `test_preempt_flag_follows_migrated_task`" were misdescribed;
+  `free_list_remove` still follows a listed block's links unchecked (open
+  item); two wordings.
+- Builder B's answer: `fix/pmm-coalesce` 122befe0 = 02ebdad8 + comments
+  and documents only (`B-text-testkernel-122befe0-vs-02ebdad8.txt`: QEMU
+  test kernel `.text` identical, 0 differing bytes; `make test` once,
+  `B-qemu-fix-122befe0-fullsuite-run1.txt`, pass; `check-braces` 0
+  violations). `/ci` was not re-run at 122befe0 (last full run 02ebdad8,
+  with the one litmus retry of Entry 49). Evidence `gauntlet-5-hw-jetson`
+  293f8fa8.
+- **Round 3 (`critic-5-1207-B-round3.md`): PASS.** All five items resolved
+  or carried plainly; the eight per-boot descriptions match the captures
+  (all eight fault or stall right after `[PASS]
+  test_migrate_ready_task_updates_assigned_cpu`); the diff is comments and
+  documents only; no wrong number, no new overstatement, no closing
+  keyword. Two optional additions for the PR text: say that `/ci` was not
+  re-run at 122befe0; f55c5293 boot08 has two dumps.
+- Not checkable by the critic: whether the in-tree statement about DC IVAC
+  on these cores is correct; #1240, #1274, #1278 as described.
+
+The Part B PR is not opened yet (pause). It will not close #1207 or #1228.
+
+### Builder A, phase A2b (23:47 to 00:41 UTC): `test_preempt_flag_follows_migrated_task`, padded against unpadded
+
+Source: builder A's report, as received; not yet checked by a critic.
+`fix/percpu-cacheline` d09b063b (unchanged). Evidence `gauntlet-5-hw-pi5`
+456e4340 and `gauntlet-5-hw-jetson` b5c5dc14. Old test alone,
+`TEST_REPEAT=200`, one boot per `boot_test` call; U =
+`diag/1263-pdm-U` 6439476f, P = `diag/1263-pdm-P` 6247f73a.
+
+| Row | Files | Result |
+|---|---|---|
+| Pi 5, U x3 | `A-pi5-pdmdiag-U-6439476f-x200-boot01..03.txt` | 600 of 600 pass; `moved` 5 to 8; `moved=0` 0 |
+| Pi 5, P x3 | `A-pi5-pdmdiag-P-6247f73a-x200-boot01..03.txt` | 200 of 200; 180 pass and 20 fail (`moved=0`); 200 of 200 |
+| Jetson UEFI-direct, U x3 | `A-uefi-pdmdiag-U-6439476f-x200-boot01..03.txt` | 200 of 200; 199 pass and **1 fail with `bad=1`** (below); 200 of 200; `moved=0` 0 |
+| Jetson UEFI-direct, P x3 | `A-uefi-pdmdiag-P-6247f73a-x200-boot01..03.txt` | 31, 3, 29 fail, all `moved=0` |
+| Jetson kexec, U x1 | `A-kexec-pdmdiag-U-6439476f-x200-boot01.txt` | 200 of 200 |
+| Jetson kexec, P x1 | `A-kexec-pdmdiag-P-6247f73a-x200-boot01.txt` | 200 of 200 |
+
+`moved=0` in 83 of 1400 padded iterations and 0 of 1400 unpadded
+(summaries `A-pi5-pdm-summary.txt`, `A-uefi-pdm-summary.txt`). In the
+failing iterations both workers wake on one CPU nearly every time with 131
+to 162 steals in the iteration (for example `pdm-diag: steals=162
+a=[0,0,0,100,0,0] b=[0,0,0,100,0,0]`); the CPU differs per boot. Steal
+totals per boot: unpadded 658 to 1515, padded failing boots 4974 to 8145.
+Inference (the builder's): with the padded layout one CPU wins each
+freshly woken worker, so it never changes CPU. So the old test's coverage
+failure follows the padded layout; the flag check found no error on the
+padded side (`bad` 0 in 1400).
+
+Changed test (d09b063b), alone x200: Pi 5 x3
+(`A-pi5-pdmnew-d09b063b-x200-boot01..03.txt`) 600 of 600; Jetson
+UEFI-direct x1 (`A-uefi-pdmnew-d09b063b-x200-boot01.txt`) 200 of 200;
+Jetson kexec x1 (`A-kexec-pdmnew-d09b063b-x200-boot01.txt`) 200 of 200;
+`bad` 0 in all 1000. Full suite at d09b063b, Jetson UEFI-direct x1
+(`A-uefi-suite-d09b063b-boot01.txt`): completes, 21 failures, none outside
+the known list, the changed test passes. `/ci` at d09b063b: 12 of 12 steps
+(`A-ci-d09b063b-step01..12-*.txt`).
+
+**New observation on the unpadded kernel, not investigated:**
+`A-uefi-pdmdiag-U-6439476f-x200-boot02.txt`, iteration 16: `pdm:
+migrations=41654 moved=7 runs=5/3 bad=1 (first on cpu 5)`, `FAILED at
+test_scheduler.c:2390 Expected 0 Actual 1`. That is the test's real
+assertion (a resumed worker saw its CPU's `preempt_disabled` non-zero), on
+ae1399ba (the head of PR #1266) plus the print: 1 of 1400 unpadded
+iterations, 0 of 1400 padded, 0 of 1000 with the changed test. No issue
+filed yet; it bears on PR #1266, not on the padding.
+
+Not done: kexec was one pair, not three; no kexec suite at d09b063b.
+
+### `0:/slmstore/` on pi-5-1 during A2b (the user's rule, applied)
+
+`A-pi5-slmstore-before-a2b.txt` and `A-pi5-slmstore-after-a2b.txt`: the 9
+entries (path, size, mtime) and the 4 hashes (the conf and the three
+blobs, including `eviction-mlp.blob`, which had no hash before) are
+identical by script; nothing to restore. `files.lfs` and
+`files.lfs.delta` were listed, not read. The nine filtered-test captures
+have no `blob_autoload` or `0:/slmstore` line. No full-suite boot ran on
+Pi 5 in A2b. Limit: the after-record precedes the restore-check boot of
+the original kernel.
+
+### Lab end state (orchestrator's own checks, 00:42 UTC)
+
+- jetson-nano-2: powered on, online; SD Linux, BootCurrent 0001, no
+  BootNext; ESP `SLMOS.efi` 789cba626338af47 from a fresh read-only mount;
+  `/root/slmos.elf` 098f3163; 14 `*.elf*` files; nothing of the session in
+  `/tmp`. Builder A's record: `A-jetson-post-state-A2b.txt` (fsck 6 files,
+  2196/130892 clusters).
+- pi-5-1: powered on, online; original `kernel_2712.img` back,
+  `A-pi5-restore-check-a2b-boot01.txt` banner b42b2c1d.
+- No session image left in `/var/lib/labctl/images`; no trigger or QEMU
+  process.
+- **Both boards released at 00:43 UTC; no active claims.**
+
+### Paused
+
+The user asked for a pause at about 00:00 UTC; the pause point is here.
+Not yet done: critic A round 2 (on the answers to round 1 and the A2b
+rows); the Part A draft PR (closing #1263 only) and the #1262 comment; the
+Part B draft PR (references #1207 and #1228, closes neither) and the
+#1207 comment; marking each PR ready after its critic passes; an issue for
+the `bad=1` observation; the final report. Nothing is merged, and no PR or
+comment on #1262 or #1207 has been posted by this session.
