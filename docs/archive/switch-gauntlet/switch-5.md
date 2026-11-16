@@ -2854,3 +2854,251 @@ at 02:33 UTC from a fresh read-only mount, after the last lab use),
 - Not done: PR #1285 (Part A) is not merged; its base PR #1266 is open.
   The two coalescing tests can now come off #1109's list (comment already
   on #1109); the list was not edited.
+
+## Entry 56 (written 10:55 UTC on 2026-11-16, from date): #1284 decided by the brief's rule as the test's own race (the race itself not observed); PD_WITNESS kernel witness, arms A/B on jetson-nano-2, #1285 check, one Pi 5 boot
+
+Single-agent session (no builders, no subagents), started about 08:20 UTC.
+Question: is the `bad=1` of Entry 50 (`A-uefi-pdmdiag-U-6439476f-x200-boot02.txt:3012-3017`,
+#1284) a kernel defect in the resume path, or the test's own race (worker reads
+`cpu_id()`, then `preempt_disabled[c]`, unpinned with IRQs open; the diagnostic
+print put a histogram increment between the two reads)?
+
+Evidence: `gauntlet-5-hw-jetson` cfe3f0e0 and `gauntlet-5-hw-pi5` c6d805fe,
+`docs/archive/switch-gauntlet/run5-hw/1284/`. Branches (local, not pushed unless
+named): `diag/1284-witness` 47c0cf28, `diag/1284-A` c93f0891, `diag/1284-B`
+775563b0, `fix/1284-pdm-read` cd1557fe, `diag/1284-1285chk` 34c43dc0. Patches of
+all of them under `1284/patches/`.
+
+### 1. Kernel-side witness: `PD_WITNESS` (47c0cf28, debug option, default OFF)
+
+`kernel/include/pd_witness.h`, `kernel/sched/sched.c` (two call sites and the
+implementation, all under `CONFIG_PD_WITNESS`), `CMakeLists.txt` option,
+`Makefile` pass-through (`PD_WITNESS=ON`), `kernel/tests/test_harness.c` prints
+the totals at the end of a run and after any filtered pass in which the count
+changed. It does not touch the test and does not change any test's result.
+
+Invariant, from ADR 0008 and #1229's fix in `schedule()`. The checks run only on
+the path where `schedule()` switched and the incoming task resumes after
+`switch_to()`; they do not run on the early return (no switch) or on a new task's
+first run (`task_entry_trampoline` clears the flag there).
+
+- **W1 "resume"** (right after `sched_finish_switch(prev)`, before the clear):
+  `preempt_disabled[cpu_id()] == 1`, read with local interrupts masked
+  (`sched_irq_save`). The CPU the task resumes on is the CPU that switched it in;
+  that CPU set its own flag to 1 before its switch window (`schedule()`, CPU id
+  pinned under masked IRQs, #1242; or `scheduler_start()`), and nothing clears it
+  before this task does, because ticks skip `schedule()` and the trampoline does
+  not arm while it is 1. A 0 means another CPU cleared this CPU's flag inside its
+  window (the #1229 defect class).
+- **W2 "exit"** (right after `preempt_disabled[now_cpu] = 0`): the flag of the CPU
+  the task is on, CPU id re-read independently, IRQs masked, `== 0`. A 1 means the
+  clear went to another CPU's flag (the reverted #1229 line) or another CPU set
+  this CPU's flag.
+
+Violations are counted per CPU and kind; the first three print the CPU, the task
+(id, name) and expected/observed. The brief asked for the check right after the
+switch (W1); W2 is an addition, because W1 alone does not see the #1229 defect
+(the wrong clear lands after W1).
+
+| Check | File | Result |
+|---|---|---|
+| `make test` QEMU ARM64, witness ON (working tree before the 47c0cf28 commit, same content; banner `ae1399ba-dirty`) | `Q-qemu-arm-make-test-witness-ON-47c0cf28.txt` | PASSED; `[PDW] end of run: checks=861078 violations resume=0 exit=0` (CPU 0 718291, CPUs 1-3 42348/55957/44482) |
+| `make test` QEMU ARM64, witness OFF (775563b0) | `Q-qemu-arm-make-test-witness-OFF-775563b0.txt` | PASSED; no `[PDW]` line |
+| Text size, witness off vs without the witness commit | `Q-text-size-witness-off.txt` | `.text` size 0x22c658 both (cd1557fe vs 775563b0, QEMU test kernels, built in two different worktree paths); ON 0x22c938. The bytes differ (43452) and the cause was not analysed, so only the size is shown equal; with the option off no code is compiled under it. QEMU ARM64 only. (The commit message and `pd_witness.h` say ".text is unchanged"; the evidence shows the size only.) |
+| Mutation: #1229 line reverted (`preempt_disabled[this_cpu] = 0`), witness ON, WS on, the test x20 | `Q-qemu-mutation-1229-reverted-witness-ON-x20.txt` | test fails 20 of 20; witness fires from pass 1: `checks=705 violations resume=13 exit=111` at the end |
+
+### 2. The test's read fixed: cd1557fe on ae1399ba (test only)
+
+`kernel/tests/test_scheduler.c` only: in `pdm_task`, `cpu_id()` and
+`preempt_disabled[c]` are read with local IRQs masked (`pdm_irq_save()`, FIQ too
+under `PI5_FIQ_TIMER`, as `sched_irq_save`), restored right after; the flag value
+is kept in a local and tested after. The assertion is unchanged
+(`TEST_ASSERT_EQUAL_UINT32(0, pdm_bad)`, plus the existing `w >= 0` and
+`pdm_moved > 0`). The header comment says why.
+
+Mutation with the fixed test (775563b0 with the #1229 line reverted, QEMU,
+witness ON, WS on, x20; `Q-qemu-mutation-1229-reverted-fixed-test-witness-ON-x20.txt`):
+fails 20 of 20, `bad` nonzero in all 20 iterations; witness `checks=1106
+violations resume=12 exit=120`. The masked read still detects the defect it was
+written for.
+
+### 3. Arms, jetson-nano-2, witness ON in every arm, `TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=1000`
+
+- A = `diag/1284-A` c93f0891 = 6439476f (ae1399ba + Entry 50's test print) + witness. Image `jet-1284-A`, bin 8310ea0c, elf cfc0033c.
+- B = `diag/1284-B` 775563b0 = cd1557fe + witness. Image `jet-1284-B`, bin 160a2ec0, elf ee71665b. B has no diagnostic print (as briefed: ae1399ba + witness + the fixed test), so B differs from A in two things, the masked read and the absent print.
+
+UEFI-direct: 14 single-boot `boot_test` calls alternating A, B, A, B, ... (slots
+1-14, 08:55 to 09:50 UTC); each staged by the host-side trigger
+(`script-trigger.sh.txt`, mode `uefistage`, log per boot `trigger-uefi-{A,B}N.log`)
+on the Linux boot of that power cycle, staged hash verified from a fresh
+read-only mount before BootNext. Kexec: A then B (09:55, 09:59), `slmos-kexec
+/root/slmos-1284-{A,B}.elf` (copied, `sync`ed, hashes checked first).
+Every capture is from power-on (MB1 line and SLM-OS banner checked by
+`script-save.sh.txt`, last line `slmos>`). Line numbers quoted below are lines
+of the evidence files, which carry an 8 to 18 line `#` header above the labctl
+run file. The stage lines in the trigger logs carry the board's clock (for
+example "08:51:00 staged" at host 08:56:32); the staged hash, checked from a
+fresh read-only mount, is what identifies the image.
+
+| Arm | Path | Files | Iterations | `bad != 0` iterations (sum of `bad`) | Test result | Witness checks | Witness violations |
+|---|---|---|---|---|---|---|---|
+| A | UEFI x7 | `A-uefi-c93f0891-x1000-boot01..07.txt` | 7000 | **1** (1), boot02 | 6999 pass, 1 fail | 133526 | 0 |
+| B | UEFI x7 | `B-uefi-775563b0-x1000-boot01..07.txt` | 7000 | 0 | 7000 pass | 128724 | 0 |
+| A | kexec x1 | `A-kexec-c93f0891-x1000-boot01.txt` | 1000 | 0 | 1000 pass | 18007 | 0 |
+| B | kexec x1 | `B-kexec-775563b0-x1000-boot01.txt` | 1000 | 0 | 1000 pass | 18379 | 0 |
+
+Per boot (`summary-counts.txt`): A UEFI checks 18354, 18742, 20341, 19908, 18480,
+18799, 18902; B UEFI 18271, 18458, 18729, 18278, 18695, 18062, 18231. `moved`
+(cross-CPU resumes counted by the test) per 1000 iterations: A 6582 to 6674, B
+6570 to 6687, kexec 6660/6661.
+
+The A reproduction, `A-uefi-c93f0891-x1000-boot02.txt:3805-3810`:
+
+```
+3805:  pdm: migrations=61099 moved=7 runs=4/4 bad=1 (first on cpu 4)
+3806:  pdm-diag: steals=6 a=[0,2,0,1,1,0] b=[0,1,0,0,2,1]
+3807:    FAILED at .../.wt/a/kernel/tests/test_scheduler.c:2390
+3808:      Expected: 0
+3809:      Actual:   1
+3810:  [ITER 282/1000]  [FAIL] test_preempt_flag_follows_migrated_task (65103 us)
+```
+
+That boot's witness: `checks=18742 violations resume=0 exit=0`, no `[PDW]
+violation` line.
+
+Pi 5 (the one Pi 5 step; my choice of what to run, the brief did not say): arm A
+on pi-5-1, image `pi5-1284-A` (bin 6c48eb63), filtered test only, no integration
+suite (#1274). `A-pi5-c93f0891-x1000-boot01.txt` (branch `gauntlet-5-hw-pi5`):
+1000 of 1000, `bad` 0, witness `checks=21747 violations resume=0 exit=0`.
+
+### 4. Decision
+
+**By the brief's rule, test race:** arm A showed `bad=1` in 1 of 7000 UEFI-direct
+iterations (`A-uefi-c93f0891-x1000-boot02.txt:3805`) with 0 witness violations in its
+133526 UEFI-direct checks (18742 in that boot), and arm B showed `bad=0` in 7000
+UEFI-direct iterations with 0 violations in 128724 checks. The decision comes from
+these 14 UEFI-direct boots on jetson-nano-2. The kexec rows (A and B, 0 `bad`, 0
+violations) and the Pi 5 row (arm A only) would on their own be "undecided"; over
+all 18 hardware captures of the session the witness recorded 0 violations in 340321
+checks.
+
+What this rests on and what it does not:
+- **It is a decision by exclusion; no file shows the race happening.** Nothing in
+  the `bad=1` iteration shows that the worker changed CPU between its two reads.
+  1 in 7000 against 0 in 7000 is one event and does not separate the arms by
+  itself; the decision rests on the witness's silence plus the code argument
+  that a stale `cpu_id()` can read another CPU's flag as 1 by design. A direct
+  observation would need an arm-A variant that, on `pd != 0`, re-reads
+  `cpu_id()` and records the task's switch count across the two reads (not run).
+  The reproduction rate here (1 in 7000) and in Entry 50 (1 in 1400) are single
+  events and neither confirm nor contradict each other.
+- **Where the witness is silent:** (a) a wrong-CPU *set* (CPU Y writing X's flag,
+  the #1242 class) is never checked on X, where the worker reads; it shows only
+  as a W1 0 on Y's incoming task, and not at all if that task is on its first run
+  (`task_entry_trampoline` has no check), and X's next switch-in clears it without
+  a trace; (b) writes after `schedule()` returns, in particular
+  `resched_trampoline`'s set and clear, which is the one path that sets the
+  worker's own CPU's flag in task context, and the shell's `preempt_disabled`
+  writes; (c) `schedule()`'s early return. The test reads the flag after
+  `task_sleep_ms()` returns, so a wrong value written after `schedule()` returns is
+  outside both checks.
+- **Mutation coverage is one defect class:** both QEMU mutation runs revert the
+  #1229 clear, which W2 catches; W1 fires there only as a side effect. No
+  mutation exercises a wrong-CPU set (for example the #1242 pin removed); W1 has
+  no dedicated mutation run.
+- B differs from A in the masked read and the absent print (above), so B's
+  `bad=0` does not isolate the masking. The fixed test as it would merge
+  (cd1557fe, without the witness) has no hardware row; B is cd1557fe plus the
+  witness.
+- CPU 0: no worker woke on CPU 0 in any A capture (histograms sum to 0 on CPU 0)
+  and the witness recorded 0 checks on CPU 0 in every hardware capture (it is not
+  in the per-CPU lines); QEMU covered CPU 0 (718291 checks). The `bad` lines name
+  CPU 5 (Entry 50) and CPU 4 (here); that is the id `c` the worker read, which
+  under the race reading is the CPU it had left.
+
+### 5. #1285 check (padded locks, stacked on #1266)
+
+`diag/1284-1285chk` 34c43dc0 = #1285 head 87061023 + the witness (conflict in
+`sched.c` resolved: both includes kept, `preempt_disabled[...].v` cells as
+#1285 has them) + B's two-worker test (cd1557fe's block, flag read through
+`.v`, local `extern` dropped) **in place of #1285's own three-worker test**.
+Image `jet-1284-C1285` bin d6a682e5. One UEFI-direct boot x1000,
+`C-uefi-1285-34c43dc0-x1000-boot01.txt` (10:09 UTC): `bad` 0 in 1000; witness
+`checks=19938 violations resume=0 exit=0`; **994 pass, 6 fail, all 6 on
+`pdm_moved > 0` (`moved=0`)**, the one-CPU wake-up behaviour of the padded layout
+(#1263, Entries 50 and 52-53) that #1285's three-worker test was written for. The
+flag check found nothing; the two-worker test's coverage condition fails on
+#1285 as it did in Entry 50. This row says nothing about #1285's own
+three-worker test (Entry 53 has its rows).
+
+### 6. `/ci` at cd1557fe (10:19 to 10:37 UTC, clean tree)
+
+`1284/ci-cd1557fe/` (`summary.txt`, one file per step; `script-ci.sh.txt`):
+11 of 11 steps pass. ARM64 and x86-64 main builds and the Jetson real-weights
+main and test builds pass; their non-Lua warnings are the existing `lua_slm.c` `-Wcomment`
+lines and two linker notes, none in a changed file. `make test` ARM64,
+x86-64 and `AI_SCHED=ON`: PASSED (make output only; the step files do not
+carry the serial logs, so they do not show the changed test's own line). `make runtime-test`: 308 and 328 passed,
+0 failed. Braces: 0 violations, 0 unparsed, all twelve configurations parsed.
+Build order: all passed. Jetson UEFI layout: "All checks passed.", no `!`
+line. Diff against `origin/main` is #1266's diff plus the test change; no
+build artifacts. Not re-run with the witness commit on top (B, 775563b0).
+
+### Lab end state
+
+- jetson-nano-2: released 10:14 UTC, powered on, SD Linux, BootCurrent 0001, no
+  BootNext, ESP `SLMOS.efi` 789cba626338af47 (fresh read-only mount, `fsck.vfat
+  -n` 6 files 2196/130892 clusters, as found), `/root/slmos.elf` 098f3163, 14
+  `*.elf*` files, `/root/slmos-1284-*` removed (`jetson-pre-state.txt`,
+  `jetson-post-state.txt`; the only difference is the ESP file's mtime).
+- pi-5-1: released 10:49 UTC, powered on; original `kernel_2712.img` (6935256
+  bytes, mtime 2026-10-29T04:54:04Z) renamed back; restore-check boot banner
+  b42b2c1d (`A-pi5-restore-check-boot01.txt`); `/slmstore` listing identical
+  before and after, sizes and mtimes only (`A-pi5-card-before-after.txt`).
+- No session image left in `/var/lib/labctl/images`; no trigger or QEMU process
+  of this session running.
+
+### Incidents
+
+- After UEFI boot B7 the first copy of the kexec ELFs failed: the board was still
+  in SLM-OS, whose sshd answered the "is it up" probe. Nothing was written; the
+  board was power-cycled to Linux and the copy redone (hashes checked, `sync`).
+- The first `boot_test` call for A1 was prepared with the pattern
+  `slmos>|Test Suite Summary` and not confirmed (it would have stopped the
+  capture before the summary); every call ran with `slmos>`.
+
+### Critic (one Fable critic, blind; `1284/critic-1284.md`)
+
+**PASS, 0 blocking findings, 6 MEDIUM, 6 LOW.** It derived the invariant from
+ae1399ba's code before reading the witness (flag 1 when `switch_to()` returns
+into the incoming task, 0 after the clear, all writers local to the CPU by
+design; a non-zero read with IRQs open needs a stale id, a wrong-CPU clear, a
+wrong-CPU set or an out-of-scheduler writer), found that W1 and W2 check that
+invariant at the right points with no race of their own, and that the fixed test
+still tests the property (masking removes only the stale-id read; the mutation
+still fails 20 of 20). It recounted every capture: all numbers, banners, boot
+sources, ends, the A,B alternation (trigger times and staged hashes against
+`images.txt`) and the sums are right; nothing missing or duplicated. Its MEDIUM
+findings (decision by exclusion; the witness's silent cases, in particular a
+wrong-CPU set and the trampoline; one mutation class only; `.text` size shown,
+not bytes; the witness-ON `make test` banner; the decision's scope) and LOW
+findings (the CPU named in `bad` lines, header time, `/ci` wording, evidence
+line numbers, board-clock stage times, #1285 row scope) were applied to this
+entry's wording above. Not done: the critic's two suggested experiments (a
+stale-id recorder in arm A; a #1242-style mutation for W1). Not checked by the
+critic: `patches/` against the commits.
+
+The critic ran before the push to #1266 and the comments, so that a finding
+against the fixed test could stop them.
+
+### Actions after the critic
+
+- **cd1557fe pushed to `c2/switch-window-r2` (PR #1266), `ae1399ba..cd1557fe`,
+  fast-forward**, about 10:58 UTC. Test only. `closingIssuesReferences` of #1266
+  after the push: #1234, #1238, #1242 (from its body, unchanged); #1284 open.
+- Comments posted (texts in `1284/comment-1284.md`, `1284/comment-1266.md`):
+  #1284 issuecomment-6914316171, #1266 issuecomment-6914316751.
+- #1266's new head conflicts with #1285's head in `kernel/tests/test_scheduler.c`
+  (`git merge-tree`, one conflict); #1285 rewrites the same test with the same
+  masked read. Said in the #1266 comment; #1285 not touched.
+- Nothing merged.
