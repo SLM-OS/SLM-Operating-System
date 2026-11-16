@@ -278,4 +278,66 @@ unsigned pmm_check_walk(const char *where);
 #define PMM_CHECK_WALK(where)   ((void)0)
 #endif
 
+/*
+ * PMM_POISON / PMM_UNMAP build options (#1207, debug only, ARM64; see
+ * kernel/mm/pmm.c "PMM_POISON / PMM_UNMAP"). Nothing without the options.
+ *
+ * pmm_poison_scan(where, full): the free-list walk of
+ * pmm_verify_free_lists(where), then a check of the pattern in every free
+ * page (full: every byte; otherwise the first and last 64 bytes of each
+ * page). Prints one summary line and a report per damaged page, puts the
+ * pattern back on reported pages, and returns list findings plus damaged
+ * pages.
+ *
+ * pmm_poison_describe_fault(far): one line for the EL1 fault dump when FAR
+ * is in a heap page: free or allocated, the free block and order, and
+ * whether the linear map has it.
+ */
+#if defined(CONFIG_PMM_POISON)
+struct pmm_poison_stats {
+    bool armed, unmap;
+    unsigned alloc_findings;    /* allocation checks that found damage */
+    unsigned scan_findings;     /* damaged free pages found by scans */
+    unsigned injected;          /* findings the tests caused on purpose */
+    uint64_t bytes;             /* damaged bytes, all findings */
+    size_t arm_free_pages;      /* free pages poisoned when armed */
+    size_t arm_mapped_pages;    /* of those, left in the linear map */
+    size_t l3_tables, l3_missed;
+    uint64_t arm_ms;
+    unsigned scans;
+    uint64_t last_scan_ms, max_scan_ms;
+    size_t last_scan_pages;
+};
+
+/* The last finding: an allocation check (scan false; base == block) or a
+ * scan (base is the damaged page; order -1 when no free head was found).
+ * Offsets are from base. */
+struct pmm_poison_report {
+    bool scan;
+    const char *where;
+    uintptr_t block;
+    int order;
+    uintptr_t base;
+    size_t first, last, nbytes;
+    bool all_zero;
+    size_t pages_hit;
+    uintptr_t first_page;
+};
+
+unsigned pmm_poison_scan(const char *where, bool full);
+void pmm_poison_get_stats(struct pmm_poison_stats *out);
+void pmm_poison_last_report(struct pmm_poison_report *out);
+void pmm_poison_describe_fault(uint64_t far);
+
+/* For kernel/tests: the alias address of pa (0 before arming); the linear
+ * map state of pa (1 mapped, 0 unmapped, -1 no L3 entry or no PMM_UNMAP);
+ * findings a test caused on purpose, for the end-of-run summary. */
+uintptr_t pmm_poison_alias_of(uintptr_t pa);
+int pmm_poison_identity_state(uintptr_t pa);
+void pmm_poison_note_injected(unsigned n);
+#if defined(CONFIG_PMM_UNMAP_SELFTEST)
+void pmm_unmap_selftest(void);
+#endif
+#endif /* CONFIG_PMM_POISON */
+
 #endif /* PMM_H */

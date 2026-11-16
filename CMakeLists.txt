@@ -339,6 +339,42 @@ option(PMM_CHECK "PMM free-list and count assertions (#1207, debug only)" OFF)
 if(PMM_CHECK)
     add_compile_definitions(CONFIG_PMM_CHECK=1)
 endif()
+# PMM poison and unmap diagnostics (#1207, debug only; kernel/mm/pmm.c
+# "PMM_POISON / PMM_UNMAP", docs/testing.md). PMM_POISON fills every free
+# page with an address-dependent pattern, checks it when a block is
+# allocated, and gives the test harness a full scan (run around and inside
+# test_suite_gpu). PMM_UNMAP (needs PMM_POISON) also removes every free
+# page from the kernel's linear map, so a CPU access to a freed page
+# faults. PMM_UNMAP_SELFTEST (needs PMM_UNMAP) writes to a freed page once
+# at the start of the test run, to show the fault dump, and halts. ARM64
+# only. With all three off nothing is compiled.
+option(PMM_POISON "PMM free-page poison, allocation check and scans (#1207, debug only)" OFF)
+option(PMM_UNMAP "Unmap PMM-free pages from the linear map (#1207, needs PMM_POISON)" OFF)
+option(PMM_UNMAP_SELFTEST "Write a freed page at test start and fault (#1207, needs PMM_UNMAP)" OFF)
+if(PMM_POISON OR PMM_UNMAP OR PMM_UNMAP_SELFTEST)
+    if(PLATFORM STREQUAL "X86_64")
+        message(FATAL_ERROR "PMM_POISON / PMM_UNMAP are ARM64 only (#1207)")
+    endif()
+endif()
+if(PMM_UNMAP AND NOT PMM_POISON)
+    message(FATAL_ERROR "PMM_UNMAP requires PMM_POISON=ON (#1207)")
+endif()
+if(PMM_UNMAP_SELFTEST AND NOT PMM_UNMAP)
+    message(FATAL_ERROR "PMM_UNMAP_SELFTEST requires PMM_UNMAP=ON (#1207)")
+endif()
+if(PMM_POISON)
+    add_compile_definitions(CONFIG_PMM_POISON=1)
+endif()
+if(PMM_UNMAP)
+    add_compile_definitions(CONFIG_PMM_UNMAP=1)
+endif()
+if(PMM_UNMAP_SELFTEST)
+    add_compile_definitions(CONFIG_PMM_UNMAP_SELFTEST=1)
+endif()
+option(PMM_POISON_PER_TEST_FULL "PMM_POISON: full (not first+last 64 B) scan after each test_suite_gpu test" OFF)
+if(PMM_POISON AND PMM_POISON_PER_TEST_FULL)
+    add_compile_definitions(CONFIG_PMM_POISON_PER_TEST_FULL=1)
+endif()
 
 option(STAGE25_TRACE_PI5 "Pi 5 vector + trampoline trace markers (debug only)" OFF)
 if(PLATFORM STREQUAL "RASPI5" AND STAGE25_TRACE_PI5)
@@ -1145,6 +1181,7 @@ set(TEST_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_tcp_telemetry_server.c>
     kernel/tests/test_pmm.c
+    kernel/tests/test_pmm_poison.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pmu.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_kbuf.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>

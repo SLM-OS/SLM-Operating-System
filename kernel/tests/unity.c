@@ -152,12 +152,32 @@ static void unity_run_filtered(UnityTestFunction func, const char *name,
     unity_output_string(" us)\n");
 }
 
+#if defined(CONFIG_PMM_POISON)
+/* PMM_POISON (#1207): the harness scans free memory after each test of a
+ * chosen suite (test_suite_gpu), named by the test. */
+static void (*unity_after_test_hook)(const char *name);
+
+void unity_set_after_test_hook(void (*hook)(const char *name))
+{
+    unity_after_test_hook = hook;
+}
+#define UNITY_AFTER_TEST(name) \
+    do { \
+        if (unity_after_test_hook) { \
+            unity_after_test_hook(name); \
+        } \
+    } while (0)
+#else
+#define UNITY_AFTER_TEST(name) ((void)0)
+#endif
+
 void UnityRunTest(UnityTestFunction func, const char *name)
 {
     if (test_filter_active()) {
         int idx = test_filter_index_of(&g_test_filter, name);
         if (idx >= 0) {
             unity_run_filtered(func, name, idx);
+            UNITY_AFTER_TEST(name);
         }
         return;
     }
@@ -165,6 +185,7 @@ void UnityRunTest(UnityTestFunction func, const char *name)
     unity_run_body(func, name);
     unity_print_result(name);
     unity_output_char('\n');
+    UNITY_AFTER_TEST(name);
 }
 
 /* ============================================================================

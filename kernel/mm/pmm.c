@@ -23,6 +23,10 @@
 #include "spinlock.h"
 #include "dtb.h"
 #include "timer.h"
+#if defined(CONFIG_PMM_POISON)
+#include "vmm.h"     /* VMM_PMM_ALIAS_OFFSET, linear-map unmapping */
+#include "cache.h"
+#endif
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "camrtc_layout.h"   /* CAMRTC_FRAME_BUFFER_PHYS / _END */
 #endif
@@ -74,6 +78,22 @@ struct free_block {
     struct free_block *next;
     struct free_block *prev;
 };
+
+/*
+ * PMM_FB(a): the header of the free block at address a, as this file reads
+ * and writes it; PMM_VA(a): the same for any byte of a free page. The free
+ * lists hold linear-map (identity) addresses. With PMM_POISON armed, free
+ * pages are reached through the PMM's Non-cacheable alias instead (see
+ * "PMM_POISON / PMM_UNMAP" below; under PMM_UNMAP the identity mapping of
+ * a free page is gone). Without the option both are plain casts.
+ */
+#if defined(CONFIG_PMM_POISON)
+static uintptr_t pmm_alias;     /* 0 until armed, then VMM_PMM_ALIAS_OFFSET */
+#define PMM_VA(a)   ((uintptr_t)(a) + pmm_alias)
+#else
+#define PMM_VA(a)   ((uintptr_t)(a))
+#endif
+#define PMM_FB(a)   ((struct free_block *)PMM_VA(a))
 
 /*
  * Buddy allocator state
@@ -253,11 +273,11 @@ static void pmm_chk_dump_list(unsigned int order)
             break;
         }
         uart_printf("    [%u] 0x%lx next=0x%lx prev=0x%lx tag=0x%x state=%u\n",
-                    i, (unsigned long)a, (unsigned long)(uintptr_t)b->next,
-                    (unsigned long)(uintptr_t)b->prev,
+                    i, (unsigned long)a, (unsigned long)(uintptr_t)PMM_FB(b)->next,
+                    (unsigned long)(uintptr_t)PMM_FB(b)->prev,
                     (unsigned)pmm_chk_tag[addr_to_block_index(a)],
                     (unsigned)block_state[addr_to_block_index(a)]);
-        b = b->next;
+        b = PMM_FB(b)->next;
     }
 }
 
@@ -271,7 +291,7 @@ static void pmm_chk_fail(const char *what, uintptr_t addr, unsigned int order)
     uart_printf("  at 0x%lx order %u, caller pc=0x%lx\n",
                 (unsigned long)addr, order, (unsigned long)pmm_chk_pc);
     if (addr && pmm_chk_ptr_ok(addr, 0)) {
-        const volatile uint64_t *raw = (const volatile uint64_t *)addr;
+        const volatile uint64_t *raw = (const volatile uint64_t *)PMM_VA(addr);
         uart_printf("  page tag=0x%x state=%u raw[0..3]=%016lx %016lx %016lx %016lx\n",
                     (unsigned)pmm_chk_tag[addr_to_block_index(addr)],
                     (unsigned)block_state[addr_to_block_index(addr)],
@@ -313,7 +333,7 @@ static void pmm_chk_add(uintptr_t addr, unsigned int order)
         pmm_chk_fail("free_list_add: block is already on a free list",
                      addr, order);
     }
-    if (head && (!pmm_chk_listed((uintptr_t)head, order) || head->prev)) {
+    if (head && (!pmm_chk_listed((uintptr_t)head, order) || PMM_FB(head)->prev)) {
         pmm_chk_fail("free_list_add: list head is not a listed block of this "
                      "order, or its prev link is not NULL",
                      (uintptr_t)head, order);
@@ -328,6 +348,7 @@ static void pmm_chk_add(uintptr_t addr, unsigned int order)
 static void pmm_chk_remove(uintptr_t addr, unsigned int order)
 {
     struct free_block *block = (struct free_block *)addr;
+    struct free_block *bprev, *bnext;
     if (buddy_state.free_counts[order] == 0) {
         pmm_chk_fail("free_list_remove: free_counts is zero (would underflow)",
                      addr, order);
@@ -337,14 +358,16 @@ static void pmm_chk_remove(uintptr_t addr, unsigned int order)
                      addr, order);
         return;
     }
-    if (block->prev ? (!pmm_chk_listed((uintptr_t)block->prev, order) ||
-                       block->prev->next != block)
-                    : buddy_state.free_lists[order] != block) {
+    bprev = PMM_FB(block)->prev;
+    bnext = PMM_FB(block)->next;
+    if (bprev ? (!pmm_chk_listed((uintptr_t)bprev, order) ||
+                 PMM_FB(bprev)->next != block)
+              : buddy_state.free_lists[order] != block) {
         pmm_chk_fail("free_list_remove: prev link (or the list head) does not "
                      "lead to the block", addr, order);
     }
-    if (block->next && (!pmm_chk_listed((uintptr_t)block->next, order) ||
-                        block->next->prev != block)) {
+    if (bnext && (!pmm_chk_listed((uintptr_t)bnext, order) ||
+                  PMM_FB(bnext)->prev != block)) {
         pmm_chk_fail("free_list_remove: next link does not lead back to the block",
                      addr, order);
     }
@@ -370,12 +393,13 @@ static void pmm_chk_pop(unsigned int order)
                      (uintptr_t)block, order);
         return;
     }
-    if (block->prev) {
+    if (PMM_FB(block)->prev) {
         pmm_chk_fail("free_list_pop: list head has a prev link",
                      (uintptr_t)block, order);
     }
-    if (block->next && (!pmm_chk_listed((uintptr_t)block->next, order) ||
-                        block->next->prev != block)) {
+    struct free_block *bnext = PMM_FB(block)->next;
+    if (bnext && (!pmm_chk_listed((uintptr_t)bnext, order) ||
+                  PMM_FB(bnext)->prev != block)) {
         pmm_chk_fail("free_list_pop: head's next link is not a listed block "
                      "that links back", (uintptr_t)block, order);
     }
@@ -467,7 +491,7 @@ static void pmm_chk_init_report(void)
 
     (void)pmm_chk_walk_locked(&blocks);
     for (unsigned int o = 0; o < MAX_ORDER; o++) {
-        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = PMM_FB(b)->next) {
             uintptr_t buddy = get_buddy_addr((uintptr_t)b, o);
             if (buddy > (uintptr_t)b && pmm_chk_listed(buddy, o)) {
                 if (unmerged++ < 8) {
@@ -545,7 +569,7 @@ static unsigned pmm_chk_walk_locked(size_t *blocks_out)
     for (unsigned int o = 0; o <= MAX_ORDER; o++) {
         size_t n = 0;
         struct free_block *prev = NULL;
-        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = PMM_FB(b)->next) {
             uintptr_t a = (uintptr_t)b;
             if (n >= buddy_state.free_counts[o]) {
                 pmm_chk_fail("walk: list longer than free_counts", a, o);
@@ -556,7 +580,7 @@ static unsigned pmm_chk_walk_locked(size_t *blocks_out)
                              a, o);
                 break;
             }
-            if (b->prev != prev) {
+            if (PMM_FB(b)->prev != prev) {
                 pmm_chk_fail("walk: prev link does not point at the previous "
                              "element", a, o);
                 break;
@@ -713,7 +737,7 @@ static void pmm_dump_words(const char *label, uintptr_t a)
                     label, (unsigned long)a);
         return;
     }
-    const volatile uint64_t *w = (const volatile uint64_t *)a;
+    const volatile uint64_t *w = (const volatile uint64_t *)PMM_VA(a);
     uart_printf("  %s 0x%lx: %016lx %016lx %016lx %016lx\n", label,
                 (unsigned long)a, (unsigned long)w[0], (unsigned long)w[1],
                 (unsigned long)w[2], (unsigned long)w[3]);
@@ -756,7 +780,7 @@ static size_t pmm_walk_list(unsigned int o, struct pmm_finding *f)
         } else if (block_state[addr_to_block_index(a)] !=
                    (uint8_t)(BLOCK_FREE_HEAD | o)) {
             f->what = "element is not marked as a listed free block of this order";
-        } else if ((uintptr_t)((struct free_block *)a)->prev != prev) {
+        } else if ((uintptr_t)PMM_FB(a)->prev != prev) {
             f->what = "element's prev link is not the element before it";
         } else if (n >= buddy_state.free_counts[o]) {
             f->what = "list is longer than its count";
@@ -768,7 +792,7 @@ static size_t pmm_walk_list(unsigned int o, struct pmm_finding *f)
             return n;
         }
         prev = a;
-        a = (uintptr_t)((struct free_block *)a)->next;
+        a = (uintptr_t)PMM_FB(a)->next;
         n++;
     }
     if (n != buddy_state.free_counts[o]) {
@@ -879,6 +903,592 @@ unsigned pmm_verify_finding_count(void)
 }
 
 /* ==========================================================================
+ * PMM_POISON / PMM_UNMAP: free-page poison and unmap (#1207, debug only)
+ *
+ * Built only with `make ... PMM_POISON=ON [PMM_UNMAP=ON]` (CMake
+ * -DPMM_POISON=ON / -DPMM_UNMAP=ON, CONFIG_PMM_POISON / CONFIG_PMM_UNMAP).
+ * ARM64 only. With the options off nothing below is compiled and every
+ * PMM_POISON_* hook expands to nothing.
+ *
+ * What it is for. #1207: on Jetson kexec boots a listed free block was
+ * found with zeroed bytes across its start. A device writing DRAM (a GPU
+ * engine left running by Linux, or one the GPU tests start), or CPU code
+ * writing through a stale pointer to memory it gave back, are the main
+ * candidates. These options tell them apart:
+ *  - PMM_UNMAP: a free page has no linear-map (identity) entry, so a CPU
+ *    access to it takes a translation fault with the ELR of the access,
+ *    and the fault dump says the address is in a PMM-free page.
+ *  - PMM_POISON: every free byte holds a known pattern. A write that does
+ *    not fault (a device, or a CPU path through another mapping) changes
+ *    it, and the change is reported when the block is next allocated
+ *    (always) and by pmm_poison_scan() (the test harness runs it around
+ *    and inside test_suite_gpu).
+ *
+ * Pattern. The 64-bit word at physical address pa holds
+ * PMM_POISON_TAG | pa (0xF4EE << 48 | pa). It is not zero, a page copied
+ * from elsewhere differs from it (the address is in it), and as a pointer
+ * it is non-canonical, so a stale pointer loaded from poison faults.
+ * The only free bytes that are not poison are the two link words (next,
+ * prev) at the start of each listed head; they are put back to the
+ * pattern when the block leaves its list (free_list_pop,
+ * free_list_remove: allocation, or absorption in a merge).
+ *
+ * Mapping and the cache argument. The PMM reaches free pages only through
+ * a second mapping of RAM at PA + VMM_PMM_ALIAS_OFFSET (vmm.c), Normal
+ * Non-cacheable: reads go to DRAM and writes do not allocate lines.
+ *  - PMM_UNMAP: freeing a block (1) clears the valid bit of its identity
+ *    L3 entries and invalidates the TLB (broadcast, TLBI ...IS; under VHE
+ *    with HCR_EL2.{E2H,TGE} = {1,1} the EL1 TLBI forms act on the EL2&0
+ *    regime the kernel runs in), so no new line can be allocated through
+ *    the identity mapping; then (2) cleans and invalidates the block to
+ *    the PoC by VA through the alias (DC CIVAC acts on the PA whatever
+ *    the attributes of the VA used): the last owner's dirty lines reach
+ *    DRAM and no cached copy remains; then (3) writes the pattern through
+ *    the alias. After that no cacheable alias of the page exists anywhere
+ *    (kbuf's second WB mapping of a chunk is removed before the chunk is
+ *    freed), so a write by a device that does not snoop the CPU caches
+ *    lands in DRAM and the next NC read sees it; no CPU line can hide it
+ *    or be written back over it. Allocation checks the pattern through
+ *    the alias, then sets the identity entries valid again.
+ *  - PMM_POISON alone: the identity mapping stays, so a stale-pointer
+ *    write can sit dirty in a cache and a speculative fetch can hold a
+ *    clean, stale copy. Allocation therefore first cleans and invalidates
+ *    the block (dirty CPU data reaches DRAM and is checked, stale clean
+ *    copies are dropped) and then reads DRAM through the alias: the
+ *    allocation check is exact in both modes. The scan does not clean
+ *    first (it would double its cost), so in this mode it can miss a CPU
+ *    write still held dirty in a cache, and, on a core whose NC reads look
+ *    up the caches, a device write under a stale clean line; both are
+ *    still found at allocation. Under PMM_UNMAP the scan is exact for
+ *    every unmapped page.
+ *  - Pages PMM_UNMAP cannot unmap (the part of the 2 MB block that holds
+ *    the end of the kernel image, the block holding heap_start, or a
+ *    split that found no table page) keep the PMM_POISON-alone rules;
+ *    arming prints how many.
+ *
+ * Arming. Pages freed before the MMU and the vmm are up need the same
+ * treatment, so nothing is done per operation until pmm_poison_arm(),
+ * called at the end of pmm_init (vmm_init runs before pmm_init on ARM64,
+ * secondaries are not up and IRQs are masked). It builds the alias, under
+ * PMM_UNMAP gives the heap's linear map 4 KB pages (break-before-make per
+ * entry, tables from the PMM), then unmaps, cleans and poisons every page
+ * already free.
+ *
+ * Reports (allocation and scan) give the block and order, the first and
+ * last differing byte offsets, how many bytes differ, whether every
+ * differing byte is zero, which pages are hit, the first and last
+ * differing 64-byte line, the time and the last suite or test boundary
+ * (pmm_verify_where). They do not stop the kernel. The first 16 are
+ * printed in full, the next 240 in one line, the rest only counted. A
+ * scan puts the pattern back on a page it reports, so a later report of
+ * the same page is a new write.
+ *
+ * Cost. Every free writes its block once and every allocation reads it
+ * once, through the NC alias, with IRQs masked under pmm_lock for the
+ * free. pmm_poison_scan() reads every free page (or, `full` false, the
+ * first and last 64 bytes of each), 512 pages per pmm_lock hold.
+ * ========================================================================== */
+#if defined(CONFIG_PMM_POISON)
+#if defined(PLATFORM_X86_64)
+#error "PMM_POISON / PMM_UNMAP are ARM64 only (#1207)"
+#endif
+
+#define PMM_POISON_TAG          0xF4EE000000000000UL
+#define PMM_POISON_DETAIL_MAX   16u     /* findings printed in full */
+#define PMM_POISON_LINE_MAX     256u    /* findings printed at all */
+#define PMM_SCAN_CHUNK_PAGES    512u    /* pages checked per pmm_lock hold */
+
+static spinlock_t pmm_poison_lock = SPINLOCK_INIT;  /* stats and reports */
+static bool pmm_poison_unmap_on;                    /* identity unmapping armed */
+static struct pmm_poison_stats pmm_pstats;
+static struct pmm_poison_report pmm_plast;
+static unsigned pmm_preports;                       /* findings, all kinds */
+
+static inline uint64_t pmm_poison_word(uintptr_t pa)
+{
+    return PMM_POISON_TAG | (uint64_t)pa;
+}
+
+/* What one check found. Offsets are from the checked range's base. */
+struct pmm_pdiff {
+    bool any, nonzero;
+    size_t first, last, nbytes;
+    size_t first_line, last_line;
+    size_t pages_hit;
+    uintptr_t first_page, last_page;
+};
+
+/* Write the pattern over [pa, pa + len) through the alias (len a multiple
+ * of 8, pa 8-byte aligned). */
+static void pmm_p_fill(uintptr_t pa, size_t len)
+{
+    uint64_t *w = (uint64_t *)PMM_VA(pa);
+    uint64_t v = pmm_poison_word(pa);
+    for (size_t i = 0; i < len / 8; i++, v += 8) {
+        w[i] = v;
+    }
+}
+
+/* Compare [pa, pa + len) with the pattern through the alias; add what
+ * differs to *d, as offsets from `base`. */
+static void pmm_p_check(uintptr_t base, uintptr_t pa, size_t len,
+                        struct pmm_pdiff *d)
+{
+    const uint64_t *w = (const uint64_t *)PMM_VA(pa);
+    uint64_t exp = pmm_poison_word(pa);
+    for (size_t i = 0; i < len / 8; i++, exp += 8) {
+        uint64_t v = w[i];
+        if (__builtin_expect(v == exp, 1)) {
+            continue;
+        }
+        uint64_t x = v ^ exp;
+        size_t off0 = (pa - base) + i * 8;
+        for (unsigned b = 0; b < 8; b++) {
+            if (((x >> (8 * b)) & 0xffu) == 0) {
+                continue;
+            }
+            size_t off = off0 + b;
+            if (!d->any) {
+                d->any = true;
+                d->first = off;
+                d->first_line = off & ~(size_t)63;
+            }
+            d->last = off;
+            d->last_line = off & ~(size_t)63;
+            d->nbytes++;
+            if ((v >> (8 * b)) & 0xffu) {
+                d->nonzero = true;
+            }
+        }
+    }
+}
+
+/* The listed free block that contains page-aligned address a: its head
+ * is a aligned down to the block's order, marked BLOCK_FREE_HEAD | order.
+ * Reads block_state[] only (no lock: also used from the fault dump). */
+static bool pmm_p_find_block(uintptr_t a, uintptr_t *blk, unsigned int *order)
+{
+    for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+        uintptr_t b = a & ~(uintptr_t)(order_to_size(o) - 1);
+        if (b < buddy_state.heap_start) {
+            break;
+        }
+        if (block_state[addr_to_block_index(b)] == (uint8_t)(BLOCK_FREE_HEAD | o)) {
+            *blk = b;
+            *order = o;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* One 64-byte line through the alias, with what the pattern would be. */
+static void pmm_p_dump_line(const char *label, uintptr_t line)
+{
+    const volatile uint64_t *w = (const volatile uint64_t *)PMM_VA(line);
+    uart_printf("  %s 0x%lx: %016lx %016lx %016lx %016lx\n", label,
+                (unsigned long)line, (unsigned long)w[0], (unsigned long)w[1],
+                (unsigned long)w[2], (unsigned long)w[3]);
+    uart_printf("  %s 0x%lx: %016lx %016lx %016lx %016lx\n", label,
+                (unsigned long)(line + 32), (unsigned long)w[4],
+                (unsigned long)w[5], (unsigned long)w[6], (unsigned long)w[7]);
+    uart_printf("  (pattern there: %016lx, +8 per word)\n",
+                (unsigned long)pmm_poison_word(line));
+}
+
+/*
+ * Record and print one finding: an allocation check (scan false: block
+ * and order are the allocated block, base == block) or a scan (scan
+ * true: base is the free page, block and order the free block holding
+ * it, order -1 when none was found).
+ */
+static void pmm_p_report(bool scan, const char *where, uintptr_t block,
+                         int order, uintptr_t base, const struct pmm_pdiff *d)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_poison_lock);
+    unsigned n = scan ? ++pmm_pstats.scan_findings : ++pmm_pstats.alloc_findings;
+    unsigned k = pmm_preports++;
+    uint64_t ms = pmm_now_ms();
+
+    pmm_pstats.bytes += d->nbytes;
+    pmm_plast.scan = scan;
+    pmm_plast.where = where;
+    pmm_plast.block = block;
+    pmm_plast.order = order;
+    pmm_plast.base = base;
+    pmm_plast.first = d->first;
+    pmm_plast.last = d->last;
+    pmm_plast.nbytes = d->nbytes;
+    pmm_plast.all_zero = !d->nonzero;
+    pmm_plast.pages_hit = d->pages_hit;
+    pmm_plast.first_page = d->first_page;
+
+    if (k < PMM_POISON_DETAIL_MAX) {
+        if (scan) {
+            uart_printf("\n[pmm-poison] FINDING (scan %u) at %lu ms: scan \"%s\": "
+                        "free page 0x%lx in free block 0x%lx order %d\n", n,
+                        (unsigned long)ms, where, (unsigned long)base,
+                        (unsigned long)block, order);
+        } else {
+            uart_printf("\n[pmm-poison] FINDING (allocation %u) at %lu ms: %s "
+                        "allocated block 0x%lx order %d (%lu KB)\n", n,
+                        (unsigned long)ms, where, (unsigned long)block, order,
+                        (unsigned long)(order_to_size((unsigned)order) / 1024));
+        }
+        uart_printf("  last boundary: %s\n", pmm_verify_where);
+        uart_printf("  %lu byte(s) differ from the pattern, offsets 0x%lx to 0x%lx "
+                    "from 0x%lx; the differing bytes are %s\n",
+                    (unsigned long)d->nbytes, (unsigned long)d->first,
+                    (unsigned long)d->last, (unsigned long)base,
+                    d->nonzero ? "NOT all zero" : "all zero");
+        uart_printf("  pages hit: %lu (first 0x%lx, last 0x%lx)\n",
+                    (unsigned long)d->pages_hit, (unsigned long)d->first_page,
+                    (unsigned long)d->last_page);
+        pmm_p_dump_line("first differing line", base + d->first_line);
+        if (d->last_line != d->first_line) {
+            pmm_p_dump_line("last differing line", base + d->last_line);
+        }
+        uart_puts("[pmm-poison] end of finding\n");
+    } else if (k < PMM_POISON_LINE_MAX) {
+        uart_printf("[pmm-poison] FINDING (%s %u) at %lu ms: base 0x%lx block 0x%lx "
+                    "order %d, %lu bytes 0x%lx..0x%lx, %s, %lu page(s); %s / %s\n",
+                    scan ? "scan" : "allocation", n, (unsigned long)ms,
+                    (unsigned long)base, (unsigned long)block, order,
+                    (unsigned long)d->nbytes, (unsigned long)d->first,
+                    (unsigned long)d->last, d->nonzero ? "nonzero" : "all zero",
+                    (unsigned long)d->pages_hit, where, pmm_verify_where);
+    } else if (k == PMM_POISON_LINE_MAX) {
+        uart_puts("[pmm-poison] further findings are counted, not printed\n");
+    }
+    spin_unlock_irqrestore(&pmm_poison_lock, flags);
+}
+
+/* A block leaves the allocator (after pmm_lock is dropped: the block is
+ * the caller's and no other path touches it). Clean and invalidate it
+ * (see the cache argument), check the pattern, then map it again. */
+static void pmm_p_on_alloc(uintptr_t addr, unsigned int order, const char *who)
+{
+    if (!pmm_alias) {
+        return;
+    }
+    size_t pages = order_to_pages(order);
+    struct pmm_pdiff d = {0};
+
+    cache_invalidate_range((const void *)PMM_VA(addr), order_to_size(order));
+    for (size_t p = 0; p < pages; p++) {
+        uintptr_t pg = addr + (p << PAGE_SHIFT);
+        size_t before = d.nbytes;
+        pmm_p_check(addr, pg, PAGE_SIZE, &d);
+        if (d.nbytes != before) {
+            if (d.pages_hit++ == 0) {
+                d.first_page = pg;
+            }
+            d.last_page = pg;
+        }
+    }
+    if (d.any) {
+        pmm_p_report(false, who, addr, (int)order, addr, &d);
+    }
+#if defined(CONFIG_PMM_UNMAP)
+    if (pmm_poison_unmap_on) {
+        (void)vmm_linear_set_present(addr, pages, true, false);
+    }
+#endif
+}
+
+/* A block enters the allocator (pmm_free_pages after its checks, or
+ * pmm_add_region after arming), under pmm_lock. */
+static void pmm_p_on_free(uintptr_t addr, unsigned int order)
+{
+    if (!pmm_alias) {
+        return;
+    }
+    size_t size = order_to_size(order);
+#if defined(CONFIG_PMM_UNMAP)
+    if (pmm_poison_unmap_on) {
+        (void)vmm_linear_set_present(addr, order_to_pages(order), false, false);
+    }
+#endif
+    cache_invalidate_range((const void *)PMM_VA(addr), size);
+    pmm_p_fill(addr, size);
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* A block left its list (popped, removed for a merge or alloc_low): its
+ * link words become pattern again. */
+static void pmm_p_unlinked(uintptr_t addr)
+{
+    if (pmm_alias) {
+        pmm_p_fill(addr, 2 * sizeof(uint64_t));
+    }
+}
+
+static void *pmm_p_table_page(void)
+{
+    return pmm_alloc_pages(1);
+}
+
+static void pmm_poison_arm(void)
+{
+    uint64_t t0 = pmm_now_ms();
+    size_t free_pages = 0, mapped = 0, l3 = 0, missed = 0;
+    irq_flags_t irq = irq_save();
+
+    if (vmm_pmm_alias_init(pmm_p_table_page) != 0) {
+        irq_restore(irq);
+        WARN("PMM_POISON: the alias mapping could not be built; not armed");
+        return;
+    }
+#if defined(CONFIG_PMM_UNMAP)
+    l3 = vmm_pmm_split_linear(buddy_state.heap_start, buddy_state.heap_end,
+                              pmm_p_table_page, &missed);
+#endif
+
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    for (size_t i = 0; i < buddy_state.total_pages;) {
+        if (block_state[i] == BLOCK_ALLOCATED) {
+            i++;
+            continue;
+        }
+        size_t n = 1;
+        while (i + n < buddy_state.total_pages &&
+               block_state[i + n] != BLOCK_ALLOCATED) {
+            n++;
+        }
+        uintptr_t a = block_index_to_addr(i);
+#if defined(CONFIG_PMM_UNMAP)
+        /* (1) No identity entry: deferred TLB invalidate below. */
+        mapped += vmm_linear_set_present(a, n, false, true);
+#else
+        mapped += n;
+#endif
+        free_pages += n;
+        i += n;
+    }
+#if defined(CONFIG_PMM_UNMAP)
+    vmm_invalidate_tlb_all();
+#endif
+    /* (2) Clean and invalidate every free page through the alias: the
+     * links pmm_add_region wrote through the identity map, and any line
+     * left from before the kexec, reach DRAM; no copy stays cached. */
+    for (size_t i = 0; i < buddy_state.total_pages;) {
+        size_t n = 0;
+        while (i + n < buddy_state.total_pages &&
+               block_state[i + n] != BLOCK_ALLOCATED) {
+            n++;
+        }
+        if (n) {
+            cache_invalidate_range((const void *)(block_index_to_addr(i) +
+                                                  VMM_PMM_ALIAS_OFFSET),
+                                   n * PAGE_SIZE);
+        }
+        i += n ? n : 1;
+    }
+    pmm_alias = VMM_PMM_ALIAS_OFFSET;
+    /* (3) The pattern, except the link words of listed heads. */
+    for (size_t i = 0; i < buddy_state.total_pages; i++) {
+        uint8_t st = block_state[i];
+        if (st == BLOCK_ALLOCATED) {
+            continue;
+        }
+        size_t skip = (st & BLOCK_FREE_HEAD) ? 2 * sizeof(uint64_t) : 0;
+        pmm_p_fill(block_index_to_addr(i) + skip, PAGE_SIZE - skip);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+#if defined(CONFIG_PMM_UNMAP)
+    pmm_poison_unmap_on = true;
+#endif
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    irq_restore(irq);
+
+    pmm_pstats.armed = true;
+    pmm_pstats.unmap = pmm_poison_unmap_on;
+    pmm_pstats.arm_free_pages = free_pages;
+    pmm_pstats.arm_mapped_pages = mapped;
+    pmm_pstats.l3_tables = l3;
+    pmm_pstats.l3_missed = missed;
+    pmm_pstats.arm_ms = pmm_now_ms() - t0;
+    uart_printf("[pmm-poison] armed: %lu free pages poisoned (pattern %016lx | pa), "
+                "alias at PA+0x%lx (Normal NC); unmap %s: %lu L3 tables, %lu "
+                "2 MB blocks not split, %lu free pages unmapped, %lu left mapped; "
+                "%lu ms\n",
+                (unsigned long)free_pages, (unsigned long)PMM_POISON_TAG,
+                (unsigned long)VMM_PMM_ALIAS_OFFSET,
+                pmm_poison_unmap_on ? "on" : "off", (unsigned long)l3,
+                (unsigned long)missed,
+                (unsigned long)(pmm_poison_unmap_on ? free_pages - mapped : 0),
+                (unsigned long)(pmm_poison_unmap_on ? mapped : free_pages),
+                (unsigned long)pmm_pstats.arm_ms);
+}
+
+unsigned pmm_poison_scan(const char *where, bool full)
+{
+    unsigned bad = pmm_verify_free_lists(where);
+    if (!pmm_alias) {
+        return bad;
+    }
+    uint64_t t0 = pmm_now_ms();
+    size_t checked = 0;
+    unsigned found = 0;
+    for (size_t i0 = 0; i0 < buddy_state.total_pages; i0 += PMM_SCAN_CHUNK_PAGES) {
+        size_t i1 = i0 + PMM_SCAN_CHUNK_PAGES;
+        irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+        if (i1 > buddy_state.total_pages) {
+            i1 = buddy_state.total_pages;
+        }
+        for (size_t i = i0; i < i1; i++) {
+            uint8_t st = block_state[i];
+            if (st == BLOCK_ALLOCATED) {
+                continue;
+            }
+            uintptr_t pg = block_index_to_addr(i);
+            size_t skip = (st & BLOCK_FREE_HEAD) ? 2 * sizeof(uint64_t) : 0;
+            struct pmm_pdiff d = {0};
+            if (full) {
+                pmm_p_check(pg, pg + skip, PAGE_SIZE - skip, &d);
+            } else {
+                pmm_p_check(pg, pg + skip, 64 - skip, &d);
+                pmm_p_check(pg, pg + PAGE_SIZE - 64, 64, &d);
+            }
+            checked++;
+            if (d.any) {
+                uintptr_t blk = 0;
+                unsigned int bo = 0;
+                bool have = pmm_p_find_block(pg, &blk, &bo);
+                d.pages_hit = 1;
+                d.first_page = d.last_page = pg;
+                pmm_p_report(true, where, blk, have ? (int)bo : -1, pg, &d);
+                pmm_p_fill(pg + skip, PAGE_SIZE - skip);
+                found++;
+            }
+        }
+        spin_unlock_irqrestore(&pmm_lock, flags);
+    }
+    uint64_t ms = pmm_now_ms() - t0;
+    irq_flags_t flags = spin_lock_irqsave(&pmm_poison_lock);
+    pmm_pstats.scans++;
+    pmm_pstats.last_scan_ms = ms;
+    pmm_pstats.last_scan_pages = checked;
+    if (ms > pmm_pstats.max_scan_ms) {
+        pmm_pstats.max_scan_ms = ms;
+    }
+    spin_unlock_irqrestore(&pmm_poison_lock, flags);
+    uart_printf("[pmm-poison] scan %s (%s): %lu free pages, %u damaged, %u list "
+                "finding(s), %lu ms\n", where, full ? "full" : "first+last 64 B",
+                (unsigned long)checked, found, bad, (unsigned long)ms);
+    return bad + found;
+}
+
+void pmm_poison_get_stats(struct pmm_poison_stats *out)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_poison_lock);
+    *out = pmm_pstats;
+    spin_unlock_irqrestore(&pmm_poison_lock, flags);
+}
+
+void pmm_poison_last_report(struct pmm_poison_report *out)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_poison_lock);
+    *out = pmm_plast;
+    spin_unlock_irqrestore(&pmm_poison_lock, flags);
+}
+
+void pmm_poison_note_injected(unsigned n)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_poison_lock);
+    pmm_pstats.injected += n;
+    spin_unlock_irqrestore(&pmm_poison_lock, flags);
+}
+
+uintptr_t pmm_poison_alias_of(uintptr_t pa)
+{
+    return pmm_alias ? PMM_VA(pa) : 0;
+}
+
+int pmm_poison_identity_state(uintptr_t pa)
+{
+#if defined(CONFIG_PMM_UNMAP)
+    return vmm_linear_page_state(pa);
+#else
+    (void)pa;
+    return -1;
+#endif
+}
+
+/* From the EL1 fault dump: say whether FAR lies in a PMM page and which
+ * free block holds it. No locks (the faulting CPU may hold pmm_lock). */
+void pmm_poison_describe_fault(uint64_t far)
+{
+    if (!pmm_alias || far < buddy_state.heap_start || far >= buddy_state.heap_end) {
+        return;
+    }
+    uintptr_t pg = (uintptr_t)far & ~(uintptr_t)(PAGE_SIZE - 1);
+    uint8_t st = block_state[addr_to_block_index(pg)];
+    uintptr_t blk;
+    unsigned int o;
+    int map = pmm_poison_identity_state(pg);
+    const char *ms = map == 1 ? "mapped" : map == 0 ? "UNMAPPED (PMM_UNMAP)"
+                                                    : "no L3 entry";
+    if (st != BLOCK_ALLOCATED && pmm_p_find_block(pg, &blk, &o)) {
+        uart_printf("PMM:     FAR is in a PMM-FREE page 0x%lx: free block 0x%lx, "
+                    "order %u (%lu KB), page %lu of it; linear map: %s; last "
+                    "boundary: %s\n", (unsigned long)pg, (unsigned long)blk, o,
+                    (unsigned long)(order_to_size(o) / 1024),
+                    (unsigned long)((pg - blk) >> PAGE_SHIFT), ms,
+                    pmm_verify_where);
+    } else if (st != BLOCK_ALLOCATED) {
+        uart_printf("PMM:     FAR is in a PMM-free page 0x%lx (no listed head "
+                    "found above it); linear map: %s\n", (unsigned long)pg, ms);
+    } else {
+        uart_printf("PMM:     FAR is in an allocated (or reserved) heap page 0x%lx; "
+                    "linear map: %s\n", (unsigned long)pg, ms);
+    }
+}
+
+#if defined(CONFIG_PMM_UNMAP_SELFTEST)
+/* The store that the selftest expects to fault (its address is printed). */
+__attribute__((noinline)) void pmm_unmap_selftest_store(volatile uint64_t *p,
+                                                        uint64_t v)
+{
+    *p = v;
+}
+
+void pmm_unmap_selftest(void)
+{
+    uint64_t *p = pmm_alloc_page();
+    if (p == NULL) {
+        panic("PMM_UNMAP selftest: no page");
+    }
+    pmm_free_page(p);
+    uart_printf("[pmm-unmap] selftest: page 0x%lx freed (linear map state %d: "
+                "1 mapped, 0 unmapped); writing 0x%lx through the identity "
+                "mapping from pmm_unmap_selftest_store (0x%lx). Expected: a "
+                "data abort with that ELR, FAR 0x%lx, the page named PMM-free.\n",
+                (unsigned long)(uintptr_t)p, pmm_poison_identity_state((uintptr_t)p),
+                (unsigned long)(uintptr_t)(p + 3),
+                (unsigned long)(uintptr_t)&pmm_unmap_selftest_store,
+                (unsigned long)(uintptr_t)(p + 3));
+    pmm_unmap_selftest_store((volatile uint64_t *)(p + 3), 0x5E1F7E5700000000UL);
+    panic("PMM_UNMAP selftest: the write to freed page 0x%lx did not fault",
+          (unsigned long)(uintptr_t)p);
+}
+#endif
+
+#define PMM_POISON_ALLOC(a, o, who)  pmm_p_on_alloc((a), (o), (who))
+#define PMM_POISON_FREE(a, o)        pmm_p_on_free((a), (o))
+#define PMM_POISON_UNLINKED(a)       pmm_p_unlinked(a)
+#define PMM_POISON_ARM()             pmm_poison_arm()
+
+#else  /* !CONFIG_PMM_POISON */
+
+#define PMM_POISON_ALLOC(a, o, who)  ((void)0)
+#define PMM_POISON_FREE(a, o)        ((void)0)
+#define PMM_POISON_UNLINKED(a)       ((void)0)
+#define PMM_POISON_ARM()             ((void)0)
+
+#endif /* CONFIG_PMM_POISON */
+
+/* ==========================================================================
  * Free List Operations
  *
  * Callers mark every page of the block free (set_block_state) before
@@ -893,7 +1503,7 @@ unsigned pmm_verify_finding_count(void)
  */
 static void free_list_add(uintptr_t addr, unsigned int order)
 {
-    struct free_block *block = (struct free_block *)addr;
+    struct free_block *block = PMM_FB(addr);
     struct free_block *head = buddy_state.free_lists[order];
 
     PMM_CHK_ADD(addr, order);
@@ -901,10 +1511,10 @@ static void free_list_add(uintptr_t addr, unsigned int order)
     block->next = head;
 
     if (head) {
-        head->prev = block;
+        PMM_FB(head)->prev = (struct free_block *)addr;
     }
 
-    buddy_state.free_lists[order] = block;
+    buddy_state.free_lists[order] = (struct free_block *)addr;
     buddy_state.free_counts[order]++;
     block_state[addr_to_block_index(addr)] = (uint8_t)(BLOCK_FREE_HEAD | order);
 }
@@ -914,7 +1524,7 @@ static void free_list_add(uintptr_t addr, unsigned int order)
  */
 static void free_list_remove(uintptr_t addr, unsigned int order)
 {
-    struct free_block *block = (struct free_block *)addr;
+    struct free_block *block = PMM_FB(addr);
 
     PMM_CHK_REMOVE(addr, order);
     if (buddy_state.free_counts[order] == 0) {
@@ -922,14 +1532,15 @@ static void free_list_remove(uintptr_t addr, unsigned int order)
               "(free-list corruption, #1207)", (unsigned long)addr, order);
     }
     if (block->prev) {
-        block->prev->next = block->next;
+        PMM_FB(block->prev)->next = block->next;
     } else {
         buddy_state.free_lists[order] = block->next;
     }
 
     if (block->next) {
-        block->next->prev = block->prev;
+        PMM_FB(block->next)->prev = block->prev;
     }
+    PMM_POISON_UNLINKED(addr);
 
     buddy_state.free_counts[order]--;
     block_state[addr_to_block_index(addr)] = BLOCK_FREE;
@@ -956,7 +1567,7 @@ static uintptr_t free_list_pop(unsigned int order)
      * behind still point at this one, which is about to be handed out (a
      * later merge that unlinks one of them would write a link into the
      * caller's page). */
-    uintptr_t next = (uintptr_t)block->next;
+    uintptr_t next = (uintptr_t)PMM_FB(block)->next;
     if (next ? !(pmm_block_ptr_ok(next, order) &&
                  block_state[addr_to_block_index(next)] ==
                      (uint8_t)(BLOCK_FREE_HEAD | order))
@@ -975,9 +1586,9 @@ static uintptr_t free_list_pop(unsigned int order)
               (unsigned long)buddy_state.free_counts[order]);
     }
 
-    buddy_state.free_lists[order] = block->next;
-    if (block->next) {
-        block->next->prev = NULL;
+    buddy_state.free_lists[order] = PMM_FB(block)->next;
+    if (PMM_FB(block)->next) {
+        PMM_FB(PMM_FB(block)->next)->prev = NULL;
     }
 
     /* Clear the popped block's link pointers. Callers (buddy_alloc /
@@ -985,8 +1596,9 @@ static uintptr_t free_list_pop(unsigned int order)
      * do not zero the header. If a caller ever frees this region back
      * with the wrong order, the stale prev/next bytes would re-enter the
      * free list as garbage and corrupt the doubly-linked list. */
-    block->next = NULL;
-    block->prev = NULL;
+    PMM_FB(block)->next = NULL;
+    PMM_FB(block)->prev = NULL;
+    PMM_POISON_UNLINKED((uintptr_t)block);
 
     buddy_state.free_counts[order]--;
     block_state[addr_to_block_index((uintptr_t)block)] = BLOCK_FREE;
@@ -1384,7 +1996,7 @@ size_t pmm_free_overlap_count(uintptr_t start, uintptr_t end,
     size_t n = 0;
     for (unsigned int o = 0; o <= MAX_ORDER; o++) {
         size_t bsize = order_to_size(o);
-        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = PMM_FB(b)->next) {
             uintptr_t a = (uintptr_t)b;
             if (a < end && a + bsize > start) {
                 if (n == 0) {
@@ -1512,6 +2124,7 @@ static void pmm_add_region(uintptr_t start, uintptr_t end)
 
         size_t block_size = order_to_size(order);
 
+        PMM_POISON_FREE(current, order);
         set_block_state(current, order, BLOCK_FREE);
         free_list_add(current, order);
         buddy_state.free_pages += order_to_pages(order);
@@ -1544,12 +2157,12 @@ int pmm_test_verify_cleared_link(unsigned int *first, unsigned int *second,
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
     for (unsigned int o = 0; o <= MAX_ORDER && order < 0; o++) {
         if (buddy_state.free_counts[o] >= 2 && buddy_state.free_lists[o] &&
-            buddy_state.free_lists[o]->next) {
+            PMM_FB(buddy_state.free_lists[o])->next) {
             order = (int)o;
         }
     }
     if (order >= 0) {
-        struct free_block *head = buddy_state.free_lists[order];
+        struct free_block *head = PMM_FB(buddy_state.free_lists[order]);
         struct free_block *old = head->next;
         head->next = NULL;
         *first = pmm_verify_locked("verifier self-test: link cleared on purpose");
@@ -1575,7 +2188,7 @@ int pmm_free_block_order(uintptr_t addr)
     int found = -1;
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
     for (unsigned int o = 0; o <= MAX_ORDER && found < 0; o++) {
-        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = PMM_FB(b)->next) {
             if ((uintptr_t)b == addr) {
                 found = (int)o;
                 break;
@@ -1695,13 +2308,13 @@ void pmm_init(void)
                   (unsigned long)buddy_state.heap_start,
                   (unsigned long)buddy_state.heap_end);
         }
-        if (head->next != NULL || head->prev != NULL) {
-            uintptr_t naddr = (uintptr_t)head->next;
-            uintptr_t paddr = (uintptr_t)head->prev;
+        if (PMM_FB(head)->next != NULL || PMM_FB(head)->prev != NULL) {
+            uintptr_t naddr = (uintptr_t)PMM_FB(head)->next;
+            uintptr_t paddr = (uintptr_t)PMM_FB(head)->prev;
             bool n_ok = (naddr == 0) ||
                         (naddr >= buddy_state.heap_start &&
                          naddr < buddy_state.heap_end);
-            if (head->prev != NULL || !n_ok) {
+            if (PMM_FB(head)->prev != NULL || !n_ok) {
                 panic("pmm_init: free list head order=%u corrupt "
                       "(head=0x%lx next=0x%lx prev=0x%lx) — likely "
                       "stale cache from kexec; ensure vmm_init runs "
@@ -1758,6 +2371,7 @@ void pmm_init(void)
     buddy_state.initialized = true;
 
     INFO("PMM initialized (buddy allocator)");
+    PMM_POISON_ARM();
     DEBUG_PRINT("  Kernel ends at:  0x%lx", kernel_end);
     DEBUG_PRINT("  Heap start:      0x%lx", buddy_state.heap_start);
     DEBUG_PRINT("  Heap end:        0x%lx", buddy_state.heap_end);
@@ -1808,6 +2422,7 @@ void *pmm_alloc_pages(size_t count)
         WARN("PMM: Cannot allocate %u pages (order %u)", (unsigned)count, order);
         return NULL;
     }
+    PMM_POISON_ALLOC(addr, order, "pmm_alloc_pages");
 
     return (void *)addr;
 }
@@ -1855,7 +2470,7 @@ void *pmm_alloc_pages_low(size_t count)
     for (unsigned int o = order; o <= MAX_ORDER; o++) {
         for (struct free_block *blk = buddy_state.free_lists[o];
              blk != NULL;
-             blk = blk->next) {
+             blk = PMM_FB(blk)->next) {
             uintptr_t a = (uintptr_t)blk;
             if (!found || a < best_addr) {
                 best_addr = a;
@@ -1886,6 +2501,7 @@ void *pmm_alloc_pages_low(size_t count)
     buddy_state.alloc_count++;
 
     spin_unlock_irqrestore(&pmm_lock, flags);
+    PMM_POISON_ALLOC(best_addr, order, "pmm_alloc_pages_low");
     return (void *)best_addr;
 }
 
@@ -1961,6 +2577,7 @@ void pmm_free_pages(void *page, size_t count)
         return;
     }
     PMM_CHK_FREE(addr, order);
+    PMM_POISON_FREE(addr, order);
 
     buddy_free(addr, order, order);
 
@@ -2092,8 +2709,8 @@ void pmm_dump_free_list(unsigned int order, size_t max_blocks)
         }
 
         /* Safe to read next/prev now. */
-        struct free_block *nxt = cur->next;
-        struct free_block *prv = cur->prev;
+        struct free_block *nxt = PMM_FB(cur)->next;
+        struct free_block *prv = PMM_FB(cur)->prev;
         uart_printf("  next=%p prev=%p\n", (void *)nxt, (void *)prv);
 
         /* prev linkage check: head's prev must be NULL; others' prev

@@ -33,9 +33,25 @@
  * This should be within mapped RAM but not critical for kernel operation.
  * Using 64MB offset from RAM_BASE (well into the heap area).
  */
+#if defined(CONFIG_PMM_POISON)
+/*
+ * PMM_POISON / PMM_UNMAP (#1207): RAM_BASE + 64 MB may be a PMM-free page,
+ * and these tests write their markers there (a translation fault under
+ * PMM_UNMAP, a poison finding otherwise). They use 8 MB the suite owns
+ * instead: an order-11 block, naturally 8 MB aligned, allocated at the
+ * start of test_suite_vmm and freed at its end.
+ */
+static uint64_t vmm_test_region;
+#define TEST_VA     (vmm_test_region)
+#define TEST_PA1    (vmm_test_region)
+#define TEST_PA2    (vmm_test_region + 0x200000)
+#define TEST_PA3    (vmm_test_region + 0x400000)
+#else
 #define TEST_VA     (RAM_BASE + 0x4000000)  /* 64MB into RAM */
 #define TEST_PA1    (RAM_BASE + 0x4000000)  /* Same as VA (identity mapped) */
 #define TEST_PA2    (RAM_BASE + 0x4200000)  /* 66MB into RAM (different 2MB block) */
+#define TEST_PA3    (RAM_BASE + 0x4400000)  /* 68MB into RAM */
+#endif
 
 /* ============================================================================
  * Functional Test: Verify page table matches actual memory access
@@ -54,6 +70,12 @@ static void test_virt_to_phys_accuracy(void)
 
     /* Check another known mapping */
     uint64_t mid_ram = RAM_BASE + (RAM_SIZE / 2);
+#if defined(CONFIG_PMM_UNMAP)
+    /* A PMM-free page has no linear-map entry under PMM_UNMAP (#1207). */
+    if (pmm_poison_identity_state(mid_ram) == 0) {
+        mid_ram = TEST_VA;
+    }
+#endif
     pa = vmm_virt_to_phys(mid_ram);
     TEST_ASSERT_EQUAL_HEX64(mid_ram, pa);
 }
@@ -251,7 +273,7 @@ static void test_sequential_remaps(void)
     /* Use three different physical addresses */
     uint64_t pa1 = TEST_PA1;
     uint64_t pa2 = TEST_PA2;
-    uint64_t pa3 = RAM_BASE + 0x4400000;  /* 68MB into RAM */
+    uint64_t pa3 = TEST_PA3;
 
     volatile uint64_t *ptr1 = (volatile uint64_t *)pa1;
     volatile uint64_t *ptr2 = (volatile uint64_t *)pa2;
@@ -1323,6 +1345,13 @@ static void test_nonshare_alias_mapping_reads_back(void)
 int test_suite_vmm(void)
 {
     UnityBegin("VMM/TLB Functional Tests");
+#if defined(CONFIG_PMM_POISON)
+    vmm_test_region = (uint64_t)(uintptr_t)pmm_alloc_pages(2048);
+    if (vmm_test_region == 0) {
+        uart_puts("  test_suite_vmm: no 8 MB block for the remap tests\n");
+        return UnityEnd();
+    }
+#endif
 
     /* Page table verification */
     RUN_TEST(test_virt_to_phys_accuracy);
@@ -1395,5 +1424,8 @@ int test_suite_vmm(void)
     RUN_TEST(test_nonshare_block_desc_attributes);
     RUN_TEST(test_nonshare_alias_mapping_reads_back);
 
+#if defined(CONFIG_PMM_POISON)
+    pmm_free_pages((void *)(uintptr_t)vmm_test_region, 2048);
+#endif
     return UnityEnd();
 }

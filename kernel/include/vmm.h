@@ -701,4 +701,56 @@ extern volatile uint64_t secondary_mmu_tcr;
 /* Get current page table base */
 uint64_t vmm_get_ttbr1(void);
 
+#if defined(CONFIG_PMM_POISON)
+/*
+ * PMM_POISON / PMM_UNMAP page-table support (#1207, debug only; the
+ * design and the cache argument are in kernel/mm/pmm.c, "PMM_POISON /
+ * PMM_UNMAP"). Nothing here is built without the options.
+ *
+ * VMM_PMM_ALIAS_OFFSET: the PMM's second mapping of RAM, at PA + offset,
+ * Normal Non-cacheable, kernel read/write, never executable. Only the PMM
+ * uses it, and only for free pages. It occupies L1[128..] (128 GB up),
+ * which no platform maps (QEMU and Jetson use L1[0..9], kbuf L1[32..],
+ * the Jetson PCIe window L1[212], Pi 5 up to L1[124]); vmm_pmm_alias_init
+ * refuses to overwrite a live entry.
+ *
+ * vmm_pmm_alias_init: build the alias for every Write-Back RAM block of
+ * the linear map (1 GB L1 blocks map 1 GB NC blocks; L2 tables get an NC
+ * L2 table with one NC 2 MB block per WB block). New entries only, so no
+ * break-before-make. Tables come from alloc_table (zeroed, 4 KB). 0 on
+ * success, -1 when an alias slot is in use or a table allocation fails.
+ */
+#define VMM_PMM_ALIAS_OFFSET    0x2000000000UL
+typedef void *(*vmm_table_alloc_fn)(void);
+int vmm_pmm_alias_init(vmm_table_alloc_fn alloc_table);
+
+#if defined(CONFIG_PMM_UNMAP)
+/*
+ * vmm_pmm_split_linear: give every Write-Back RAM block of the linear map
+ * that lies wholly inside [from, to) 4 KB L3 pages, with break-before-make
+ * per entry (invalid, TLB invalidate, table). A 1 GB L1 block is first
+ * made an L2 table of 2 MB blocks. Never touches a block that holds any
+ * byte of the kernel image. Must run on the boot CPU with IRQs masked and
+ * no other CPU up (the PMM arms from pmm_init). Returns the number of L3
+ * tables installed; *missed counts 2 MB blocks inside the range that were
+ * left as blocks (allocation failure).
+ *
+ * vmm_linear_set_present: set (true) or clear (false) the valid bit of the
+ * L3 entries of [pa, pa + pages * 4 KB). A cleared entry keeps its address
+ * and attributes, so setting it again restores the mapping. Clearing
+ * invalidates the TLB (by VA, or all for more than 32 pages) unless
+ * `defer_tlbi`, in which case the caller calls vmm_invalidate_tlb_all().
+ * Returns the number of pages that have no L3 entry (left as they were).
+ *
+ * vmm_linear_page_state: 1 mapped, 0 unmapped (valid bit clear), -1 no
+ * L3 entry for this address.
+ */
+size_t vmm_pmm_split_linear(uintptr_t from, uintptr_t to,
+                            vmm_table_alloc_fn alloc_table, size_t *missed);
+size_t vmm_linear_set_present(uintptr_t pa, size_t pages, bool present,
+                              bool defer_tlbi);
+int vmm_linear_page_state(uintptr_t pa);
+#endif /* CONFIG_PMM_UNMAP */
+#endif /* CONFIG_PMM_POISON */
+
 #endif /* VMM_H */

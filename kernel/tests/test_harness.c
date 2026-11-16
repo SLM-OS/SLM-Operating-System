@@ -135,6 +135,41 @@ static int test_harness_finish(int total_failures);
         } \
     } while (0)
 
+#if defined(CONFIG_PMM_POISON)
+/*
+ * PMM_POISON (#1207). Suite boundaries keep the free-list walk alone: a
+ * pattern check of every free page at all ~170 boundaries would cost
+ * minutes on Jetson (estimate in docs/testing.md). Full scans run before
+ * the first suite and before and after test_suite_gpu; after each test of
+ * test_suite_gpu a scan named by the test checks the first and last 64
+ * bytes of every free page (#1207's capture: zeros across a block
+ * boundary, which is exactly those bytes), or every byte with
+ * PMM_POISON_PER_TEST_FULL=ON. Every allocation checks its whole block.
+ */
+static char harness_poison_label[96];
+
+#if defined(CONFIG_PMM_POISON_PER_TEST_FULL)
+#define HARNESS_PER_TEST_FULL true
+#else
+#define HARNESS_PER_TEST_FULL false
+#endif
+
+/* After each test of test_suite_gpu: a scan named by the test. */
+static void harness_poison_after_test(const char *name)
+{
+    static const char prefix[] = "after ";
+    size_t i = 0;
+    for (; prefix[i] != '\0'; i++) {
+        harness_poison_label[i] = prefix[i];
+    }
+    for (size_t j = 0; name[j] != '\0' && i + 1 < sizeof(harness_poison_label); j++) {
+        harness_poison_label[i++] = name[j];
+    }
+    harness_poison_label[i] = '\0';
+    (void)pmm_poison_scan(harness_poison_label, HARNESS_PER_TEST_FULL);
+}
+#endif
+
 /* Section banners printed between suites; omitted from filtered runs. */
 static void harness_banner(const char *title)
 {
@@ -196,7 +231,14 @@ static int harness_run_suites(void)
      * a corrupt list is reported at the first suite boundary after it was
      * damaged (#1207). Nothing without the option. */
     PMM_CHECK_WALK("before the first suite");
+#if defined(CONFIG_PMM_UNMAP_SELFTEST)
+    pmm_unmap_selftest();       /* faults on purpose and halts (#1207) */
+#endif
+#if defined(CONFIG_PMM_POISON)
+    (void)pmm_poison_scan("before the first suite", true);
+#else
     (void)pmm_verify_free_lists("before the first suite");
+#endif
 
     /* Run model_mem smoke test FIRST so an init regression (e.g.
      * silent PMM oversubscribe on a tight-RAM platform) surfaces
@@ -262,7 +304,19 @@ static int harness_run_suites(void)
     RUN_SUITE(test_suite_ga10b_mnist_pipeline);
     RUN_SUITE(test_suite_ga10b_cold_pipelines); /* #1092 sched/eviction */
     RUN_SUITE(test_suite_oplib_gpu_as);   /* #1092 cold-channel oplib */
+#if defined(CONFIG_PMM_POISON)
+    /* #1207's one capture: a free block damaged between the walks after
+     * test_suite_oplib_gpu_as and after test_suite_gpu. Full scans before
+     * and after the suite, and a scan after each of its tests, named by
+     * the test (harness_poison_after_test). */
+    (void)pmm_poison_scan("before test_suite_gpu", true);
+    unity_set_after_test_hook(harness_poison_after_test);
     RUN_SUITE(test_suite_gpu);
+    unity_set_after_test_hook(NULL);
+    (void)pmm_poison_scan("after test_suite_gpu (full)", true);
+#else
+    RUN_SUITE(test_suite_gpu);
+#endif
     RUN_SUITE(test_suite_vfs);
     RUN_SUITE(test_suite_shell);
     RUN_SUITE(test_suite_shell_session);
@@ -276,6 +330,12 @@ static int harness_run_suites(void)
     RUN_SUITE(test_suite_tcp_telemetry_server);
 #endif
     RUN_SUITE(test_suite_pmm);
+#if defined(CONFIG_PMM_POISON)
+    {
+        extern int test_suite_pmm_poison(void);
+        RUN_SUITE(test_suite_pmm_poison);
+    }
+#endif
 #if !defined(PLATFORM_X86_64)
     {
         extern int test_suite_kbuf(void);
@@ -638,6 +698,20 @@ static int test_harness_finish(int total_failures)
     uart_puts("Test Suite Summary\n");
     uart_puts("========================================\n");
 
+#if defined(CONFIG_PMM_POISON)
+    {
+        struct pmm_poison_stats ps;
+        pmm_poison_get_stats(&ps);
+        unsigned all = ps.alloc_findings + ps.scan_findings;
+        uart_printf("[pmm-poison] summary: armed %d, unmap %d; %u allocation "
+                    "finding(s), %u scan finding(s), %u injected by tests, "
+                    "UNEXPECTED %u; %u scans, longest %lu ms; %u list "
+                    "finding(s)\n", ps.armed, ps.unmap, ps.alloc_findings,
+                    ps.scan_findings, ps.injected,
+                    all > ps.injected ? all - ps.injected : 0, ps.scans,
+                    (unsigned long)ps.max_scan_ms, pmm_verify_finding_count());
+    }
+#endif
     if (total_failures == 0) {
         uart_puts("[PASS] All test suites passed!\n");
     } else {

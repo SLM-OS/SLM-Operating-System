@@ -74,6 +74,9 @@ typedef void (*UnityTestFunction)(void);
 void UnityRunTest(UnityTestFunction func, const char *name);
 
 #define RUN_TEST(func) UnityRunTest(func, #func)
+#if defined(CONFIG_PMM_POISON)
+void unity_set_after_test_hook(void (*hook)(const char *name));
+#endif
 
 /* ============================================================================
  * Core Assertion Internals

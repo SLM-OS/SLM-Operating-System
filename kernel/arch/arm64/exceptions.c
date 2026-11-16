@@ -17,6 +17,9 @@
 #include "syscall.h"
 #include "slot_trace.h"
 #include "fault_dump.h"
+#if defined(CONFIG_PMM_POISON)
+#include "pmm.h"         /* pmm_poison_describe_fault (#1207) */
+#endif
 #include <stdint.h>
 
 /* Timer IRQ numbers — Generic Timer PPIs.
@@ -149,6 +152,9 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
     /* Fault address and reason */
     uart_printf("Address: 0x%lx\n", far);
     uart_printf("Reason:  %s\n", decode_fault_status(fsc));
+#if defined(CONFIG_PMM_POISON)
+    pmm_poison_describe_fault(far);     /* #1207: is FAR in a PMM-free page? */
+#endif
 
     /* Task context */
     uart_puts("\nTask Context:\n");

@@ -607,6 +607,14 @@ uint64_t vmm_virt_to_phys(uint64_t virt)
     uint64_t l2_idx = L2_INDEX(virt);
     uint64_t entry = l2[l2_idx];
 
+#if defined(CONFIG_PMM_UNMAP)
+    /* PMM_UNMAP gives the linear map 4 KB pages (#1207). */
+    if ((entry & PTE_TYPE_MASK) == PTE_TYPE_TABLE) {
+        uint64_t pte = ((const uint64_t *)PA_TO_KVA(entry & PTE_ADDR_MASK))
+                           [L3_INDEX(virt)];
+        return (pte & 1UL) ? ((pte & PTE_ADDR_MASK) | PAGE_OFFSET(virt)) : 0;
+    }
+#endif
     if ((entry & PTE_TYPE_MASK) != PTE_TYPE_BLOCK) {
         return 0;
     }
@@ -638,6 +646,13 @@ bool vmm_is_mapped(uint64_t virt)
     }
 
     uint64_t l2_idx = L2_INDEX(virt);
+#if defined(CONFIG_PMM_UNMAP)
+    /* PMM_UNMAP gives the linear map 4 KB pages (#1207). */
+    if ((l2[l2_idx] & PTE_TYPE_MASK) == PTE_TYPE_TABLE) {
+        return (((const uint64_t *)PA_TO_KVA(l2[l2_idx] & PTE_ADDR_MASK))
+                    [L3_INDEX(virt)] & 1UL) != 0;
+    }
+#endif
     return (l2[l2_idx] & PTE_TYPE_MASK) != PTE_TYPE_INVALID;
 }
 
@@ -2066,6 +2081,10 @@ _Static_assert(NC_MEM_BASE + NC_MEM_SIZE == RAM_BASE + RAM_SIZE,
                "Pi 5 NC block must be the last 2 MB of RAM_SIZE (see l2_ram_gb3)");
 #endif
 
+#if defined(CONFIG_PMM_UNMAP)
+static void vmm_pmm_split_image_tail(void);
+#endif
+
 /*
  * Set up initial page tables and enable MMU.
  *
@@ -2084,6 +2103,11 @@ void vmm_init(void)
 
     /* Platform-specific page table setup */
     vmm_setup_platform();
+#if defined(CONFIG_PMM_UNMAP)
+    /* 4 KB pages for the 2 MB block that holds the end of the image and
+     * the start of the heap, while the MMU is still off (#1207). */
+    vmm_pmm_split_image_tail();
+#endif
 
     /*
      * Flush page tables to DRAM before MMU enable.
@@ -2235,3 +2259,285 @@ uint64_t vmm_test_make_block_desc(uint64_t phys, uint32_t flags)
 {
     return make_block_desc(phys, flags);
 }
+
+#if defined(CONFIG_PMM_POISON)
+/* ==========================================================================
+ * PMM_POISON / PMM_UNMAP page-table support (#1207, debug only)
+ *
+ * See kernel/include/vmm.h for the interface and kernel/mm/pmm.c
+ * ("PMM_POISON / PMM_UNMAP") for why. Built only with the options.
+ * ========================================================================== */
+#if defined(PLATFORM_X86_64)
+#error "PMM_POISON / PMM_UNMAP are ARM64 only (#1207)"
+#endif
+
+#define VMM_L1_BLOCK_OA_MASK  0x0000FFFFC0000000UL
+#define VMM_L2_BLOCK_OA_MASK  0x0000FFFFFFE00000UL
+
+/* A block descriptor (L1 or L2) for Normal Write-Back memory. */
+static bool vmm_is_wb_block(uint64_t d)
+{
+    return (d & PTE_TYPE_MASK) == PTE_TYPE_BLOCK &&
+           ((d >> 2) & 0x7) == MAIR_IDX_NORMAL_WB;
+}
+
+/* A zeroed 4 KB table from the caller's allocator (PMM pages are
+ * identity-mapped, so the pointer is also the table's PA). */
+static uint64_t *vmm_new_table(vmm_table_alloc_fn alloc_table)
+{
+    uint64_t *t = (uint64_t *)alloc_table();
+    if (t != NULL) {
+        for (size_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+            t[i] = 0;
+        }
+    }
+    return t;
+}
+
+int vmm_pmm_alias_init(vmm_table_alloc_fn alloc_table)
+{
+    const uint64_t first = L1_INDEX(RAM_BASE);
+    const uint64_t last = L1_INDEX(RAM_BASE + RAM_SIZE - 1);
+    const uint64_t shift = L1_INDEX(VMM_PMM_ALIAS_OFFSET);
+    const uint32_t nc = VMM_FLAG_NOCACHE | VMM_FLAG_READ | VMM_FLAG_WRITE;
+
+    _Static_assert((VMM_PMM_ALIAS_OFFSET & (L1_BLOCK_SIZE - 1)) == 0,
+                   "PMM alias offset must be 1 GB aligned");
+    for (uint64_t i = first; i <= last; i++) {
+        if (i + shift >= USER_L1_FIRST || l1_table[i + shift] != 0) {
+            ERROR("pmm alias: L1[%lu] is in use or in the user range",
+                  (unsigned long)(i + shift));
+            return -1;
+        }
+    }
+    irq_flags_t flags_save = spin_lock_irqsave(&vmm_lock);
+    for (uint64_t i = first; i <= last; i++) {
+        uint64_t d = l1_table[i];
+        uint64_t *slot = &l1_table[i + shift];
+        if (vmm_is_wb_block(d)) {
+            *slot = make_l1_block_desc(d & VMM_L1_BLOCK_OA_MASK, nc);
+        } else if ((d & PTE_TYPE_MASK) == PTE_TYPE_TABLE) {
+            const uint64_t *l2 = get_l2_table(i << L1_BLOCK_SHIFT);
+            uint64_t *al2 = NULL;
+            for (int e = 0; e < ENTRIES_PER_TABLE; e++) {
+                if (!vmm_is_wb_block(l2[e])) {
+                    continue;
+                }
+                if (al2 == NULL && (al2 = vmm_new_table(alloc_table)) == NULL) {
+                    spin_unlock_irqrestore(&vmm_lock, flags_save);
+                    ERROR("pmm alias: no page for an L2 table");
+                    return -1;
+                }
+                al2[e] = make_block_desc(l2[e] & VMM_L2_BLOCK_OA_MASK, nc);
+            }
+            if (al2 == NULL) {
+                continue;
+            }
+            cache_clean_range(al2, TABLE_SIZE);
+            *slot = make_table_desc((uint64_t)(uintptr_t)al2);
+        } else {
+            continue;
+        }
+        cache_clean_range(slot, sizeof(*slot));
+    }
+    /* Invalid -> valid entries only: no TLB entry can exist for them. */
+    __asm__ volatile("dsb ish\nisb" ::: "memory");
+    spin_unlock_irqrestore(&vmm_lock, flags_save);
+    return 0;
+}
+
+#if defined(CONFIG_PMM_UNMAP)
+extern char _start[], __kernel_end[];
+
+/* [va, va + size) holds a byte of the kernel image (code, data, .bss,
+ * the boot stack). */
+static bool vmm_range_has_image(uint64_t va, uint64_t size)
+{
+    return va < (uint64_t)(uintptr_t)__kernel_end &&
+           va + size > (uint64_t)(uintptr_t)_start;
+}
+
+/*
+ * Break-before-make for one live entry: write invalid, invalidate the
+ * whole TLB (that also drops walk-cache entries for the replaced level),
+ * then write the new descriptor. Nothing may access the entry's VA range
+ * in between; the caller guarantees it (boot CPU only, IRQs masked, the
+ * range holds neither the image nor the boot stack, and the only other
+ * thing in it is free or reserved RAM that no code touches at arm time).
+ */
+static void vmm_bbm_replace(uint64_t *entry, uint64_t desc)
+{
+    *entry = PTE_TYPE_INVALID;
+    cache_clean_range(entry, sizeof(*entry));
+    vmm_invalidate_tlb_all();
+    *entry = desc;
+    cache_clean_range(entry, sizeof(*entry));
+    __asm__ volatile("dsb ish\nisb" ::: "memory");
+}
+
+size_t vmm_pmm_split_linear(uintptr_t from, uintptr_t to,
+                            vmm_table_alloc_fn alloc_table, size_t *missed)
+{
+    size_t l3_tables = 0;
+    *missed = 0;
+    from = (from + BLOCK_SIZE - 1) & ~(uintptr_t)(BLOCK_SIZE - 1);
+    to &= ~(uintptr_t)(BLOCK_SIZE - 1);
+    if (from >= to) {
+        return 0;
+    }
+    for (uint64_t i = L1_INDEX(from); i <= L1_INDEX(to - 1); i++) {
+        uint64_t gb = i << L1_BLOCK_SHIFT;
+        uint64_t d = l1_table[i];
+
+        /* A 1 GB block wholly in range: an L2 table of 2 MB blocks first. */
+        if (vmm_is_wb_block(d)) {
+            if (gb < from || gb + L1_BLOCK_SIZE > to ||
+                vmm_range_has_image(gb, L1_BLOCK_SIZE)) {
+                continue;
+            }
+            uint64_t *nl2 = vmm_new_table(alloc_table);
+            if (nl2 == NULL) {
+                *missed += ENTRIES_PER_TABLE;
+                continue;
+            }
+            uint64_t attr = d & ~VMM_L1_BLOCK_OA_MASK;
+            for (int e = 0; e < ENTRIES_PER_TABLE; e++) {
+                nl2[e] = attr | (gb + (uint64_t)e * BLOCK_SIZE);
+            }
+            cache_clean_range(nl2, TABLE_SIZE);
+            vmm_bbm_replace(&l1_table[i],
+                            make_table_desc((uint64_t)(uintptr_t)nl2));
+            d = l1_table[i];
+        }
+        if ((d & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+            continue;
+        }
+        uint64_t *l2 = get_l2_table(gb);
+        for (int e = 0; e < ENTRIES_PER_TABLE; e++) {
+            uint64_t blk = gb + (uint64_t)e * BLOCK_SIZE;
+            uint64_t bd = l2[e];
+            if (blk < from || blk + BLOCK_SIZE > to || !vmm_is_wb_block(bd) ||
+                vmm_range_has_image(blk, BLOCK_SIZE)) {
+                continue;
+            }
+            uint64_t *l3 = vmm_new_table(alloc_table);
+            if (l3 == NULL) {
+                (*missed)++;
+                continue;
+            }
+            /* Same attributes, page descriptors (type 0b11 at L3). */
+            uint64_t attr = (bd & ~VMM_L2_BLOCK_OA_MASK) & ~(uint64_t)PTE_TYPE_MASK;
+            for (int p = 0; p < ENTRIES_PER_TABLE; p++) {
+                l3[p] = attr | PTE_TYPE_PAGE | (blk + (uint64_t)p * PAGE_SIZE);
+            }
+            cache_clean_range(l3, TABLE_SIZE);
+            vmm_bbm_replace(&l2[e], make_table_desc((uint64_t)(uintptr_t)l3));
+            l3_tables++;
+        }
+    }
+    return l3_tables;
+}
+
+/*
+ * The 2 MB block that holds the last bytes of the image also holds the
+ * first heap pages (heap_start is __kernel_end rounded up to a page). It
+ * cannot be split later with break-before-make, because the boot stack and
+ * the PMM's own state live in it, so vmm_init splits it here, before the
+ * MMU is on, into a static L3 table (4 KB of .bss, PMM_UNMAP builds only).
+ * Written with the caches off, so the table is in DRAM; mmu_enable then
+ * invalidates the image range, which contains it. Only when the RAM L1
+ * entry is already a table (QEMU, Jetson); on Pi 5 the image is in a 1 GB
+ * block and those heap pages stay mapped.
+ */
+static uint64_t l3_image_tail[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+
+static void vmm_pmm_split_image_tail(void)
+{
+    uint64_t end = ((uint64_t)(uintptr_t)__kernel_end + PAGE_SIZE - 1) &
+                   ~(uint64_t)(PAGE_SIZE - 1);
+    if ((end & (BLOCK_SIZE - 1)) == 0) {
+        return;     /* the heap starts on a block boundary */
+    }
+    uint64_t blk = end & ~(uint64_t)(BLOCK_SIZE - 1);
+    uint64_t d1 = l1_table[L1_INDEX(blk)];
+    if ((d1 & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return;
+    }
+    uint64_t *l2 = (uint64_t *)(uintptr_t)(d1 & PTE_ADDR_MASK);    /* MMU off */
+    uint64_t bd = l2[L2_INDEX(blk)];
+    if (!vmm_is_wb_block(bd)) {
+        return;
+    }
+    uint64_t attr = (bd & ~VMM_L2_BLOCK_OA_MASK) & ~(uint64_t)PTE_TYPE_MASK;
+    for (int p = 0; p < ENTRIES_PER_TABLE; p++) {
+        l3_image_tail[p] = attr | PTE_TYPE_PAGE | (blk + (uint64_t)p * PAGE_SIZE);
+    }
+    l2[L2_INDEX(blk)] = make_table_desc((uint64_t)(uintptr_t)l3_image_tail);
+}
+
+/* The L3 entry that maps pa in the linear map, or NULL. */
+static uint64_t *vmm_linear_pte(uintptr_t pa)
+{
+    uint64_t d1 = l1_table[L1_INDEX(pa)];
+    if ((d1 & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return NULL;
+    }
+    const uint64_t *l2 = (const uint64_t *)PA_TO_KVA(d1 & PTE_ADDR_MASK);
+    uint64_t d2 = l2[L2_INDEX(pa)];
+    if ((d2 & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return NULL;
+    }
+    uint64_t *pte = &((uint64_t *)PA_TO_KVA(d2 & PTE_ADDR_MASK))[L3_INDEX(pa)];
+    /* Only an identity entry (the Jetson firmware-DTB pages, the only
+     * other L3 tables, are identity too, but outside the heap). */
+    return ((*pte & PTE_ADDR_MASK) == (pa & PTE_ADDR_MASK)) ? pte : NULL;
+}
+
+size_t vmm_linear_set_present(uintptr_t pa, size_t pages, bool present,
+                              bool defer_tlbi)
+{
+    size_t missing = 0;
+    uintptr_t va = pa & ~(uintptr_t)(PAGE_SIZE - 1);
+
+    /* One L3 table per 2 MB: update a run of consecutive entries, then
+     * clean those lines (the walker is coherent with TCR IRGN/ORGN WB;
+     * the clean follows the rest of this file). */
+    for (size_t done = 0; done < pages;) {
+        uintptr_t a = va + done * PAGE_SIZE;
+        size_t in_block = (BLOCK_SIZE - (a & (BLOCK_SIZE - 1))) / PAGE_SIZE;
+        size_t n = pages - done < in_block ? pages - done : in_block;
+        uint64_t *pte = vmm_linear_pte(a);
+        if (pte == NULL) {
+            missing += n;
+            done += n;
+            continue;
+        }
+        for (size_t k = 0; k < n; k++) {
+            if (present) {
+                pte[k] |= 1UL;
+            } else {
+                pte[k] &= ~1UL;
+            }
+        }
+        cache_clean_range(pte, n * sizeof(uint64_t));
+        done += n;
+    }
+    if (present) {
+        /* Invalid -> valid: no TLB entry exists for an invalid one. */
+        __asm__ volatile("dsb ish\nisb" ::: "memory");
+    } else if (!defer_tlbi) {
+        vmm_invalidate_tlb_range(va, va + pages * PAGE_SIZE);
+    }
+    return missing;
+}
+
+int vmm_linear_page_state(uintptr_t pa)
+{
+    const uint64_t *pte = vmm_linear_pte(pa);
+    if (pte == NULL) {
+        return -1;
+    }
+    return (int)(*pte & 1UL);
+}
+#endif /* CONFIG_PMM_UNMAP */
+#endif /* CONFIG_PMM_POISON */
