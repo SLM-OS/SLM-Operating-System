@@ -3155,3 +3155,42 @@ Board: jetson-nano-2 only. Nothing merges.
   redirect failed and it fired nothing; the orchestrator ran the same kexec
   command by hand at 19:04:08 UTC, Linux uptime 80 s (normally about
   25 s). The capture runs from power-on either way.
+
+## Entry 59 (written 20:17 UTC on 2026-11-16, from date): baseline, 1 PMM halt in 10 kexec suite boots of main b548f29d; the damage bracketed after `test_suite_gpu` again
+
+Evidence `gauntlet-5-hw-jetson` 6bb5d69a, `run5-hw/1207-gpu/`
+(`base-kexec-suite-b548f29d-boot01..10.txt`, `base-finding-boot05.txt`,
+`trigger-base-kexec.log.txt`, scripts `o-*.sh.txt`). jetson-nano-2, kexec,
+unmodified main b548f29d test kernel (sha256 8c608c78, banner `(b548f29d)`),
+`boot_test` 1, 2, 3, 3 and 1 runs per call (boot 01 alone, 02 alone, then
+03-04, 05-07, 08-10), timeout 540 s. All 10 files pass the both-ends check
+(power-on line in the first 2000 bytes, SLM-OS banner, last line recorded).
+
+| Outcome | Boots | Count |
+|---|---|---|
+| **PMM halt** (`order 5 free list head 0x13a6c0000 has next link 0x0 with 34 blocks counted`) | 05 | **1** |
+| Complete, `[FAIL] 10 total failure(s)`, all ten on `known-failures-jetson-1109.txt` (`classify.sh`: none unlisted) | 01-04, 06-10 | 9 |
+
+**Baseline rate: 1 in 10** (run 4b and run 5 saw 1 to 3 in 10 on older
+heads; not pooled). On the brief's bar this means 0 halts and 0 poison
+damage in at least 50 kexec boots for a fix (5 x the 10 boots per halt).
+
+Boot 05 (`base-finding-boot05.txt`): the walk after `test_suite_gpu`
+(170971 ms) found a listed order-5 head, 0x13a6c0000, with both links and
+its first 64 bytes zero (the page before it is allocated, so the 64 bytes
+before were not read); the walk after `test_suite_oplib_gpu_as` had been
+clean. `test_exhaustion_recovery` then hit it (`count 34 without a
+list`). That is run 5's boot04 again: same bracket, same zeroed head.
+Observation on two points: the damaged block is 0x110000 above the MNIST
+(kind 0) hand-off pushbuf in this boot and 0x120000 above it in run 5's
+boot04, and in neither boot is it inside a printed reserved range (the
+channel-VM pages, 910 and 917 in 84 and 47 ranges, are not listed one by
+one). Inference, not shown: the writer is on the inherited-channel MNIST
+path that `test_suite_gpu`'s last four tests start on kexec (GPU through
+the inherited VM, or CPU code using a hand-off address).
+
+Every boot prints one `[ERROR] PMM: free of 4 pages ... rejected: page
+... is not allocated`: that is `test_free_rejects_range_holding_a_free_page`
+provoking it on purpose (it passes), not a finding.
+
+Next: more baseline boots while the builder finishes step 1 in QEMU.
