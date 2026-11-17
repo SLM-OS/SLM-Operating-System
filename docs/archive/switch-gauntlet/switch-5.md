@@ -3321,3 +3321,65 @@ merge): `diag/1207-elpg` (db61c7d5, then 29418281) and `diag/1207-vmwalk`
   access by another path), or the mapping is created after `pmm_init`.
   The unmap build, which faults on a CPU access to a freed page, is the
   deciding instrument; waiting on the builder's fix.
+
+## Entry 62 (written 00:15 UTC on 2026-11-17, from date): snapshot boots; the damage pinned to the first MNIST call; GPU L2 hypothesis; E3 started
+
+Evidence `gauntlet-5-hw-jetson` 26386538 and fcec1e26, `run5-hw/1207-gpu/`.
+
+**Builder images at f378d28b** (banner `-dirty`; asked why), 1 kexec
+boot each: `su-kexec-suite-f378d28b-boot01.txt` (`PMM_POISON_SNAPSHOT=ON
+PMM_UNMAP=ON`) and `s-kexec-suite-f378d28b-boot01.txt` (snapshot, no
+unmap). Arming takes 39 s (1.76 M free pages hashed; unmap: 3528 L3
+tables, all free pages unmapped), so in both boots **all five
+secondaries panic `scheduler init timeout`** and the suite runs on CPU 0
+alone (23 failures, unlisted SMP ones, timeout inside the integration
+suite): neither boot is a valid row, and the builder is fixing arming.
+What they do show: with snapshot (no poison), the inherited MNIST
+channel comes up normally (inherit 2069 us, warmup 354 us); in the
+unmap boot no CPU fault occurred anywhere in `test_suite_gpu`; both
+boots report **non-zero, structured device writes into free pages**
+that no GPU VM maps (64 bytes at PA 0x1223102c0 / 0x1234102c0 after
+`test_suite_gpu`, near-identical content; zeros and 192 non-zero bytes
+near 0x104fad040-0x104fbe0ff and 0x100341000 before the first suite;
+the poison boots had the same region 0x104f6f0c0 / 0x104f950c0). That
+is a second writer, a device left running by Linux (candidate:
+xHCI, whose retained slot-1 state SLM-OS reuses; not shown). Neither
+boot hit the #1207 window.
+
+**Window diagnostic** (`diag/1207-window`, orchestrator; 8e3828e8, then
+c6ef3dfd which prints only free-page or all-zero runs): at the start of
+`test_suite_gpu`, a 32-bit hash of every 64-byte line of [MNIST pushbuf
+- 1 MB, + 3 MB); after each test of the suite, DC CIVAC over the window
+and compare. Nothing is written to the window. 3 kexec boots
+(`win-kexec-suite-8e3828e8-boot01.txt`, `win-kexec-suite-c6ef3dfd-boot01,02.txt`;
+the c6ef3dfd boot01 was kexec'd by hand at Linux uptime 120 s after the
+first image's output cap hid the runs):
+
+| Boot | Halt | Lines zeroed in free pages, by the test after which they changed |
+|---|---|---|
+| 8e3828e8 boot01 | no | 131 changed lines after `test_slm_gpu_run_mnist_returns_negative_off_jetson`, details hidden by the output cap |
+| c6ef3dfd boot01 | yes (FINDING after `test_suite_gpu`) | `0x13e4fffc0-0x13e500040`, 128 bytes straddling pushbuf + 0x120000, after `test_slm_gpu_run_mnist_returns_negative_off_jetson` |
+| c6ef3dfd boot02 | yes (damaged head 0x13b860000 = pushbuf + 0x120000) | one line each at pushbuf + 0x100000 and + 0x120000, after `test_slm_gpu_run_mnist_returns_negative_off_jetson` |
+
+**The bracketing test is `test_slm_gpu_run_mnist_returns_negative_off_jetson`**,
+the first MNIST call of the boot, which is where the inherit runs
+(`[gpu-kind=0] channel bring-up: inherit ...` is printed inside it).
+Changes from earlier tests in the window are the test's own buffers and
+task stacks (allocated pages) or blocks the GPU-alloc tests wrote and
+freed, all non-zero. Lines that were already zero cannot show as
+changed, so the zeroed extent may be larger than what is printed; the
+visible zeros are free-block headers.
+
+**Hypothesis (H1, Linux-left state), not yet shown:** the inherit path
+calls `ga10b_l2_evict_sysmem()` (FB_FLUSH, L2_FLUSH_DIRTY,
+L2_SYSMEM_INVALIDATE, FB_FLUSH). If the GA10B L2 still holds dirty lines
+from Linux for buffers Linux freed before kexec, that flush writes them
+back over pages the PMM now owns. Consistent with: kexec only (UEFI-direct
+starts the GPU cold), no GPU VM mapping and no CPU fault, ELPG
+irrelevant, damage at the first MNIST call, 128-byte granularity
+(GA10B L2 line).
+**E3** (`diag/1207-l2early` 89068471 = the window diagnostic + the same
+four UFLUSH ops by direct MMIO at the start of
+`ga10b_kexec_handoff_register_reserves()`, before `pmm_init` writes any
+free-list header). Prediction if the hypothesis holds: no zeroed
+free-page lines after the first MNIST call and no halt. 3 boots running.
