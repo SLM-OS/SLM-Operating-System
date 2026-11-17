@@ -12,6 +12,7 @@
 #include "ga10b_bringup.h"
 #include "ga10b_gmmu.h"
 #include "ga10b_qmd.h"
+#include "ga10b_handoff_reserve.h"   /* #1207 late-context WARN at inherit */
 #include "gsp.h"
 #include "falcon.h"
 #include "../../include/uart.h"
@@ -920,6 +921,7 @@ int ga10b_bringup_pmu(struct ga10b_bringup *b)
  * All four registers share the layout: bit 0 = PENDING_BUSY (write 1
  * to start the op), bit 1 = OUTSTANDING_TRUE. Op completes when both
  * bits read back 0. */
+#define GA10B_GR_FECS_CURRENT_CTX_REG      0x00409b00u  /* gr_fecs_current_ctx_r */
 #define GA10B_UFLUSH_FB_FLUSH              0x00070000u
 #define GA10B_UFLUSH_L2_SYSMEM_INVALIDATE  0x00070004u
 #define GA10B_UFLUSH_L2_FLUSH_DIRTY        0x00070010u
@@ -959,13 +961,23 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
     return -1;
 }
 
-/* Evict the GPU L2 of any clean lines inherited from Linux's nvgpu.
+/* Write back the GPU L2's dirty lines and evict its lines inherited
+ * from Linux's nvgpu.
  *
  * After kexec, GA10B's L2 cache may still hold lines tagged for
  * physical addresses that nvgpu's MNIST helper wrote pre-handoff.
  * The first GPU dispatch in SLM-OS can read those stale lines
  * instead of fetching fresh data we wrote at the same GPU VA, which
  * surfaces as the iter-1 "got nvgpu's helper output" race (#596).
+ *
+ * Not only clean lines (#1207): the inherited L2 also holds DIRTY
+ * lines for buffers nvgpu freed before the kexec. L2_FLUSH_DIRTY
+ * below writes them back to DRAM, and when this ran first, after
+ * pmm_init, those pages were already PMM free pages: the write-back
+ * zeroed free-list heads (MNIST pushbuf + 0x100000 / + 0x120000 on
+ * jetson-nano-2). ga10b_kexec_l2_flush_early (ga10b_handoff_reserve.c)
+ * now runs the same sequence before pmm_init, so by the time this
+ * runs the inherited dirty lines are gone.
  *
  * Also called between dispatches via the post-launch coherency
  * site in `ga10b_bringup_read_pipeline_output` (#722 originally
@@ -1164,6 +1176,12 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
 
     GA10B_PROGRESS("[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — "
                    "skipping phases 1-4\n");
+
+    /* #1207: a live inherited context here, but the boot-time L2 flush
+     * skipped, means the evict below is the first L2 write-back and it
+     * runs after pmm_init. Say so loudly. */
+    (void)ga10b_l2_flush_early_warn_late(ga10b_kexec_l2_flush_early_status(),
+                                         bar0_r32(GA10B_GR_FECS_CURRENT_CTX_REG));
 
     /* Evict L2 lines inherited from Linux's nvgpu before any SLM-OS
      * dispatch reads through them. See ga10b_l2_evict_sysmem header
