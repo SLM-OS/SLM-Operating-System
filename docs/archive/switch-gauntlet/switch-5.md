@@ -3383,3 +3383,44 @@ four UFLUSH ops by direct MMIO at the start of
 `ga10b_kexec_handoff_register_reserves()`, before `pmm_init` writes any
 free-list header). Prediction if the hypothesis holds: no zeroed
 free-page lines after the first MNIST call and no halt. 3 boots running.
+
+## Entry 63 (written 01:45 UTC on 2026-11-17, from date): E3 6 of 6 clean; the fix; bar rows started
+
+Evidence `gauntlet-5-hw-jetson` 994c5129 and dbb8eac3, `run5-hw/1207-gpu/`.
+
+**E3** (`e3-kexec-suite-89068471-boot01..06.txt`): in 6 of 6 kexec
+boots the early flush ran before `pmm_init` (`l2_flush_dirty done after
+1 polls`), the inherited MNIST channel came up normally (warmup 350-355
+us), the window shows **no zeroed and no free-page line after the first
+MNIST call** (27 to 530 changed lines there, all in allocated pages,
+non-zero), and no boot halted. Against the window diagnostic without
+the early flush: both detailed boots showed zeroed free-page lines at
+the first MNIST call and both halted. The rows support H1 from
+Linux-left state: dirty GA10B L2 lines written back over PMM-owned pages
+by SLM-OS's first L2 flush. The mechanism (which Linux buffers the
+lines belonged to) is inferred, not observed.
+
+**The fix** (builder): `fix/1207-early-l2-flush` 364bd06d, "Write back
+and invalidate the GPU L2 before pmm_init on Jetson kexec boots
+(#1207)". `ga10b_kexec_l2_flush_early()` in `ga10b_handoff_reserve.c`,
+called from `main.c` before `ga10b_kexec_handoff_register_reserves()`
+and `pmm_init`: FB_FLUSH, L2_FLUSH_DIRTY, L2_SYSMEM_INVALIDATE, FB_FLUSH
+by direct BAR0 MMIO with nvgpu's retry budgets; skipped without touching
+the UFLUSH registers on UEFI-direct and when FECS_CURRENT_CTX reads 0 or
+0xbadfxxxx; a timeout is printed and does not panic; MMIO behind an
+accessor with host-harness tests; status records whether it ran before
+`pmm_init`. Images: test kernel 364bd06d (sha b6fcc1f3), production
+364bd06d (sha a6c80971), and the bar image `diag/1207-fix-window`
+d7fb1010 = the fix + the window diagnostic (sha 44f0912a), all with
+clean banners. The builder's report (tests, QEMU, /ci) is pending.
+
+**Bar.** Baseline 3 halts in 16 kexec boots: required 0 halts and 0
+damage in at least 27 kexec boots with the fix. Damage criterion with the
+window build: no all-zero free-page run at or after the first MNIST call,
+no `[pmm-verify] FINDING` other than the self-test, no halt. Free-page
+runs from the GPU-alloc tests' own buffers (their writes and the PMM's
+link words, before the MNIST call) are listed per boot and are not
+damage. **Boots 1-6 (`fixwin-kexec-suite-d7fb1010-boot01..06.txt`): 6 of
+6 clean**; each prints `[ga10b-l2-early] ... GPU L2 written back and
+invalidated before pmm_init (polls: 1, 2, 2, 1)`; 10 listed failures
+each, nothing unlisted.
