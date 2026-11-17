@@ -3424,3 +3424,63 @@ damage. **Boots 1-6 (`fixwin-kexec-suite-d7fb1010-boot01..06.txt`): 6 of
 6 clean**; each prints `[ga10b-l2-early] ... GPU L2 written back and
 invalidated before pmm_init (polls: 1, 2, 2, 1)`; 10 listed failures
 each, nothing unlisted.
+
+## Entry 64 (written 04:05 UTC on 2026-11-17, from date): bar met, 27 of 27 kexec boots clean with the fix; builder's reports; /ci passes
+
+Evidence `gauntlet-5-hw-jetson` 8a5f22de, `run5-hw/1207-gpu/`
+(`fixwin-kexec-suite-d7fb1010-boot01..27.txt`, `bar-tally-fixwin-d7fb1010.txt`,
+`o-fwrow.sh.txt`, `trigger-fixwin-kexec.log.txt`).
+
+**Bar row: the fix + window diagnostic (`diag/1207-fix-window` d7fb1010 =
+`fix/1207-early-l2-flush` 364bd06d + the window commits), jetson-nano-2
+kexec, 27 boots in 9 `boot_test` calls of 3.** All 27 captures pass the
+both-ends check (MB1 line, banner `(d7fb1010)`).
+
+| Per boot | 27 boots |
+|---|---|
+| `[ga10b-l2-early] ... GPU L2 written back and invalidated before pmm_init` | 27 (polls 1, 2, 2, 1 every time) |
+| `[PASS] test_l2_flush_early_ran_before_pmm_init` | 27 |
+| inherited MNIST channel up (warmup 348-355 us) | 27 |
+| halts | **0** |
+| `[pmm-verify] FINDING` other than the self-test | **0** |
+| all-zero window run in a free page (any test) | **0** |
+| suite result | `[FAIL] 10 total failure(s)`, all listed, nothing unlisted, 27 of 27 |
+
+Free-page window runs that do appear come only from the GPU-alloc tests
+before the MNIST call (`test_gpu_alloc_memory_is_accessible`,
+`..._multiple_buffers_distinct`, `test_cache_clean_executes`,
+`test_gpu_buffer_workflow`, `test_gpu_alloc_large_buffer`'s `cafebabe`
+marker, `test_gpu_alloc_2mb_alignment`'s order-9 free): non-zero, the
+tests' own writes and the PMM's link words.
+Bar: baseline 3 in 16 => 0 in at least 27 required; **0 in 27 observed**.
+P(0 of 27 | p = 3/16) = (13/16)^27 = 0.004.
+
+**Builder reports** (received by SendMessage after the earlier final
+texts did not reach the orchestrator):
+- Step 1 diagnostic `diag/1207-poison`, stopped at d887bed9: PMM_POISON,
+  PMM_UNMAP, PMM_POISON_SNAPSHOT (+ test aids), free pages reached only
+  through a Normal Non-cacheable alias at PA + 0x20_0000_0000, two-part
+  arming (part 2 after SMP). QEMU proofs: a CPU write to a freed page
+  faults with the ELR of the `str` and "FAR is in a PMM-FREE page"
+  (`final3-qemu-unmap-selftest-serial.txt`); injected raw writes reported
+  by allocation and scans, 0 unexpected; options off: `make test` ARM64 and
+  x86-64 pass; zero cost: sections identical to b548f29d on six images at
+  187dad1b after neutralising `__LINE__` and stamps (4f5b5f34 adds one
+  task.c NULL check). The `-dirty` banners at 76ec16fd and f378d28b came
+  from the untracked `.wt/` directory in the Issue-1207 worktree (the
+  build-info script marks any untracked file as dirty); no tracked file
+  was modified.
+- Fix 364bd06d: host-harness test `test_l2_flush_early_called_before_pmm_init`
+  (with the other new tests) fails on b548f29d (with b548f29d's main.c:
+  5 failures; with b548f29d's reserve code the tests do not compile) and
+  passes on 364bd06d; `make test` ARM64 and x86-64 pass; check-braces 0
+  (the host test file is not parsed by it). **/ci passes all steps at
+  364bd06d** (`$S/b/ci-fix-*`). UEFI images built: production PE sha
+  d350e8b6, test-kernel PE sha 79098b95, banner `(364bd06d)`.
+- Path-control images: d887bed9 snapshot+unmap, clean banner; QEMU suite
+  passes with the two-part arming (part 2 after SMP: 809 ms, 140,767 pages,
+  0 unexpected findings).
+
+Next: 3 kexec boots of the d887bed9 snapshot+unmap build (no fix) for
+valid SMP rows of the discriminating build; UEFI-direct x5 of the same;
+then the fix's suite x3 per path and `boot_test --count 10` per path.
