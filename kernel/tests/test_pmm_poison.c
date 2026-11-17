@@ -279,6 +279,31 @@ static void test_poison_edge_scan_reports_write_near_start(void)
     pmm_free_pages((void *)lower, 1);
 }
 
+/* The cheap scan also checks the line at page offset 0x2c0, where a
+ * second writer on Jetson kexec changes one line (offset 0x102c0 of a
+ * 1 MB-aligned region, during test_suite_gpu). */
+static void test_poison_edge_scan_checks_line_0x2c0(void)
+{
+    struct pmm_poison_stats before, after;
+    struct pmm_poison_report rep;
+    uintptr_t lower;
+    uintptr_t r = lone_free_page(&lower);
+    TEST_ASSERT_TRUE(r != 0);
+    pmm_poison_get_stats(&before);
+    volatile uint64_t *a = (volatile uint64_t *)pmm_poison_alias_of(r);
+    a[0x2c0 / 8 + 1] = 0x0000020000000045UL;
+    barrier_sy();
+    pmm_poison_note_injected(1);
+    (void)pmm_poison_scan("test_poison_edge_scan_checks_line_0x2c0", false);
+    pmm_poison_get_stats(&after);
+    TEST_ASSERT_EQUAL_UINT(before.scan_findings + 1, after.scan_findings);
+    pmm_poison_last_report(&rep);
+    TEST_ASSERT_EQUAL_HEX64(r, rep.base);
+    TEST_ASSERT_TRUE(rep.first >= 0x2c8 && rep.last < 0x2d0);
+    TEST_ASSERT_FALSE(rep.all_zero);
+    pmm_free_pages((void *)lower, 1);
+}
+
 /*
  * #1207's shape: zeros across a page boundary inside a multi-page free
  * block. The cheap scan (first and last 64 bytes per page) finds it, and
@@ -527,6 +552,7 @@ int test_suite_pmm_poison(void)
     POISON_TEST(test_poison_scan_reports_raw_write);
     POISON_TEST(test_poison_edge_scan_reports_write_near_start);
     POISON_TEST(test_poison_scan_reports_whole_block_extent);
+    POISON_TEST(test_poison_edge_scan_checks_line_0x2c0);
 #if defined(CONFIG_PMM_POISON_SNAPSHOT)
     POISON_TEST(test_snapshot_keeps_pages_free_at_arming);
     POISON_TEST(test_snapshot_scan_places_change_to_lines);

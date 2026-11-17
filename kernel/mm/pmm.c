@@ -1016,6 +1016,12 @@ unsigned pmm_verify_finding_count(void)
 #define PMM_POISON_DETAIL_MAX   16u     /* findings printed in full */
 #define PMM_POISON_LINE_MAX     256u    /* findings printed at all */
 #define PMM_SCAN_CHUNK_PAGES    512u    /* pages checked per pmm_lock hold */
+/* The cheap scan checks lines 0 and 63 of every free page, and line 11
+ * (page offset 0x2c0): on Jetson kexec a second writer, not cured by the
+ * early L2 flush, changes one 64-byte line at offset 0x102c0 of a 1 MB
+ * aligned region during test_suite_gpu (0x1223102c0, 0x1234102c0,
+ * 0x11e4102c0, 0x10ef102c0), so the per-test scans name the test. */
+#define PMM_EDGE_EXTRA_LINE     11u     /* 0x2c0 / 64 */
 
 static spinlock_t pmm_poison_lock = SPINLOCK_INIT;  /* stats and reports */
 static bool pmm_poison_unmap_on;                    /* identity unmapping armed */
@@ -1211,6 +1217,9 @@ static void pmm_s_check(uintptr_t base, uintptr_t pa, size_t idx, bool full,
         if (pmm_s_line(w, 0) != rec[0]) {
             pmm_s_mark_line(base, pa, 0, d);
         }
+        if (pmm_s_line(w, PMM_EDGE_EXTRA_LINE) != rec[PMM_EDGE_EXTRA_LINE]) {
+            pmm_s_mark_line(base, pa, PMM_EDGE_EXTRA_LINE, d);
+        }
         if (pmm_s_line(w, 63) != rec[63]) {
             pmm_s_mark_line(base, pa, 63, d);
         }
@@ -1264,6 +1273,7 @@ static bool pmm_p_check_page(uintptr_t base, uintptr_t pg, size_t idx,
         pmm_p_check(base, pg + skip, PAGE_SIZE - skip, d);
     } else {
         pmm_p_check(base, pg + skip, 64 - skip, d);
+        pmm_p_check(base, pg + PMM_EDGE_EXTRA_LINE * 64, 64, d);
         pmm_p_check(base, pg + PAGE_SIZE - 64, 64, d);
     }
     if (d->nbytes == before) {
@@ -1738,7 +1748,7 @@ unsigned pmm_poison_scan(const char *where, bool full)
     }
     spin_unlock_irqrestore(&pmm_poison_lock, flags);
     uart_printf("[pmm-poison] scan %s (%s): %lu free pages, %u damaged, %u list "
-                "finding(s), %lu ms\n", where, full ? "full" : "first+last 64 B",
+                "finding(s), %lu ms\n", where, full ? "full" : "lines 0, 11 (0x2c0), 63",
                 (unsigned long)checked, found, bad, (unsigned long)ms);
     return bad + found;
 }
