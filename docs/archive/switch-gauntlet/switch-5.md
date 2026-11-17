@@ -3610,3 +3610,72 @@ read-only mount, `fsck.vfat -n` clean), restored from the session's
 verified backup; the 19 `slmos-1207-*.elf` files staged by this session
 removed, 14 `*.elf*` files as found; health online, powered on,
 `recovery_mode` released; claim released at 08:2x UTC.
+
+## Entry 67 (written 22:17 UTC on 2026-11-17, from date): closing entry; bar restated; critic round 2 passes; #1293 merged as 2a77f395; #1207 closed; #1294 filed
+
+No lab work in this entry. Evidence is unchanged: `gauntlet-5-hw-jetson` 9505f04f, `run5-hw/1207-gpu/`.
+
+**Bar restated by the user (2026-11-17).** 0 halts in at least 27 kexec
+boots, against the baseline of 3 in 16. The 64-byte record at page offset
+0x2c0 (#1291) is a separate defect and out of scope for #1207.
+
+**Re-run at b9f2030a.** x86-64 `make test` and full `/ci` pass. Warnings are
+pre-existing (Lua, `lua_slm.c`, linker), in no file the branch touches.
+check-braces reports 0 violations; the host harness `test_ga10b_bringup.c`
+is outside every build.
+
+**Critic (Fable, blind), round 2.** Report:
+`critic-1207-round2.md`, session scratchpad, not on this branch.
+Overall **PASS**, each check with qualifications.
+- **(1) Test and WARN.**
+  - Host-harness mutations caught:
+    - a verdict that accepts a skip on an inherited GPU;
+    - the WARN call removed from the inherit, or moved after its evict;
+    - a `warn_late` that never warns;
+    - an early flush that always skips;
+    - the flush call removed from `main.c`, or moved after the reserves.
+  - Not caught: the WARN call commented out or placed under `if (0)`. The
+    call-site check matches source text.
+  - The skip and WARN paths have never fired on hardware.
+  - On a skip, "inherited GPU" depends only on the DRAM hand-off scan.
+- **(2) Fix-alone rows.** 26 rows (3 kexec suite, 3 UEFI-direct suite, 10
+  production kexec, 10 production UEFI-direct), 0 halts.
+  - Early flush: DONE on every kexec boot; the UEFI skip on every
+    UEFI-direct boot.
+  - Unlisted failures: one, `test_golden_first_step_logits` in
+    `fix-uefi-suite-b9f2030a-boot01` (#1292).
+  - UEFI image identity rests on the banner only.
+- **(3) Bar.** Baseline re-verified at 3 in 16 (boots 05, 11, 12). Met at
+  **0 halts in 30** counted kexec suite boots: 27 `fixwin-d7fb1010` rows
+  and 3 b9f2030a rows.
+  - The flush code is identical in d7fb1010 and b9f2030a.
+  - The window diagnostic does not mask the fault: 2 of 2 window boots
+    without the fix halted.
+  - Production boots do not count, because they never dispatch.
+  - b9f2030a alone is 3 boots.
+- **#1228.** Not linked, only similar: a non-zero garbage link in
+  `pmm_alloc_pages` from `task_create`, against zeroed heads here.
+
+**Merged.** PR #1293, squash-merged as **2a77f395** on main b548f29d with
+no rebase; the tree is identical to b9f2030a. `/ci` on main 2a77f395:
+all ten steps pass (builds, ARM64, x86-64 and AI_SCHED QEMU suites, runtime host tests 308 and 328, braces, build order, Jetson layout). #1207 closed by the merge. Its body states the mechanism as the
+PR does, with the inferences marked: dirty L2 lines, buffers freed by
+nvgpu, and the inherit's evict being the writer. It also records that a
+CPU write is not excluded.
+
+**Filed #1294** (P2, Backlog, `origin:review`, `kind:gap`; sub-issue of
+epic #1252). The early flush can write Linux's dirty GPU lines over the
+SLM-OS image, BSS or DTB on kexec. Options:
+- flush or quiesce nvgpu in the kexec launcher;
+- a post-flush integrity check;
+- moot once kexec is retired.
+
+**Branches kept.** The `diag/1207-*` branches stay, because the issues and
+this log cite them. `fix/1207-early-l2-flush` is merged.
+
+**Still open from this thread:**
+- #1228: `pmm_alloc_pages` fault from `task_create`; not linked to #1207.
+- #1291: the 64-byte device write at page offset 0x2c0 on kexec.
+- #1292: the `test_golden_first_step_logits` miss on UEFI-direct.
+- #1290: the `test_component_cleanup_ctx_is_per_task` test defect.
+- #1294: the early flush's own gap, filed above.
