@@ -1,0 +1,21 @@
+# head: 364bd06daf8db92def06d892d6b358c2fba87964 (Write back and invalidate the GPU L2 before pmm_init on Jetson kexec boots (#120)
+# worktree dirty files: 
+# command: bash -c git diff origin/main...HEAD --stat; echo; git status --porcelain; echo; git diff --name-only origin/main...HEAD | grep -E '\.(o|obj|bin|elf|iso|a)$' && echo STRAY || echo 'no artifact files in the diff'
+# date: 2026-11-17T02:14:55Z
+# ----
+ CLAUDE.md                                   |   2 +
+ host-tools/gsp-harness/test_ga10b_bringup.c | 164 ++++++++++++++++++++++++++++
+ kernel/CLAUDE.md                            |  23 ++--
+ kernel/gpu/nvidia/ga10b_bringup.c           |  12 +-
+ kernel/gpu/nvidia/ga10b_handoff_reserve.c   | 132 ++++++++++++++++++++++
+ kernel/gpu/nvidia/ga10b_handoff_reserve.h   |  56 ++++++++++
+ kernel/src/main.c                           |  11 +-
+ kernel/tests/test_gpu.c                     |  24 ++++
+ 8 files changed, 415 insertions(+), 9 deletions(-)
+
+
+no artifact files in the diff
+# ----
+# exit code: 0
+# wall time: 0 s
+# finished: 2026-11-17T02:14:55Z

@@ -1,0 +1,85 @@
+# zero-cost comparison, options off: main b548f29d vs diag/1207-poison 187dad1b
+# command: zc_build.sh b548f29d 187dad1b (CFLAGS="-include line0.h", __LINE__ = 0; same checkout path and build dirs;
+#          make kernel then make kernel-test per platform), then zc_compare.py (scripts in $S/b/scripts/)
+# neutralised in .text/.data/.rodata: SLMOS_BUILD_STAMP, SLMOS_BUILD_SHA, full 40-hex commit id (same-length placeholders)
+# date: 2026-11-16T21:37:30Z  exit code: 0
+# ----
+=== QEMU_VIRT kernel
+  build strings: base 20261116195805 b548f29d-dirty  head 20261116211034 187dad1b-dirty
+  .text    addr 0x40000000/0x40000000 size 2165176/2165176 sha256(neutralised) de0f5f5e489731e1/de0f5f5e489731e1 IDENTICAL
+  .data    addr 0x40620000/0x40620000 size 147456/147456 sha256(neutralised) 5d96d3c25afaabf5/5d96d3c25afaabf5 IDENTICAL
+  .rodata  addr 0x402109c0/0x402109c0 size 4208874/4208874 sha256(neutralised) b3e701578f5397fe/b3e701578f5397fe IDENTICAL (raw bytes differ only in the build stamp/SHA strings)
+  .bss     addr 0x40650000/0x40650000 size 26507664/26507664 sha256(neutralised) e3b0c44298fc1c14/e3b0c44298fc1c14 IDENTICAL
+  objects: 348 base, 349 head; only in base 0, only in head 1, differing 5
+    only in head: CMakeFiles/slmos.elf.dir/kernel/tests/test_pmm_poison.c.obj
+    differs: CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/ai_accel/hailo/hailo_shell.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+=== QEMU_VIRT kernel-test
+  build strings: base 20261116195918 b548f29d-dirty  head 20261116211144 187dad1b-dirty
+  .text    addr 0x40000000/0x40000000 size 2209848/2209848 sha256(neutralised) b3c2e548749304c4/b3c2e548749304c4 IDENTICAL
+  .data    addr 0x40750000/0x40750000 size 147456/147456 sha256(neutralised) 4283ab53e91ebdb3/4283ab53e91ebdb3 IDENTICAL
+  .rodata  addr 0x4021b840/0x4021b840 size 5415834/5415834 sha256(neutralised) c41ca1ad3ddc74c7/c41ca1ad3ddc74c7 IDENTICAL (raw bytes differ only in the build stamp/SHA strings)
+  .bss     addr 0x40780000/0x40780000 size 26525408/26525408 sha256(neutralised) e3b0c44298fc1c14/e3b0c44298fc1c14 IDENTICAL
+  objects: 352 base, 353 head; only in base 0, only in head 1, differing 5
+    only in head: CMakeFiles/slmos.elf.dir/kernel/tests/test_pmm_poison.c.obj
+    differs: CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/ai_accel/hailo/hailo_shell.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+=== JETSON_ORIN_NANO kernel
+  build strings: base 20261116200038 b548f29d-dirty  head 20261116211302 187dad1b-dirty
+  .text    addr 0x80000000/0x80000000 size 2409208/2409208 sha256(neutralised) 62fc4b28b5944b8f/62fc4b28b5944b8f IDENTICAL
+  .data    addr 0x80830000/0x80830000 size 148480/148480 sha256(neutralised) 615c1597757f8f64/615c1597757f8f64 IDENTICAL
+  .rodata  addr 0x8024c300/0x8024c300 size 6167458/6167458 sha256(neutralised) 2a3a95f73f50c4bc/2a3a95f73f50c4bc IDENTICAL (raw bytes differ only in the build stamp/SHA strings)
+  .bss     addr 0x80860000/0x80860000 size 37499248/37499248 sha256(neutralised) e3b0c44298fc1c14/e3b0c44298fc1c14 IDENTICAL
+  objects: 382 base, 383 head; only in base 0, only in head 1, differing 5
+    only in head: CMakeFiles/slmos.elf.dir/kernel/tests/test_pmm_poison.c.obj
+    differs: CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/ai_accel/hailo/hailo_shell.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+=== JETSON_ORIN_NANO kernel-test
+  build strings: base 20261116200203 b548f29d-dirty  head 20261116211444 187dad1b-dirty
+  .text    addr 0x80000000/0x80000000 size 2464248/2464248 sha256(neutralised) c3afe6baf9b3dabc/c3afe6baf9b3dabc IDENTICAL
+  .data    addr 0x80970000/0x80970000 size 148480/148480 sha256(neutralised) a95cbc896a6b5a4a/a95cbc896a6b5a4a IDENTICAL
+  .rodata  addr 0x80259a00/0x80259a00 size 7373986/7373986 sha256(neutralised) f7be028a69a6ee95/f7be028a69a6ee95 IDENTICAL (raw bytes differ only in the build stamp/SHA strings)
+  .bss     addr 0x809a0000/0x809a0000 size 37517040/37517040 sha256(neutralised) e3b0c44298fc1c14/e3b0c44298fc1c14 IDENTICAL
+  objects: 386 base, 387 head; only in base 0, only in head 1, differing 5
+    only in head: CMakeFiles/slmos.elf.dir/kernel/tests/test_pmm_poison.c.obj
+    differs: CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/ai_accel/hailo/hailo_shell.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+=== RASPI5 kernel
+  build strings: base 20261116200329 b548f29d-dirty  head 20261116211631 187dad1b-dirty
+  .text    addr 0x80000/0x80000 size 2167480/2167480 sha256(neutralised) ca365716aeb62289/ca365716aeb62289 IDENTICAL
+  .data    addr 0x7a0000/0x7a0000 size 148056/148056 sha256(neutralised) 0321c67d018a4464/0321c67d018a4464 IDENTICAL
+  .rodata  addr 0x2912c0/0x2912c0 size 5298938/5298938 sha256(neutralised) 3eee5245f137d2cb/3eee5245f137d2cb IDENTICAL (raw bytes differ only in the build stamp/SHA strings)
+  .bss     addr 0x7d0000/0x7d0000 size 36221552/36221552 sha256(neutralised) e3b0c44298fc1c14/e3b0c44298fc1c14 IDENTICAL
+  objects: 357 base, 358 head; only in base 0, only in head 1, differing 5
+    only in head: CMakeFiles/slmos.elf.dir/kernel/tests/test_pmm_poison.c.obj
+    differs: CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/ai_accel/hailo/hailo_shell.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+=== RASPI5 kernel-test
+  build strings: base 20261116200447 b548f29d-dirty  head 20261116211759 187dad1b-dirty
+  .text    addr 0x80000/0x80000 size 2222616/2222616 sha256(neutralised) 6b3f053c85b7e6d6/6b3f053c85b7e6d6 IDENTICAL
+  .data    addr 0x8d5000/0x8d5000 size 148056/148056 sha256(neutralised) c77c794cd692fe44/c77c794cd692fe44 IDENTICAL
+  .rodata  addr 0x29ea40/0x29ea40 size 6507674/6507674 sha256(neutralised) aec6f2a65b2da1fa/aec6f2a65b2da1fa IDENTICAL (raw bytes differ only in the build stamp/SHA strings)
+  .bss     addr 0x900000/0x900000 size 36239280/36239280 sha256(neutralised) e3b0c44298fc1c14/e3b0c44298fc1c14 IDENTICAL
+  objects: 361 base, 362 head; only in base 0, only in head 1, differing 5
+    only in head: CMakeFiles/slmos.elf.dir/kernel/tests/test_pmm_poison.c.obj
+    differs: CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/ai_accel/hailo/hailo_shell.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+    differs: CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+RESULT: all compared sections identical

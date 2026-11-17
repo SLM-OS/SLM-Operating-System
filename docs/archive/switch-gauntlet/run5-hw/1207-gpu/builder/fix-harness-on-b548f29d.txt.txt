@@ -1,0 +1,19 @@
+# fix-branch host tests (test_ga10b_bringup.c at fix/1207-early-l2-flush) against main b548f29d
+# date: 2026-11-17T00:36:59Z
+## A: all other sources from b548f29d (git archive)
+compile exit code: 1
+host-tools/gsp-harness/test_ga10b_bringup.c:3867:21: error: variable ‘g_l2m_io’ has initializer but incomplete type
+host-tools/gsp-harness/test_ga10b_bringup.c:3889:20: error: ‘GA10B_L2_FLUSH_EARLY_DONE’ undeclared (first use in this function)
+host-tools/gsp-harness/test_ga10b_bringup.c:3898:18: error: invalid use of undefined type ‘const struct ga10b_l2_flush_early_status’
+host-tools/gsp-harness/test_ga10b_bringup.c:3899:18: error: invalid use of undefined type ‘const struct ga10b_l2_flush_early_status’
+host-tools/gsp-harness/test_ga10b_bringup.c:3900:18: error: invalid use of undefined type ‘const struct ga10b_l2_flush_early_status’
+host-tools/gsp-harness/test_ga10b_bringup.c:3901:18: error: invalid use of undefined type ‘const struct ga10b_l2_flush_early_status’
+## B: fix's ga10b_handoff_reserve.c/.h, b548f29d's kernel/src/main.c (the ordering test)
+compile exit code: 0
+run exit code: 1
+FAIL host-tools/gsp-harness/test_ga10b_bringup.c:3977: flush > 0
+FAIL host-tools/gsp-harness/test_ga10b_bringup.c:3978: vmm > 0 && vmm < flush
+FAIL host-tools/gsp-harness/test_ga10b_bringup.c:3979: pmm_since_vmm == 0
+FAIL host-tools/gsp-harness/test_ga10b_bringup.c:3980: rsv_after > flush
+FAIL host-tools/gsp-harness/test_ga10b_bringup.c:3981: pmm_after > flush
+[test_ga10b_bringup] 5 FAILURES

@@ -1,0 +1,23 @@
+== 01-arm64-build 01:57:19
+   rc=0
+== 02-x86-build 01:58:30
+   rc=0
+== 03-jetson-real 01:59:08
+   rc=0
+== 04-test-arm64 02:01:52
+   rc=0
+== 04b-test-x86 02:04:32
+   rc=0
+== 05-test-ai-sched 02:06:01
+   rc=0
+== 06-runtime-test 02:08:49
+   rc=0
+== 07-braces 02:11:43
+   rc=0
+== 08-build-order 02:12:46
+   rc=0
+== 09-jetson-layout 02:13:33
+   rc=0
+== 10-diff 02:14:55
+   rc=0
+== all steps done 02:14:55
