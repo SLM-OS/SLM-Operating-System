@@ -1,0 +1,2 @@
+05:00:18 staged SLMOS.efi sha256=928bda894e54 (fresh ro mount verified); /dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2516/130892 clusters; no BootNext
+05:41:00 staged SLMOS.efi sha256=424eacd59c70 (fresh ro mount verified); /dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2500/130892 clusters; no BootNext

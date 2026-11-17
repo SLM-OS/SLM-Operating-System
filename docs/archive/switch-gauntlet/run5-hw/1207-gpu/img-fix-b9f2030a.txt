@@ -1,0 +1,8 @@
+# fix/1207-early-l2-flush images at b9f2030af71cdea80584e0f8af79f6c7d5e80eae (b9f2030a), 2026-11-17T05:49:33Z
+e5b0ec16f5a3deff21252b216a610d6afc408d9d457d2061ad0f61bca41c0a32  slmos-jetson-1207-l2flush-b9f2030a.elf  banner: SLM-OS v0.4.0 build 20261117054624 (b9f2030a)
+94bc3160a19af970ffaaf4d1eb0027745cd2f49a137e5aafc7012b505b606ea7  slmos-jetson-1207-l2flush-b9f2030a.bin PE:MZ/PE  banner: SLM-OS v0.4.0 build 20261117054624 (b9f2030a)
+  kernel options: AI_WEIGHTS:STRING=synthetic ENABLE_AI_SCHEDULER:BOOL=ON JETSON_HW_TICK:BOOL=ON 
+ab3e31ada298cc0892509f254d654440e2f16da11bee78c861db338491c4837d  slmos-test-jetson-1207-l2flush-b9f2030a.elf  banner: SLM-OS v0.4.0 build 20261117054744 (b9f2030a)
+424eacd59c70a05abdc6a747266213592b3dccb436821797ca7084e75839c73f  slmos-test-jetson-1207-l2flush-b9f2030a.bin PE:MZ/PE  banner: SLM-OS v0.4.0 build 20261117054744 (b9f2030a)
+  kernel-test options: AI_WEIGHTS:STRING=synthetic ENABLE_AI_SCHEDULER:BOOL=ON JETSON_HW_TICK:BOOL=ON 
+  test kernel operator library: operator_library.bin

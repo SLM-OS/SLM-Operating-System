@@ -1,0 +1,570 @@
+# head: b9f2030af71cdea80584e0f8af79f6c7d5e80eae (#1207 early L2 flush: require DONE on an inherited GPU, WARN on a late context; )
+# worktree dirty files: 
+# command: make test-ga10b-bringup
+# date: 2026-11-17T05:42:22Z
+# ----
+Building + running GA10B bringup tests...
+cc -std=c11 -Wall -Wextra -O2 -g \
+    -Ihost-tools/gsp-harness -Ikernel/gpu/nvidia \
+    -D_GNU_SOURCE \
+    -DSLM_HOST_HARNESS=1 -DENABLE_GA10B_FIRMWARE=1 \
+    -o build/host-tools/test_ga10b_bringup \
+    host-tools/gsp-harness/test_ga10b_bringup.c \
+    kernel/gpu/nvidia/ga10b_bringup.c \
+    kernel/gpu/nvidia/ga10b_handoff_reserve.c \
+    kernel/gpu/nvidia/ga10b_gmmu_enum.c \
+    kernel/gpu/nvidia/ga10b_qmd.c \
+    kernel/gpu/nvidia/falcon.c \
+    kernel/gpu/nvidia/gsp.c
+[GA10B] no platform ops installed
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x00000000 MBOX1=0x00000000 BR_RETCODE=0x00000002 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=2 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR did NOT report BOOT_OK (expected 0xff, got 0x0)
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B-FECS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-FECS] bootstrap PASS
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B-FECS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-FECS] bootstrap did NOT reach PASS (mailbox[0]=0x00000002)
+[GA10B-FECS]   mailbox[0]=0x00000002
+[GA10B-FECS]   mailbox[1]=0x00000000
+[GA10B-FECS]   mailbox[2]=0x00000000
+[GA10B-FECS]   mailbox[3]=0x00000000
+[GA10B-FECS]   mailbox[4]=0x00000000
+[GA10B-FECS]   mailbox[5]=0x00000000
+[GA10B-FECS]   mailbox[6]=0x00000000
+[GA10B-FECS]   mailbox[7]=0x00000000
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B-FECS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-FECS] bootstrap did NOT reach PASS (mailbox[0]=0x00000021)
+[GA10B-FECS]   mailbox[0]=0x00000021
+[GA10B-FECS]   mailbox[1]=0x00000000
+[GA10B-FECS]   mailbox[2]=0x00000000
+[GA10B-FECS]   mailbox[3]=0x00000000
+[GA10B-FECS]   mailbox[4]=0x00000000
+[GA10B-FECS]   mailbox[5]=0x00000000
+[GA10B-FECS]   mailbox[6]=0x00000000
+[GA10B-FECS]   mailbox[7]=0x00000000
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B-FECS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-FECS] bootstrap PASS
+[GA10B-GPCCS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-GPCCS] bootstrap PASS
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B-FECS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-FECS] bootstrap PASS
+[GA10B-GPCCS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-GPCCS] bootstrap did NOT reach PASS (mailbox[0]=0x00000002)
+[GA10B-GPCCS]   mailbox[0]=0x00000002
+[GA10B-GPCCS]   mailbox[1]=0x00000000
+[GA10B-GPCCS]   mailbox[2]=0x00000000
+[GA10B-GPCCS]   mailbox[3]=0x00000000
+[GA10B-GPCCS]   mailbox[4]=0x00000000
+[GA10B-GPCCS]   mailbox[5]=0x00000000
+[GA10B-GPCCS]   mailbox[6]=0x00000000
+[GA10B-GPCCS]   mailbox[7]=0x00000000
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B-FECS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-FECS] bootstrap PASS
+[GA10B-GPCCS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-GPCCS] bootstrap PASS
+[GA10B-PMU] skipped — support_ls_pmu=false on GA10B; PMU not required for compute submission
+[GA10B] ACR text: 1024 bytes
+[GA10B] prepare OK — GSP Falcon probed
+[GA10B-ACR] text=1024 data=512 manifest=2048 bytes
+[GA10B-ACR] GSP engine reset complete
+[GA10B-ACR] ucode loaded (IMEM@0+1024, DMEM@0+512, manifest@63488+2048)
+[GA10B-ACR] dmem@0 readback: 0x00000000 0x00000000 (src 0x14131211 0x18171615) MISMATCH
+[GA10B-ACR] dmem@manifest readback: 0x00000000 0x00000000 (src 0x25242322 0x29282726) MISMATCH
+[GA10B-ACR] STARTCPU kicked — polling for halt
+[GA10B-ACR] post-kick: CPUCTL=0x00000010 MBOX0=0x000000ff MBOX1=0x00000000 BR_RETCODE=0x00000003 wait_rc=0
+[GA10B-ACR] hwcfg2=0x00000400 bcr_ctrl=0x00000011 br_retcode.result=3 (0=run 1=dunno 2=FAIL 3=PASS)
+[GA10B-ACR] ACR running — BOOT_OK received
+[GA10B-FECS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-FECS] bootstrap PASS
+[GA10B-GPCCS] STARTCPU kicked — polling ctxsw mailbox[0]
+[GA10B-GPCCS] bootstrap PASS
+[GA10B-PMU] skipped — support_ls_pmu=false on GA10B; PMU not required for compute submission
+[GA10B-INHERIT] HWCFG2=0x00000400 bit13=0
+[GA10B-INHERIT] GR PRI wake: iter=0 final=0x00000000 (poison=0xbadf1002)
+[GA10B-INHERIT] GSP  CPUCTL=0x00000000
+[GA10B-INHERIT] FECS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] GPCCS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — skipping phases 1-4
+[ga10b-l2-early] *** WARN: the L2 flush before pmm_init never ran (FECS_CURRENT_CTX=0x00000000 then), but the inherit now finds a live GPU context (FECS_CURRENT_CTX=0x00000000): its L2 flush runs after pmm_init and can write Linux's dirty lines over PMM pages (#1207) ***
+[GA10B-INHERIT] uflush fb_flush[1] timed out (reg=0x70000, last=0x1)
+[GA10B-INHERIT] L2 evict timed out — first dispatch may still see stale nvgpu data
+[GA10B-INHERIT] HWCFG2=0x00002400 bit13=1
+[GA10B-INHERIT] FAIL — priv-lockdown is asserted. Was --no-gpu-suspend used?
+[GA10B-INHERIT] HWCFG2=0x00000400 bit13=0
+[GA10B-INHERIT] GR PRI wake: iter=0 final=0x00000000 (poison=0xbadf1002)
+[GA10B-INHERIT] GSP  CPUCTL=0x00000000
+[GA10B-INHERIT] FECS CPUCTL=0x00000000 mailbox[0]=0x00000000
+[GA10B-INHERIT] GPCCS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] FECS not ready (expected 1, got 0x0)
+[GA10B-INHERIT] HWCFG2=0x00000400 bit13=0
+[GA10B-INHERIT] GR PRI wake: iter=0 final=0x00000000 (poison=0xbadf1002)
+[GA10B-INHERIT] GSP  CPUCTL=0x00000000
+[GA10B-INHERIT] FECS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] GPCCS CPUCTL=0x00000000 mailbox[0]=0x00000002
+[GA10B-INHERIT] GPCCS not ready (expected 1, got 0x2)
+[GA10B-INHERIT] HWCFG2=0x00000400 bit13=0
+[GA10B-INHERIT] GR PRI wake: iter=0 final=0x00000000 (poison=0xbadf1002)
+[GA10B-INHERIT] GSP  CPUCTL=0x00000000
+[GA10B-INHERIT] FECS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] GPCCS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — skipping phases 1-4
+[ga10b-l2-early] *** WARN: the L2 flush before pmm_init never ran (FECS_CURRENT_CTX=0x00000000 then), but the inherit now finds a live GPU context (FECS_CURRENT_CTX=0x00000000): its L2 flush runs after pmm_init and can write Linux's dirty lines over PMM pages (#1207) ***
+[GA10B-INHERIT] uflush fb_flush[1] timed out (reg=0x70000, last=0x1)
+[GA10B-INHERIT] L2 evict timed out — first dispatch may still see stale nvgpu data
+[GA10B-P5] FECS method gateway smoke test
+[GA10B-P5] FECS DISCOVER_IMAGE_SIZE = 513280 bytes (0x7d500)
+[GA10B-P5] GPU GR engine is alive — FECS responded to SLM-OS method
+[GA10B-INHERIT] HWCFG2=0x00000400 bit13=0
+[GA10B-INHERIT] GR PRI wake: iter=0 final=0x00000000 (poison=0xbadf1002)
+[GA10B-INHERIT] GSP  CPUCTL=0x00000000
+[GA10B-INHERIT] FECS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] GPCCS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — skipping phases 1-4
+[ga10b-l2-early] *** WARN: the L2 flush before pmm_init never ran (FECS_CURRENT_CTX=0x00000000 then), but the inherit now finds a live GPU context (FECS_CURRENT_CTX=0x00000000): its L2 flush runs after pmm_init and can write Linux's dirty lines over PMM pages (#1207) ***
+[GA10B-INHERIT] uflush fb_flush[1] timed out (reg=0x70000, last=0x1)
+[GA10B-INHERIT] L2 evict timed out — first dispatch may still see stale nvgpu data
+[GA10B-P5] FECS method gateway smoke test
+[GA10B-P5] FECS method TIMEOUT — ucode unresponsive
+[GA10B-P5]   FECS CPUCTL=0x00000000 mailbox[0]=0x00000000
+[GA10B-INHERIT] HWCFG2=0x00000400 bit13=0
+[GA10B-INHERIT] GR PRI wake: iter=0 final=0x00000000 (poison=0xbadf1002)
+[GA10B-INHERIT] GSP  CPUCTL=0x00000000
+[GA10B-INHERIT] FECS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] GPCCS CPUCTL=0x00000000 mailbox[0]=0x00000001
+[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — skipping phases 1-4
+[ga10b-l2-early] *** WARN: the L2 flush before pmm_init never ran (FECS_CURRENT_CTX=0x00000000 then), but the inherit now finds a live GPU context (FECS_CURRENT_CTX=0x00000000): its L2 flush runs after pmm_init and can write Linux's dirty lines over PMM pages (#1207) ***
+[GA10B-INHERIT] uflush fb_flush[1] timed out (reg=0x70000, last=0x1)
+[GA10B-INHERIT] L2 evict timed out — first dispatch may still see stale nvgpu data
+[GA10B-P5] FECS method gateway smoke test
+[GA10B-P5] FECS DISCOVER_IMAGE_SIZE = 3735931409 bytes (0xdeadca11)
+[GA10B-P5] suspicious result — FECS may have echoed the null sentinel
+[ga10b-reserve] kind=0 (mnist): handoff @0x5d5b6c0b7000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0b7000 (4 KB)
+[ga10b-reserve]   reserved userd @0x150000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x150001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x150010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x150020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x150030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0b7000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=1 (sched_mlp): handoff @0x5d5b6c0ba000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0ba000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x151030000
+[ga10b-reserve]   reserved userd @0x151000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x151001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x151010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x151020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x151030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0ba000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=2 (eviction_qnet): handoff @0x5d5b6c0be000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0be000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x152030000
+[ga10b-reserve]   reserved userd @0x152000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x152001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x152010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x152020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x152030000)
+[ga10b-reserve]   reserved gr_ctx_extents array @0x5d5b6c0c7000
+[ga10b-reserve]   gr_ctx: 2 extents reserved (36 KB total), 0 skipped
+[ga10b-reserve]   handoff@0x5d5b6c0be000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve]   vm @inst 0x150030000: PDB invalid — skipping
+[ga10b-reserve]   vm @inst 0x151030000: PDB invalid — skipping
+[ga10b-reserve]   vm @inst 0x152030000: PDB invalid — skipping
+[ga10b-reserve]   vm @inst 0x150030000: PDB invalid — skipping
+[ga10b-reserve] kind=0 (mnist): no handoff
+[ga10b-reserve] kind=1 (sched_mlp): no handoff
+[ga10b-reserve] kind=2 (eviction_qnet): handoff @0x5d5b6c0b8000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0b8000 (4 KB)
+[ga10b-reserve]   reserved userd @0x152000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x152001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x152010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x152020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x152030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0b8000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve]   vm @inst 0x152030000: PDB invalid — skipping
+[ga10b-reserve]   vm @inst 0x152030000: PDB invalid — skipping
+[ga10b-reserve] kind=0 (mnist): no handoff
+[ga10b-reserve] kind=1 (sched_mlp): no handoff
+[ga10b-reserve] kind=2 (eviction_qnet): handoff @0x5d5b6c0b9000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0b9000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x152030000
+[ga10b-reserve]   reserved userd @0x152000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x152001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x152010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x152020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x152030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0b9000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve]   vm @inst 0x152030000: PDB invalid — skipping
+[ga10b-reserve] kind=0 (mnist): handoff @0x5d5b6c0b7000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0b7000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x150030000
+[ga10b-reserve]   reserved userd @0x150000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x150001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x150010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x150020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x150030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0b7000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=1 (sched_mlp): handoff @0x5d5b6c0b8000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0b8000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x151030000
+[ga10b-reserve]   reserved userd @0x151000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x151001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x151010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x151020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x151030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0b8000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=2 (eviction_qnet): handoff @0x5d5b6c0bb000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0bb000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x152030000
+[ga10b-reserve]   reserved userd @0x152000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x152001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x152010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x152020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x152030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0bb000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve]   vm @inst 0x150030000: PDB invalid — skipping
+[ga10b-reserve]   vm @inst 0x151030000: PDB invalid — skipping
+[ga10b-reserve]   vm @inst 0x152030000: PDB invalid — skipping
+[ga10b-reserve] kind=0 (mnist): no handoff
+[ga10b-reserve] kind=1 (sched_mlp): no handoff
+[ga10b-reserve] kind=2 (eviction_qnet): no handoff
+[ga10b-reserve] kind=0 (mnist): handoff @0x5d5b6c0b7000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0b7000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x150030000
+[ga10b-reserve]   reserved userd @0x150000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x150001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x150010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x150020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x150030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0b7000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=1 (sched_mlp): handoff @0x5d5b6c0ba000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0ba000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x151030000
+[ga10b-reserve]   reserved userd @0x151000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x151001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x151010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x151020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x151030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0ba000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=2 (eviction_qnet): handoff @0x5d5b6c0be000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0be000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x152030000
+[ga10b-reserve]   reserved userd @0x152000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x152001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x152010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x152020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x152030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0be000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve]   vm @inst 0x150030000: PDB invalid — skipping
+[ga10b-reserve]   vm @inst 0x151030000: PDB invalid — skipping
+[ga10b-reserve]   vm @inst 0x152030000: PDB invalid — skipping
+[ga10b-reserve] kind=0 (mnist): no handoff
+[ga10b-reserve] kind=1 (sched_mlp): no handoff
+[ga10b-reserve] kind=2 (eviction_qnet): no handoff
+[ga10b-reserve] kind=0 (mnist): no handoff
+[ga10b-reserve] kind=1 (sched_mlp): no handoff
+[ga10b-reserve] kind=2 (eviction_qnet): handoff @0x5d5b6c0c7000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0c7000 (4 KB)
+[ga10b-reserve]   reserved userd @0x152000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x152001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x152010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x152020000 (4096 B)
+[ga10b-reserve]   reserved pipeline_ops @0x5d5b6c0c9000 (4096 B)
+[ga10b-reserve]   per-op shader: v6 ops carry no shader fields — covered by the channel-VM reserve
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0c7000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve]   vm @inst 0x1a0000000: 6 tables, 5 pages (140 KB) in 5 ranges
+[ga10b-reserve]   vm @inst 0x1a0000000: PDB 0x1a0001000 already reserved
+[ga10b-reserve] kind=0 (mnist): no handoff
+[ga10b-reserve] kind=1 (sched_mlp): no handoff
+[ga10b-reserve] kind=2 (eviction_qnet): handoff @0x5d5b6c0c7000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0c7000 (4 KB)
+[ga10b-reserve]   reserved userd @0x152000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x152001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x152010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x152020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x1a0000000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0c7000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve]   vm @inst 0x1a0000000: 6 tables, 5 pages (140 KB) in 5 ranges
+[ga10b-reserve]   vm @inst 0x1a0000000: PDB 0x1a0001000 already reserved
+[ga10b-reserve] kind=0 (mnist): handoff @0x5d5b6c0c7000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0c7000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x1a0000000
+[ga10b-reserve]   reserved userd @0x150000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x150001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x150010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x150020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x1a0000000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0c7000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=1 (sched_mlp): handoff @0x5d5b6c0ca000
+[ga10b-reserve]   reserved handoff dmabuf @0x5d5b6c0ca000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x151030000
+[ga10b-reserve]   reserved userd @0x151000000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x151001000 (8192 B)
+[ga10b-reserve]   reserved pushbuf @0x151010000 (65536 B)
+[ga10b-reserve]   reserved sem @0x151020000 (4096 B)
+[ga10b-reserve]   per-op shader reservation skipped (n_ops=0 ops_phys=0x0 inst_block_phys=0x151030000)
+[ga10b-reserve]   gr_ctx reservation skipped (extents_phys=0x0 n=0 — helper didn't publish, older or non-patched nvgpu)
+[ga10b-reserve]   handoff@0x5d5b6c0ca000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=2 (eviction_qnet): no handoff
+[ga10b-reserve]   vm @inst 0x1a0000000: 6 tables, 5 pages (140 KB) in 5 ranges
+[ga10b-reserve]   vm @inst 0x151030000: PDB invalid — skipping
+[test_ga10b_bringup] starting
+== test_firmware_accessor_sizes ==
+== test_firmware_accessor_rejects_out_of_range ==
+== test_firmware_accessor_null_out ==
+== test_prepare_rejects_null_platform ==
+== test_prepare_rejects_null_bringup ==
+== test_prepare_populates_state ==
+== test_phases_reject_wrong_state ==
+== test_phases_reject_null_bringup ==
+== test_acr_sequence_happy_path ==
+== test_acr_returns_error_on_brom_fail ==
+== test_fecs_happy_path ==
+== test_fecs_fails_on_fail_sentinel ==
+== test_fecs_fails_on_checksum_sentinel ==
+== test_gpccs_happy_path ==
+== test_gpccs_rejects_wrong_state ==
+== test_gpccs_fails_on_fail_sentinel ==
+== test_pmu_is_noop ==
+== test_phases_1_through_4_chain ==
+== test_inherit_happy_path ==
+== test_inherit_rejects_priv_lockdown ==
+== test_inherit_rejects_fecs_not_ready ==
+== test_inherit_rejects_gpccs_not_ready ==
+== test_fecs_method_gateway_happy_path ==
+== test_fecs_method_gateway_timeout ==
+== test_fecs_method_gateway_rejects_null_sentinel ==
+== test_phase5_rejects_wrong_state ==
+== test_handoff_validate_happy_path ==
+== test_handoff_validate_null_rejected ==
+== test_handoff_validate_bad_magic ==
+== test_handoff_validate_bad_version ==
+== test_handoff_validate_null_addresses ==
+== test_handoff_validate_gpfifo_entries ==
+== test_handoff_validate_missing_doorbell_token ==
+== test_handoff_validate_stale_zero_inst_block_rejected ==
+== test_next_gp_put_wraps_at_ring_boundary ==
+== test_method_header_encoding ==
+== test_sema_release_pb_layout ==
+== test_sema_release_pb_truncates_va_upper ==
+== test_sema_release_pb_zero_payload ==
+== test_compute_sema_release_pb_layout ==
+== test_compute_sema_release_pb_truncates_va_upper ==
+== test_compute_sema_release_pb_zero_payload ==
+== test_compute_sema_release_pb_flush_disable_flag ==
+== test_launch_kernel_pb_layout ==
+== test_launch_kernel_pb_qmd_shift_lower ==
+== test_launch_kernel_pb_qmd_shift_upper ==
+== test_launch_kernel_pb_qmd_shift_at_40bit_boundary ==
+== test_launch_kernel_pb_qmd_misalignment_truncates ==
+== test_launch_kernel_pb_idempotent ==
+== test_launch_kernel_pb_uses_ampere_pcas2_b ==
+== test_launch_kernel_with_sema_pb_size ==
+== test_launch_kernel_with_sema_pb_layout ==
+== test_launch_kernel_with_sema_pb_idempotent ==
+== test_launch_kernel_with_sema_pb_payload_passthrough ==
+== test_handoff_v7_layout_size ==
+== test_handoff_v4_expected_payload_offset ==
+== test_handoff_v5_pipeline_offsets ==
+== test_handoff_v6_input_buf_offsets ==
+== test_handoff_v7_pool_offsets ==
+== test_pipeline_op_v7_layout ==
+== test_set_input_rejects_null_b ==
+== test_set_input_rejects_null_bytes ==
+== test_set_input_rejects_no_handoff ==
+== test_set_input_writes_bytes ==
+== test_set_input_rejects_oversize_cap ==
+== test_set_input_fill_writes_pattern ==
+== test_set_input_fill_rejects_oversize ==
+== test_pipeline_op_layout ==
+== test_pick_launch_payload_v3_uses_fallback ==
+== test_pick_launch_payload_v4_zero_uses_fallback ==
+== test_pick_launch_payload_v4_uses_field ==
+== test_pick_launch_payload_future_version_uses_field ==
+== test_handoff_validate_v3_accepted ==
+== test_scanner_finds_magic_at_start ==
+== test_scanner_finds_magic_midrange ==
+== test_scanner_returns_zero_on_miss ==
+== test_scanner_skips_between_pages ==
+== test_scanner_empty_range ==
+== test_scanner_kind_finds_first_matching ==
+== test_scanner_kind_returns_zero_when_kind_absent ==
+== test_scanner_kind_skips_invalid_handoff ==
+== test_scanner_kind_legacy_zero_is_mnist ==
+== test_reserve_all_kinds_covers_eviction_and_sched ==
+== test_reserve_all_kinds_eviction_only ==
+== test_reserve_all_kinds_picks_first_valid_per_kind ==
+== test_reserve_all_kinds_no_resident_reserves_every_inst ==
+== test_reserve_all_kinds_none_found ==
+== test_resolve_handoff_prefers_boot_record ==
+== test_gmmu_enum_visits_every_table_and_leaf ==
+== test_gmmu_enum_rejects_invalid_pdb ==
+== test_gmmu_enum_table_budget_stops_fanout ==
+== test_reserve_channel_vm_pins_tables_and_leaves ==
+== test_reserve_channel_vm_dedups_resident ==
+== test_reserve_channel_vm_runs_after_named_buffers ==
+== test_poll_match_exact ==
+== test_poll_match_any_nonze[ga10b-l2-early] FECS_CURRENT_CTX=0x2013b6a7: GPU L2 written back and invalidated before pmm_init (polls: fb_flush 1, l2_flush_dirty 4, l2_sysmem_invalidate 2, fb_flush 1) (#1207)
+[ga10b-l2-early] *** l2_flush_dirty (op 2 of 4, BAR0+0x70010) TIMED OUT after 2000 polls, last 0x00000003: the GPU L2 may still hold Linux's dirty lines, and a later flush can write them over pages the PMM hands out (#1207) ***
+[ga10b-l2-early] FECS_CURRENT_CTX=0x2013b6a7: GPU L2 flush INCOMPLETE before pmm_init (polls: fb_flush 1, l2_flush_dirty 2000, l2_sysmem_invalidate 1, fb_flush 1) (#1207)
+[ga10b-l2-early] *** fb_flush (op 1 of 4, BAR0+0x70000) TIMED OUT after 100 polls, last 0x00000003: the GPU L2 may still hold Linux's dirty lines, and a later flush can write them over pages the PMM hands out (#1207) ***
+[ga10b-l2-early] FECS_CURRENT_CTX=0x2013b6a7: GPU L2 flush INCOMPLETE before pmm_init (polls: fb_flush 100, l2_flush_dirty 1, l2_sysmem_invalidate 1, fb_flush 1) (#1207)
+[ga10b-l2-early] *** l2_sysmem_invalidate (op 3 of 4, BAR0+0x70004) TIMED OUT after 200 polls, last 0x00000003: the GPU L2 may still hold Linux's dirty lines, and a later flush can write them over pages the PMM hands out (#1207) ***
+[ga10b-l2-early] FECS_CURRENT_CTX=0x2013b6a7: GPU L2 flush INCOMPLETE before pmm_init (polls: fb_flush 1, l2_flush_dirty 1, l2_sysmem_invalidate 200, fb_flush 1) (#1207)
+[ga10b-l2-early] FECS_CURRENT_CTX=0xbadf1100: no inherited GPU context, L2 flush before pmm_init skipped (#1207)
+[ga10b-l2-early] FECS_CURRENT_CTX=0x00000000: no inherited GPU context, L2 flush before pmm_init skipped (#1207)
+[ga10b-l2-early] *** WARN: the L2 flush before pmm_init was skipped (FECS_CURRENT_CTX=0x00000000 then), but the inherit now finds a live GPU context (FECS_CURRENT_CTX=0x2013b6a7): its L2 flush runs after pmm_init and can write Linux's dirty lines over PMM pages (#1207) ***
+[ga10b-l2-early] *** WARN: the L2 flush before pmm_init was skipped (FECS_CURRENT_CTX=0xbadf1100 then), but the inherit now finds a live GPU context (FECS_CURRENT_CTX=0x2013b6a7): its L2 flush runs after pmm_init and can write Linux's dirty lines over PMM pages (#1207) ***
+[ga10b-l2-early] *** WARN: the L2 flush before pmm_init never ran (FECS_CURRENT_CTX=0xbadf1100 then), but the inherit now finds a live GPU context (FECS_CURRENT_CTX=0x2013b6a7): its L2 flush runs after pmm_init and can write Linux's dirty lines over PMM pages (#1207) ***
+ro ==
+== test_pipeline_op_validator_accepts_well_formed ==
+== test_pipeline_op_validator_rejects_zero_qmd ==
+== test_pipeline_op_validator_rejects_zero_output ==
+== test_pipeline_op_validator_rejects_null ==
+== test_pipeline_max_ops_constant ==
+== test_qmd_set_bits_single_bit ==
+== test_qmd_set_bits_within_one_word ==
+== test_qmd_set_bits_full_32_bit_word ==
+== test_qmd_set_bits_spans_two_words ==
+== test_qmd_set_bits_truncates_excess_value ==
+== test_qmd_set_bits_preserves_neighbors ==
+== test_qmd_pool_prepare_advances_slot ==
+== test_qmd_pool_prepare_wraps_at_n_slots ==
+== test_qmd_pool_prepare_starts_from_inout_value ==
+== test_qmd_pool_prepare_writes_match_direct_populate ==
+== test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds ==
+== test_qmd_pool_prepare_applies_hmma_overrides ==
+== test_qmd_pool_prepare_rejects_invalid_inputs ==
+== test_handoff_is_v7_accepts_well_formed ==
+== test_handoff_is_v7_rejects_pre_v7_version ==
+== test_handoff_is_v7_rejects_zero_pool_fields ==
+== test_handoff_is_v7_rejects_null ==
+== test_v7_validate_accepts_well_formed ==
+== test_v7_validate_rejects_zero_ops_phys ==
+== test_v7_validate_rejects_n_ops_exceeds_cap ==
+== test_v7_validate_rejects_pool_size_mismatch ==
+== test_v7_validate_first_failure_wins ==
+== test_v7_validate_rejects_null_handoff ==
+== test_qmd_selftest_reference_matches_encoder ==
+== test_qmd_populate_sets_cwd_sysmembar ==
+== test_qmd_populate_is_deterministic ==
+== test_qmd_set_bits_rejects_inverted_range ==
+== test_l2_evict_call_sites_pinned_to_minimal ==
+== test_v7_dispatch_trace_lines_are_gated ==
+[test_ga10b_bringup] all OK
+# ----
+# exit code: 0
+# wall time: 8 s
+# finished: 2026-11-17T05:42:30Z

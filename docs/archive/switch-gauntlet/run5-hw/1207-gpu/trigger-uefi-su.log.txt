@@ -1,0 +1,9 @@
+05:22:29 start mode=uefi n=3 elfs=[] skip_current_boot_id=4e23e109-a24e-4f7e-897e-ca35339a4ddc pid=3212091
+05:24:00 trigger 1/3 elf=ESP boot_id=7de1b02d-b9af-47de-a804-b5e391fc174c state+uptime=[running 27.51 ] reply=[BootNext: 000E ]
+05:32:09 trigger 2/3 elf=ESP boot_id=92da0489-66f9-43fd-8d69-db30878c5ea0 state+uptime=[running 26.92 ] reply=[BootNext: 000E ]
+05:40:09 trigger 3/3 elf=ESP boot_id=6bbfc946-7762-4b81-b13c-a8e7880060f5 state+uptime=[running 26.96 ] reply=[BootNext: 000E ]
+05:40:09 end triggers=3
+05:47:44 start mode=uefi n=2 elfs=[] skip_current_boot_id=none pid=3359425
+05:49:12 trigger 1/2 elf=ESP boot_id=06427704-9b98-4249-b029-4981b91f6295 state+uptime=[running 26.34 ] reply=[BootNext: 000E ]
+05:57:18 trigger 2/2 elf=ESP boot_id=c7cea6c4-7187-4ff3-8b96-e9e23b8cf0cc state+uptime=[running 25.61 ] reply=[BootNext: 000E ]
+05:57:18 end triggers=2

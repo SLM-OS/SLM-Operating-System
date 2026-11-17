@@ -1,0 +1,10 @@
+# new host tests (fix/1207-early-l2-flush, after the critic changes) against 364bd06d
+# date: 2026-11-17T05:41:49Z
+## A: all other sources from 364bd06d
+compile exit code: 1
+collect2: error: ld returned 1 exit status
+## B: new ga10b_handoff_reserve.c/.h, 364bd06d's ga10b_bringup.c (inherit has no late-context WARN)
+compile exit code: 0
+run exit code: 1
+FAIL host-tools/gsp-harness/test_ga10b_bringup.c:4009: warn > 0
+[test_ga10b_bringup] 1 FAILURES
