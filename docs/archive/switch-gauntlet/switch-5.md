@@ -3484,3 +3484,50 @@ texts did not reach the orchestrator):
 Next: 3 kexec boots of the d887bed9 snapshot+unmap build (no fix) for
 valid SMP rows of the discriminating build; UEFI-direct x5 of the same;
 then the fix's suite x3 per path and `boot_test --count 10` per path.
+
+## Entry 65 (written 05:05 UTC on 2026-11-17, from date): full-memory scans: no CPU fault; a second writer the fix does not cover; issue #1290
+
+Evidence `gauntlet-5-hw-jetson` 8c42313a, `run5-hw/1207-gpu/`
+(`su-kexec-suite-d887bed9-boot01..03.txt`, `fixsu-kexec-suite-cbcb3d7e-boot01..03.txt`).
+
+**Snapshot+unmap without the fix** (`diag/1207-poison` d887bed9, two-part
+arming, clean banner), kexec x3: SMP 5/5 in every boot, part-2 arming
+about 14.5 s after SMP, every free page snapshotted and unmapped, full
+scans before the first suite, around `test_suite_oplib_gpu_as` and after
+`test_suite_gpu`. **No page fault in any boot** (so no CPU write to a
+free page). No halt. In each boot exactly one changed free-page line
+after `test_suite_gpu`: a **non-zero 64-byte record at offset 0x102c0
+of a 1 MB-aligned region** (PA 0x11e4102c0, 0x1231102c0, 0x1272102c0),
+mapped by neither GPU VM; also seen in the f378d28b snapshot boots
+(0x1223102c0, 0x1234102c0). The #1207 pushbuf-window zeros did not show
+in these three boots.
+
+**Fix + snapshot+unmap** (`diag/1207-fix-poison` cbcb3d7e = d887bed9 +
+364bd06d), kexec x3: early flush done before `pmm_init` in each boot,
+inherit normal, no fault, no halt, no verifier finding, and **the same
+record still appears after `test_suite_gpu`** (PA 0x10ef102c0,
+0x11f0102c0, 0x1250102c0). So the orchestrator's Entry-63 guess that the
+record is another stale L2 line is **refuted**: it is a second writer,
+separate from the #1207 zeroing, and the early flush does not address
+it. Facts about it: non-zero, structured (constant words 0x08420033,
+0x00082003, 0x203; one per-boot 32-bit value ending in 0xa0; a small
+counter 0x3a / 0x45 next to 0x200; then mostly-ones words), always at
+page offset 0x2c0, so it can never land on a free block's link words
+(offset 0) and cannot cause the "count without a list" halt. Not
+identified (not a GA10B MMU fault-buffer entry or an xHCI event TRB by
+the builder's reading). The builder's 46aa3b13 adds the line at page
+offset 0x2c0 to the per-test scans in `test_suite_gpu` and
+`test_suite_oplib_gpu_as`, to name the test; 2 kexec boots running.
+
+**Consequence for the bar.** Measured on the window build, the #1207
+mechanism meets the bar (27 of 27, Entry 64). Measured with full-memory
+scans, the fix leaves one 64-byte free-page change per boot from this
+second writer, so **"0 poison damage" as the brief states it is not met**.
+The PR decision waits on what this writer is.
+
+**Unlisted failure:** `test_component_cleanup_ctx_is_per_task` failed in
+2 boots, both PMM_POISON builds (`po-...-76ec16fd-boot02`,
+`su-...-d887bed9-boot02`): "per-task ctx pointers collided". Reading:
+the cleanup frees each ctx page when its task exits, so the next
+`pmm_alloc_page()` can legitimately return the same page; a test defect,
+more likely when allocation is slower. Filed **#1290** (P3, Backlog).
