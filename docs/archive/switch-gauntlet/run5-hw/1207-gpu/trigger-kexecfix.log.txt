@@ -1,0 +1,5 @@
+06:24:31 start mode=kexec n=3 elfs=[/root/slmos-1207-fix-b9f2030a.elf /root/slmos-1207-fix-b9f2030a.elf /root/slmos-1207-fix-b9f2030a.elf] skip_current_boot_id=none pid=3550271
+06:25:58 trigger 1/3 elf=/root/slmos-1207-fix-b9f2030a.elf boot_id=7a584ef3-3b90-44e1-8f66-9f3c575ede2b state+uptime=[running 24.92 ] reply=[ab3e31ada298cc08 ]
+06:32:31 trigger 2/3 elf=/root/slmos-1207-fix-b9f2030a.elf boot_id=c4117ccf-18c4-4ec2-930e-0d2eae965dee state+uptime=[running 26.67 ] reply=[ab3e31ada298cc08 ]
+06:39:02 trigger 3/3 elf=/root/slmos-1207-fix-b9f2030a.elf boot_id=38c64f3c-bf43-43af-902f-ed4ebf8ab599 state+uptime=[running 25.22 ] reply=[ab3e31ada298cc08 ]
+06:39:02 end triggers=3

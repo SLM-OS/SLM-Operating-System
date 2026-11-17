@@ -1,0 +1,18 @@
+06:45:03 start mode=kexec n=3 elfs=[/root/slmos-1207-fixprod-b9f2030a.elf /root/slmos-1207-fixprod-b9f2030a.elf /root/slmos-1207-fixprod-b9f2030a.elf] skip_current_boot_id=none pid=3654756
+06:46:40 trigger 1/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=b92d2a1d-3c83-4a76-b9fa-e7b8c24e0317 state+uptime=[running 25.73 ] reply=[e5b0ec16f5a3deff ]
+06:49:38 trigger 2/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=157103f2-ac31-4913-9b8a-33969a700cf7 state+uptime=[running 26.58 ] reply=[e5b0ec16f5a3deff ]
+06:52:36 trigger 3/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=15ee251b-0826-4cbd-9481-cc73ac54e9bf state+uptime=[running 24.86 ] reply=[e5b0ec16f5a3deff ]
+06:52:36 end triggers=3
+06:55:52 start mode=kexec n=3 elfs=[/root/slmos-1207-fixprod-b9f2030a.elf /root/slmos-1207-fixprod-b9f2030a.elf /root/slmos-1207-fixprod-b9f2030a.elf] skip_current_boot_id=none pid=3710371
+06:58:04 trigger 1/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=6ea726c3-6bc0-48f1-a46e-7a53c3eee235 state+uptime=[running 26.61 ] reply=[e5b0ec16f5a3deff ]
+07:01:00 trigger 2/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=2bb67659-3785-48c6-b0e6-24f9bef69449 state+uptime=[running 24.55 ] reply=[e5b0ec16f5a3deff ]
+07:03:59 trigger 3/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=42a38566-0a08-4bfd-a64e-ba92d46be305 state+uptime=[running 26.83 ] reply=[e5b0ec16f5a3deff ]
+07:03:59 end triggers=3
+07:05:45 start mode=kexec n=3 elfs=[/root/slmos-1207-fixprod-b9f2030a.elf /root/slmos-1207-fixprod-b9f2030a.elf /root/slmos-1207-fixprod-b9f2030a.elf] skip_current_boot_id=none pid=3756949
+07:07:18 trigger 1/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=dad09987-c11c-4c40-9e26-559505b44987 state+uptime=[running 27.05 ] reply=[e5b0ec16f5a3deff ]
+07:10:15 trigger 2/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=15783ff3-d76c-43d9-9048-b1c9919b4e9d state+uptime=[running 24.68 ] reply=[e5b0ec16f5a3deff ]
+07:13:11 trigger 3/3 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=ffc30c18-edfb-41d5-b80d-65693f5ab75d state+uptime=[running 24.92 ] reply=[e5b0ec16f5a3deff ]
+07:13:11 end triggers=3
+07:15:00 start mode=kexec n=1 elfs=[/root/slmos-1207-fixprod-b9f2030a.elf] skip_current_boot_id=none pid=3805207
+07:16:29 trigger 1/1 elf=/root/slmos-1207-fixprod-b9f2030a.elf boot_id=4e4afd72-217f-4394-b04b-f043dd3c8375 state+uptime=[running 26.83 ] reply=[e5b0ec16f5a3deff ]
+07:16:29 end triggers=1

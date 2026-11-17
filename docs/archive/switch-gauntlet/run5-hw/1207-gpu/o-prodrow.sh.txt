@@ -1,0 +1,8 @@
+#!/bin/bash
+# prodrow.sh <labctl dir> <run nn> <evidence name> <title> : save one production boot-to-shell row.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad
+EV=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/Issue-1207/.wt/ev/docs/archive/switch-gauntlet/run5-hw/1207-gpu
+dir=$1; run=$2; name=$3; title=$4
+f=/var/lib/labctl/output/$dir/run_$run.txt
+$S/o/save.sh $f $EV/$name.txt "$title" | cut -c1-200
+echo "  l2-early: $(grep -a 'ga10b-l2-early\]' $f | tr -d '\r' | cut -c1-150)  shell: $(grep -ac 'slmos>' $f)  halted: $(grep -ac 'System halted\|KERNEL PANIC\|PAGE FAULT' $f)"
