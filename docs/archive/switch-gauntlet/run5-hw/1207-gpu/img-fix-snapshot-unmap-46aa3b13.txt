@@ -1,0 +1,30 @@
+# image: /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad/b/img/slmos-test-jetson-1207-fix-snapshot-unmap-46aa3b13.elf
+# head: 46aa3b13bd5b71190fe6f4f0e110687a7acd3e7e (PMM_POISON: per-test scans also check the line at page offset 0x2c0 (refs #1207))
+# date: 2026-11-17T04:46:59Z
+sha256: aca0e22f01a615539cf10401a8ccbe6fa76f3b5d35335db3071831f57b969977
+banner: SLM-OS v0.4.0 build 20261117044527 (46aa3b13)
+banner string in ELF:   SLM-OS v0.4.0 build 20261117044527 (46aa3b13)
+--- sections (aarch64-none-elf-size -A)
+.text             2581080   2147483648
+.rodata           7381666   2150064896
+.text.user           4096   2157449216
+.data              148480   2157510656
+.bss             37517040   2157707264
+Total            48749470
+__kernel_end: 0000000082d90000
+--- CMake cache options
+CMAKE_BUILD_TYPE:STRING=Release
+COOP_PREEMPT:BOOL=OFF
+ENABLE_AI_SCHEDULER:BOOL=ON
+JETSON_HW_TICK:BOOL=ON
+OPLIB_BLOB:FILEPATH=
+PLATFORM:STRING=JETSON_ORIN_NANO
+PMM_CHECK:BOOL=OFF
+PMM_POISON:BOOL=ON
+PMM_POISON_PER_TEST_FULL:BOOL=OFF
+PMM_POISON_SNAPSHOT:BOOL=ON
+PMM_UNMAP:BOOL=ON
+PMM_UNMAP_SELFTEST:BOOL=OFF
+SECONDARY_PREEMPT:BOOL=ON
+TEST_FILTER:STRING=
+operator library embedded: operator_library.bin

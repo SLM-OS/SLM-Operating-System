@@ -1,0 +1,15 @@
+#!/bin/bash
+# surow.sh <labctl dir> <run nn> <evidence name> <title> : save one snapshot+unmap boot and print its row.
+# Findings are split into test-injected ones (inside the poison self-tests) and the rest.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad
+dir=$1; run=$2; name=$3; title=$4; kf=${KF:-known-failures-jetson-1109.txt}
+f=/var/lib/labctl/output/$dir/run_$run.txt
+RUN=$run $S/o/step.sh $dir $name $kf "$title" | sed -n '1p;$p' | cut -c1-300
+echo "  l2-early: $(grep -a 'ga10b-l2-early\]' $f | tr -d '\r' | cut -c1-170)"
+echo "  smp: $(grep -a 'SMP:.*online' $f | tr -d '\r')  arming: $(grep -a 'pmm-poison\] armed' $f | tr -d '\r' | grep -o '[0-9]* free pages snapshotted.*\|; [0-9]* ms$' | tail -1)"
+echo "  inherit: $(grep -a 'gpu-kind=0\] channel bring-up' $f | tr -d '\r' | cut -c1-90)"
+echo "  halts: $(grep -a -c 'System halted' $f)  page faults: $(grep -a -c 'PAGE FAULT' $f)  PMM-FREE fault: $(grep -a -c 'PMM-FREE' $f)  verifier findings (non-self-test): $(grep -a 'pmm-verify\] FINDING' $f | grep -avc 'self-test')"
+echo "  poison/snapshot findings not injected by a test:"
+grep -a 'pmm-poison\] FINDING' $f | tr -d '\r' | grep -av 'test_poison\|test_snapshot\|allocation 1)' | cut -c1-200 | sed 's/^/    /'
+grep -a -A3 'pmm-poison\] FINDING' $f | tr -d '\r' | grep -a 'differ from the pattern' | grep -av '0x13[a-f0-9]*f000 (PA\|from 0x83b\|from 0x86000000' | cut -c1-200 | sed 's/^/      /'
+echo "  scans after test_suite_gpu: $(grep -a 'pmm-poison\] scan after test_suite_gpu' $f | tr -d '\r' | cut -c1-140)"

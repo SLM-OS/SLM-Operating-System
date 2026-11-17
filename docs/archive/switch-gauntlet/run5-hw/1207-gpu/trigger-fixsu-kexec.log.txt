@@ -1,0 +1,5 @@
+04:28:14 start mode=kexec n=3 elfs=[/root/slmos-1207-fixsu-cbcb3d7e.elf /root/slmos-1207-fixsu-cbcb3d7e.elf /root/slmos-1207-fixsu-cbcb3d7e.elf] skip_current_boot_id=cb6edbfa-eec6-48da-8b67-2c49eb24817d pid=2932781
+04:29:43 trigger 1/3 elf=/root/slmos-1207-fixsu-cbcb3d7e.elf boot_id=6e4fe8b8-e59b-4168-a1ec-379e8eaed13e state+uptime=[running 26.61 ] reply=[188545ba9da3f196 ]
+04:39:29 trigger 2/3 elf=/root/slmos-1207-fixsu-cbcb3d7e.elf boot_id=410d5781-4487-4ffc-a3cf-3818b8b49fde state+uptime=[running 25.37 ] reply=[188545ba9da3f196 ]
+04:49:11 trigger 3/3 elf=/root/slmos-1207-fixsu-cbcb3d7e.elf boot_id=28106887-4040-437c-a7ce-5d41c0b63517 state+uptime=[running 25.36 ] reply=[188545ba9da3f196 ]
+04:49:11 end triggers=3

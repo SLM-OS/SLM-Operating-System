@@ -1,0 +1,30 @@
+# image: /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad/b/img/slmos-test-jetson-1207-fix-snapshot-unmap-cbcb3d7e.elf
+# head: cbcb3d7ef82b78e6178a2eba61dadb525505dc52 (Write back and invalidate the GPU L2 before pmm_init on Jetson kexec boots (#120)
+# date: 2026-11-17T04:13:54Z
+sha256: 188545ba9da3f196b81034a644e1ac3beedb7b58e8dce3413385cfdb80510d5c
+banner: SLM-OS v0.4.0 build 20261117041237 (cbcb3d7e)
+banner string in ELF:   SLM-OS v0.4.0 build 20261117041237 (cbcb3d7e)
+--- sections (aarch64-none-elf-size -A)
+.text             2580504   2147483648
+.rodata           7381410   2150064384
+.text.user           4096   2157449216
+.data              148480   2157510656
+.bss             37517040   2157707264
+Total            48748638
+__kernel_end: 0000000082d90000
+--- CMake cache options
+CMAKE_BUILD_TYPE:STRING=Release
+COOP_PREEMPT:BOOL=OFF
+ENABLE_AI_SCHEDULER:BOOL=ON
+JETSON_HW_TICK:BOOL=ON
+OPLIB_BLOB:FILEPATH=
+PLATFORM:STRING=JETSON_ORIN_NANO
+PMM_CHECK:BOOL=OFF
+PMM_POISON:BOOL=ON
+PMM_POISON_PER_TEST_FULL:BOOL=OFF
+PMM_POISON_SNAPSHOT:BOOL=ON
+PMM_UNMAP:BOOL=ON
+PMM_UNMAP_SELFTEST:BOOL=OFF
+SECONDARY_PREEMPT:BOOL=ON
+TEST_FILTER:STRING=
+operator library embedded: operator_library.bin
