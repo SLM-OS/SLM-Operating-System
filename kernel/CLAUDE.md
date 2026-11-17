@@ -828,22 +828,31 @@ this per operation and walks the lists after every test suite.
 `pmm_verify_free_lists()` (every build, no table) walks the lists and
 prints a `[pmm-verify] FINDING` with the damaged block's bytes; test
 kernels call it at each suite boundary and once a second from CPU 0's
-tick. **#1207 on Jetson kexec, cause and fix:** 3 of 16 baseline suite
-boots ended with a count without a list. The damaged blocks were listed
-free heads zeroed across their start, always 0x100000 to 0x120000 above
-the MNIST hand-off pushbuf, between the walks after
-`test_suite_oplib_gpu_as` and after `test_suite_gpu`. A line-hash window
-diagnostic placed the write at the first MNIST call, where the inherit
-runs `ga10b_l2_evict_sysmem()`: the GA10B L2 still held dirty lines for
-buffers nvgpu freed before the kexec, and that flush wrote them back over
-pages the PMM owned by then. ELPG, CPU writes (no fault under
-`PMM_UNMAP`) and the inherited channel VMs (no mapping there) were ruled
-out. `ga10b_kexec_l2_flush_early()` (`ga10b_handoff_reserve.c`) now runs
-the same UFLUSH sequence from `kernel_main` before
-`ga10b_kexec_handoff_register_reserves()` and `pmm_init`, so the
-write-back lands before any page is listed (3 of 3 boots clean with the
-diagnostic version, E3). Any new GPU-side cleanup of state Linux left must
-also happen before `pmm_init`.
+tick. **#1207 on Jetson kexec, cause and fix.** What the rows show (all
+on jetson-nano-2): 3 of 16 baseline kexec suite boots ended with a count
+without a list. The damaged blocks were listed free heads zeroed across
+their start, always 0x100000 to 0x120000 above the MNIST hand-off
+pushbuf, between the walks after `test_suite_oplib_gpu_as` and after
+`test_suite_gpu`. A line-hash window diagnostic placed the zeroing at the
+first MNIST call, where the inherit runs `ga10b_l2_evict_sysmem()`. With
+the same UFLUSH sequence run before `pmm_init`, no zeroed free page was
+seen in 6 of 6 kexec boots (diagnostic E3) nor in 27 of 27 kexec suite
+boots (this fix plus the window diagnostic). Excluded by rows: ELPG
+(halts with it off) and the inherited channel VMs (no mapping of the
+damaged pages). Not excluded: a CPU write; no `PMM_UNMAP` boot hit the
+zero damage, so unmapping neither showed nor ruled one out. Inference,
+not shown directly: the GA10B L2 still held dirty lines for buffers nvgpu
+freed before the kexec, and that flush wrote them back over pages the PMM
+owned by then. `ga10b_kexec_l2_flush_early()` (`ga10b_handoff_reserve.c`)
+runs the flush from `kernel_main` before
+`ga10b_kexec_handoff_register_reserves()` and `pmm_init`; if it skips and
+the inherit later finds a live context, `ga10b_bringup_inherit` prints a
+WARN, because the first write-back then runs after `pmm_init`. Not
+addressed: with the fix in place, full-memory scans still saw a separate
+non-zero 64-byte write at page offset 0x2c0 (offset 0x102c0 of a 1 MB
+aligned region) during the first MNIST call, from a writer not yet
+identified. Any new GPU-side cleanup of state Linux left must also happen
+before `pmm_init`.
 
 **Statistics API:**
 ```c

@@ -3942,6 +3942,75 @@ static void test_l2_flush_early_skips_on_poison_and_zero(void)
     REQUIRE_EQ(g_l2m_nw, 0);
 }
 
+/* The verdict the Jetson test kernel applies: a skip passes only on a boot
+ * without an inherited GPU; a kexec boot with one needs DONE. */
+static void test_l2_flush_early_verdict_requires_done_with_inherited_gpu(void)
+{
+    struct ga10b_l2_flush_early_status st = {0};
+    st.ran = true;
+    st.before_pmm_init = true;
+
+    st.rc = GA10B_L2_FLUSH_EARLY_DONE;
+    REQUIRE_EQ(ga10b_l2_flush_early_verdict(&st, false, true), 0);
+    st.rc = GA10B_L2_FLUSH_EARLY_SKIP_NO_CTX;
+    REQUIRE_EQ(ga10b_l2_flush_early_verdict(&st, false, true), -1);
+    st.rc = GA10B_L2_FLUSH_EARLY_SKIP_POISON;
+    REQUIRE_EQ(ga10b_l2_flush_early_verdict(&st, false, true), -1);
+    REQUIRE_EQ(ga10b_l2_flush_early_verdict(&st, false, false), 0);
+    st.rc = GA10B_L2_FLUSH_EARLY_SKIP_UEFI;
+    REQUIRE_EQ(ga10b_l2_flush_early_verdict(&st, true, false), 0);
+    st.rc = GA10B_L2_FLUSH_EARLY_TIMEOUT;
+    REQUIRE_EQ(ga10b_l2_flush_early_verdict(&st, false, false), -1);
+    st.rc = GA10B_L2_FLUSH_EARLY_DONE;
+    st.before_pmm_init = false;
+    REQUIRE_EQ(ga10b_l2_flush_early_verdict(&st, false, true), -1);
+    st.before_pmm_init = true;
+    st.ran = false;
+    REQUIRE_EQ(ga10b_l2_flush_early_verdict(&st, false, false), -1);
+}
+
+/* The inherit-time WARN: when the boot-time flush skipped (FECS 0 or
+ * 0xbadf then) or never ran, and the inherit finds a live context. */
+static void test_l2_flush_early_warns_when_inherit_finds_late_context(void)
+{
+    struct ga10b_l2_flush_early_status st = {0};
+    st.ran = true;
+    st.before_pmm_init = true;
+    st.rc = GA10B_L2_FLUSH_EARLY_SKIP_NO_CTX;
+    REQUIRE(ga10b_l2_flush_early_warn_late(&st, 0x2013b6a7u));
+    st.rc = GA10B_L2_FLUSH_EARLY_SKIP_POISON;
+    st.fecs_current_ctx = 0xbadf1100u;
+    REQUIRE(ga10b_l2_flush_early_warn_late(&st, 0x2013b6a7u));
+    st.rc = GA10B_L2_FLUSH_EARLY_DONE;
+    REQUIRE(!ga10b_l2_flush_early_warn_late(&st, 0x2013b6a7u));
+    st.rc = GA10B_L2_FLUSH_EARLY_TIMEOUT;
+    REQUIRE(!ga10b_l2_flush_early_warn_late(&st, 0x2013b6a7u));
+    st.ran = false;
+    REQUIRE(ga10b_l2_flush_early_warn_late(&st, 0x2013b6a7u));
+}
+
+/* ga10b_bringup_inherit calls the late-context check before its evict. */
+static void test_inherit_calls_l2_flush_early_warn_late(void)
+{
+    FILE *f = fopen("kernel/gpu/nvidia/ga10b_bringup.c", "r");
+    REQUIRE(f != NULL);
+    if (!f) return;
+    char line[512];
+    int in_inherit = 0, warn = 0, evict = 0, n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        n++;
+        if (strncmp(line, "int ga10b_bringup_inherit(", 26) == 0) in_inherit = 1;
+        else if (in_inherit && line[0] == '}') break;
+        if (!in_inherit) continue;
+        if (!warn && strstr(line, "ga10b_l2_flush_early_warn_late(")) warn = n;
+        if (!evict && strstr(line, "ga10b_l2_evict_sysmem() < 0")) evict = n;
+    }
+    fclose(f);
+    REQUIRE(warn > 0);
+    REQUIRE(evict > 0);
+    REQUIRE(warn < evict);
+}
+
 /* main.c (ARM64 path: x86-64 has its own vmm_init/pmm_init pair earlier
  * in the file) runs the flush after vmm_init and before both the hand-off
  * reserves and pmm_init: no pmm_init() between the vmm_init() before the
@@ -4259,6 +4328,9 @@ int main(void)
     test_l2_flush_early_reports_timeout_and_continues();
     test_l2_flush_early_skips_on_poison_and_zero();
     test_l2_flush_early_called_before_pmm_init();
+    test_l2_flush_early_verdict_requires_done_with_inherited_gpu();
+    test_l2_flush_early_warns_when_inherit_finds_late_context();
+    test_inherit_calls_l2_flush_early_warn_late();
     test_v7_dispatch_trace_lines_are_gated();
 
     if (failures) {

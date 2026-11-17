@@ -1132,6 +1132,35 @@ int ga10b_kexec_l2_flush_early_with(const struct ga10b_early_mmio *io)
     return st->rc;
 }
 
+int ga10b_l2_flush_early_verdict(const struct ga10b_l2_flush_early_status *st,
+                                 bool uefi, bool inherited_gpu)
+{
+    if (!st->ran || !st->before_pmm_init || st->rc == GA10B_L2_FLUSH_EARLY_TIMEOUT) {
+        return -1;
+    }
+    if (inherited_gpu && !uefi && st->rc != GA10B_L2_FLUSH_EARLY_DONE) {
+        return -1;      /* skipped on a boot that has Linux's GPU state */
+    }
+    return 0;
+}
+
+bool ga10b_l2_flush_early_warn_late(const struct ga10b_l2_flush_early_status *st,
+                                    uint32_t fecs_now)
+{
+    if (st->ran && st->rc != GA10B_L2_FLUSH_EARLY_SKIP_POISON &&
+        st->rc != GA10B_L2_FLUSH_EARLY_SKIP_NO_CTX) {
+        return false;   /* flushed (or tried to: a timeout was already loud) */
+    }
+    uart_printf("[ga10b-l2-early] *** WARN: the L2 flush before pmm_init %s "
+                "(FECS_CURRENT_CTX=0x%08x then), but the inherit now finds a "
+                "live GPU context (FECS_CURRENT_CTX=0x%08x): its L2 flush runs "
+                "after pmm_init and can write Linux's dirty lines over PMM "
+                "pages (#1207) ***\n",
+                st->ran ? "was skipped" : "never ran",
+                (unsigned)st->fecs_current_ctx, (unsigned)fecs_now);
+    return true;
+}
+
 #ifndef SLM_HOST_HARNESS
 static uint32_t ga10b_early_r32(uint32_t off)
 {

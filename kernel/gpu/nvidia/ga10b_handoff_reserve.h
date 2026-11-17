@@ -82,9 +82,16 @@ void ga10b_kexec_handoff_register_reserves(void);
  * UFLUSH sequence, at the first MNIST call in test_suite_gpu) wrote them
  * back over pages the PMM owned by then: zeroed free-list heads at the
  * MNIST pushbuf + 0x100000 / + 0x120000 on jetson-nano-2, and the "count
- * without a list" halt. Flushing here, while those pages hold nothing of
- * SLM-OS's, lets the write-back land harmlessly; 3 of 3 kexec boots with
- * the flush this early had no damaged free page (E3, 89068471).
+ * without a list" halt (3 of 16 baseline kexec suite boots). Flushing
+ * here, while those pages hold nothing of SLM-OS's, lets the write-back
+ * land before any page is listed. Rows on jetson-nano-2: no zeroed free
+ * page in 6 of 6 kexec boots with a diagnostic flush this early (E3,
+ * 89068471), nor in 27 of 27 kexec suite boots with this function plus a
+ * line-hash window around the MNIST pushbuf (d7fb1010). Not addressed
+ * here: with the flush in place, full-memory scans still saw a separate
+ * non-zero 64-byte write at page offset 0x2c0 (offset 0x102c0 of a 1 MB
+ * aligned region) during the first MNIST call, from a writer not yet
+ * identified.
  *
  * Sequence (nvgpu gv11b_mm_l2_flush order, by direct BAR0 MMIO: the GSP
  * platform vtable is not installed this early): FB_FLUSH, L2_FLUSH_DIRTY,
@@ -127,6 +134,29 @@ struct ga10b_l2_flush_early_status {
 int ga10b_kexec_l2_flush_early_with(const struct ga10b_early_mmio *io);
 int ga10b_kexec_l2_flush_early(void);
 const struct ga10b_l2_flush_early_status *ga10b_kexec_l2_flush_early_status(void);
+
+/*
+ * Was the early flush right for this boot? 0 when it was, -1 when not:
+ * it did not run, ran after pmm_init, timed out, or was skipped although
+ * the boot inherited a GPU from Linux (`inherited_gpu`: not UEFI-direct,
+ * and a hand-off or a FECS_CURRENT_CTX inst block was found). A skip is
+ * right only on a boot with no inherited GPU. Pure; the test-kernel check
+ * and the host harness use it.
+ */
+int ga10b_l2_flush_early_verdict(const struct ga10b_l2_flush_early_status *st,
+                                 bool uefi, bool inherited_gpu);
+
+/*
+ * The gap a skip leaves: FECS_CURRENT_CTX read 0 or 0xbadfxxxx at boot,
+ * so the early flush was skipped, but GR comes up later and the inherit
+ * finds a live context. Its own L2 flush then runs after pmm_init, where
+ * #1207's write-back lands on PMM pages. ga10b_bringup_inherit calls this
+ * at that point with the FECS_CURRENT_CTX it reads then; on a skip (or if
+ * the early flush never ran) it prints one loud WARN line and returns
+ * true.
+ */
+bool ga10b_l2_flush_early_warn_late(const struct ga10b_l2_flush_early_status *st,
+                                    uint32_t fecs_now);
 
 /*
  * Return the inst-block phys captured by `ga10b_kexec_handoff_-
