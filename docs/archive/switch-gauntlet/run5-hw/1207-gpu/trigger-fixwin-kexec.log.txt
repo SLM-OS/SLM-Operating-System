@@ -1,0 +1,12 @@
+00:53:05 start mode=kexec n=3 elfs=[/root/slmos-1207-fixwin-d7fb1010.elf /root/slmos-1207-fixwin-d7fb1010.elf /root/slmos-1207-fixwin-d7fb1010.elf] skip_current_boot_id=fb438b7a-3c3c-45c7-92fd-07df2d70de4c pid=1741812
+00:54:34 trigger 1/3 elf=/root/slmos-1207-fixwin-d7fb1010.elf boot_id=64ed2286-d8d1-4dcb-a99d-7947cd65ab5c state+uptime=[running 27.40 ] reply=[44f0912a1f399fdd ]
+01:01:06 trigger 2/3 elf=/root/slmos-1207-fixwin-d7fb1010.elf boot_id=e1c87f0c-2bb8-4580-8ae1-e31ba4ef3842 state+uptime=[running 24.82 ] reply=[44f0912a1f399fdd ]
+01:07:39 trigger 3/3 elf=/root/slmos-1207-fixwin-d7fb1010.elf boot_id=a4f1db83-ba8e-4cb5-910d-19766aef3305 state+uptime=[running 25.59 ] reply=[44f0912a1f399fdd ]
+01:07:39 end triggers=3
+01:13:09 start mode=kexec n=3 elfs=[/root/slmos-1207-fixwin-d7fb1010.elf /root/slmos-1207-fixwin-d7fb1010.elf /root/slmos-1207-fixwin-d7fb1010.elf] skip_current_boot_id=none pid=1848839
+01:14:34 trigger 1/3 elf=/root/slmos-1207-fixwin-d7fb1010.elf boot_id=8e7473cd-218b-4f74-9383-a20eee17fa1a state+uptime=[running 26.22 ] reply=[44f0912a1f399fdd ]
+01:21:10 trigger 2/3 elf=/root/slmos-1207-fixwin-d7fb1010.elf boot_id=eed02e56-6c3e-4986-8d39-645ceabaab98 state+uptime=[running 25.27 ] reply=[44f0912a1f399fdd ]
+01:27:43 trigger 3/3 elf=/root/slmos-1207-fixwin-d7fb1010.elf boot_id=34023b99-ad89-402e-a7c0-65709770fd27 state+uptime=[running 25.46 ] reply=[44f0912a1f399fdd ]
+01:27:43 end triggers=3
+01:33:44 start mode=kexec n=3 elfs=[/root/slmos-1207-fixwin-d7fb1010.elf /root/slmos-1207-fixwin-d7fb1010.elf /root/slmos-1207-fixwin-d7fb1010.elf] skip_current_boot_id=none pid=1958211
+01:35:09 trigger 1/3 elf=/root/slmos-1207-fixwin-d7fb1010.elf boot_id=1abbfc2b-e421-42a4-814f-62978b9f30f5 state+uptime=[running 23.25 ] reply=[44f0912a1f399fdd ]

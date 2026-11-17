@@ -3,3 +3,8 @@
 00:17:29 trigger 2/3 elf=/root/slmos-1207-e3-89068471.elf boot_id=b54b8997-d264-4b99-adda-dca95a4e2a43 state+uptime=[running 24.92 ] reply=[5193131869fd2a39 ]
 00:24:04 trigger 3/3 elf=/root/slmos-1207-e3-89068471.elf boot_id=57b7a7aa-a0da-4546-bfc7-4ab312a578f6 state+uptime=[running 26.35 ] reply=[5193131869fd2a39 ]
 00:24:04 end triggers=3
+00:30:39 start mode=kexec n=3 elfs=[/root/slmos-1207-e3-89068471.elf /root/slmos-1207-e3-89068471.elf /root/slmos-1207-e3-89068471.elf] skip_current_boot_id=none pid=1599488
+00:31:58 trigger 1/3 elf=/root/slmos-1207-e3-89068471.elf boot_id=4bc90638-3fa2-4363-bf90-b134f59505b3 state+uptime=[running 24.23 ] reply=[5193131869fd2a39 ]
+00:38:33 trigger 2/3 elf=/root/slmos-1207-e3-89068471.elf boot_id=3767e466-76c4-4611-9fe7-a90ff814d913 state+uptime=[running 25.43 ] reply=[5193131869fd2a39 ]
+00:45:08 trigger 3/3 elf=/root/slmos-1207-e3-89068471.elf boot_id=50a9acd0-1b94-4443-a2fd-f74e485bd93f state+uptime=[running 25.33 ] reply=[5193131869fd2a39 ]
+00:45:08 end triggers=3

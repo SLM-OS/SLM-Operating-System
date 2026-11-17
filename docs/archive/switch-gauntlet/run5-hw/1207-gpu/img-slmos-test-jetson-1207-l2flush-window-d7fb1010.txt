@@ -1,0 +1,25 @@
+# image: /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad/b/img/slmos-test-jetson-1207-l2flush-window-d7fb1010.elf
+# head: d7fb101067f497273a98c6cdb9dad51821a61b98 (DIAGNOSTIC (#1207): window check prints only free-page or all-zero runs, cap 400)
+# date: 2026-11-17T00:50:06Z
+sha256: 44f0912a1f399fddcedf262a1881e48b1b339276d9557434d815e3468825f4ab
+banner: SLM-OS v0.4.0 build 20261117004843 (d7fb1010)
+banner string in ELF:   SLM-OS v0.4.0 build 20261117004843 (d7fb1010)
+--- sections (aarch64-none-elf-size -A)
+.text             2564856   2147483648
+.rodata           7375778   2150048512
+.text.user           4096   2157424640
+.data              148480   2157445120
+.bss             37779184   2157641728
+Total            48989502
+__kernel_end: 0000000082dc0000
+--- CMake cache options
+CMAKE_BUILD_TYPE:STRING=Release
+COOP_PREEMPT:BOOL=OFF
+ENABLE_AI_SCHEDULER:BOOL=ON
+JETSON_HW_TICK:BOOL=ON
+OPLIB_BLOB:FILEPATH=
+PLATFORM:STRING=JETSON_ORIN_NANO
+PMM_CHECK:BOOL=OFF
+SECONDARY_PREEMPT:BOOL=ON
+TEST_FILTER:STRING=
+operator library embedded: operator_library.bin

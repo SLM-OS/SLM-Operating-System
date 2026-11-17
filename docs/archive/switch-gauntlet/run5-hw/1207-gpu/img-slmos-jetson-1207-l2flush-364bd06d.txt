@@ -1,0 +1,19 @@
+# image: /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad/b/img/slmos-jetson-1207-l2flush-364bd06d.elf (production kernel)
+# head: 364bd06daf8db92def06d892d6b358c2fba87964 (Write back and invalidate the GPU L2 before pmm_init on Jetson kexec boots (#120) branch fix/1207-early-l2-flush
+# date: 2026-11-17T00:46:16Z
+sha256: a6c80971d22670475fb56f72d6ba6403613bfc12952dd662a5b8c1d3a282d3b0
+banner string in ELF:   SLM-OS v0.4.0 build 20261117004433 (364bd06d)
+--- sections
+.text             2497816   2147483648
+.rodata           6169506   2149981696
+.text.user           4096   2156154880
+.data              148480   2156199936
+.bss             37499248   2156396544
+--- CMake cache options
+CMAKE_BUILD_TYPE:STRING=Release
+COOP_PREEMPT:BOOL=OFF
+ENABLE_AI_SCHEDULER:BOOL=ON
+JETSON_HW_TICK:BOOL=ON
+PLATFORM:STRING=JETSON_ORIN_NANO
+PMM_CHECK:BOOL=OFF
+SECONDARY_PREEMPT:BOOL=ON

@@ -1,0 +1,17 @@
+#!/bin/bash
+# fwrow.sh <labctl dir> <run nn> <boot no> : save one fix+window bar boot and print its row.
+# Row fields: early-flush line, inherit line, halts, verifier findings (non-self-test),
+# window lines in free pages or all zero (any test), window counts after the first MNIST call.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/c3f9c532-db07-4dbd-bf0b-034ff3b7c968/scratchpad
+dir=$1; run=$2; no=$(printf %02d $3)
+f=/var/lib/labctl/output/$dir/run_$run.txt
+RUN=$run $S/o/step.sh $dir fixwin-kexec-suite-d7fb1010-boot$no known-failures-jetson-1109.txt \
+  "BAR ROW: jetson-nano-2 kexec, diag/1207-fix-window d7fb1010 test kernel (fix/1207-early-l2-flush 364bd06d + window diagnostic; sha 44f0912a), integration suite, boot_test 3 runs timeout 560 s, run $run" | sed -n "1p;\$p" | cut -c1-300
+echo "  l2-early: $(grep -a 'ga10b-l2-early\]' $f | tr -d '\r' | cut -c1-200)"
+echo "  inherit:  $(grep -a 'gpu-kind=0\] channel bring-up' $f | tr -d '\r' | cut -c1-100)"
+echo "  halts: $(grep -a -c 'System halted' $f)  verifier findings (non-self-test): $(grep -a 'pmm-verify\] FINDING' $f | grep -avc 'self-test')"
+z=$(grep -a '1207-win\] after' $f | grep -a 'all zero,\|first page free\|last page free' | grep -av 'NOT all zero, first page not free, last page not free')
+echo "  window runs in free pages or all zero: $(echo -n "$z" | grep -c .)"
+echo "$z" | grep -a 'all zero,' | grep -av 'NOT all zero' | tr -d '\r' | cut -c1-220 | sed 's/^/    ZERO: /'
+echo "  after first MNIST call: $(grep -a '1207-win\] after test_slm_gpu_run_mnist_returns_negative_off_jetson' $f | tr -d '\r' | cut -c1-200 | tr '\n' '|')"
+echo "  free-page or zero runs by test: $(echo "$z" | awk '{print $3}' | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
