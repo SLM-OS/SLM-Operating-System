@@ -843,6 +843,27 @@ static void test_slm_fp32_argmax_nan_does_not_crash(void)
     TEST_ASSERT_TRUE(idx < 3);
 }
 
+#ifdef PLATFORM_JETSON_ORIN_NANO
+#include "../gpu/nvidia/ga10b_handoff_reserve.h"
+/* #1207: the GPU L2 write-back ran before pmm_init on this boot (or was
+ * skipped for a reason: UEFI-direct, no inherited context), and did not
+ * time out. Before the fix nothing flushed the L2 until the first MNIST
+ * call below, after pmm_init. */
+static void test_l2_flush_early_ran_before_pmm_init(void)
+{
+    const struct ga10b_l2_flush_early_status *st = ga10b_kexec_l2_flush_early_status();
+    uart_printf("  l2-early: ran %d, before pmm_init %d, rc %d, "
+                "FECS_CURRENT_CTX 0x%08x, polls %u/%u/%u/%u\n",
+                st->ran, st->before_pmm_init, st->rc,
+                (unsigned)st->fecs_current_ctx, (unsigned)st->polls[0],
+                (unsigned)st->polls[1], (unsigned)st->polls[2],
+                (unsigned)st->polls[3]);
+    TEST_ASSERT_TRUE(st->ran);
+    TEST_ASSERT_TRUE(st->before_pmm_init);
+    TEST_ASSERT_TRUE(st->rc != GA10B_L2_FLUSH_EARLY_TIMEOUT);
+}
+#endif
+
 static void test_slm_gpu_run_mnist_returns_negative_off_jetson(void)
 {
     /* On non-Jetson the FFI is a stub returning -1. The kernel test
@@ -960,6 +981,9 @@ int test_suite_gpu(void)
     RUN_TEST(test_slm_fp32_argmax_rejects_null_or_empty);
     RUN_TEST(test_slm_fp32_argmax_single_element);
     RUN_TEST(test_slm_fp32_argmax_nan_does_not_crash);
+#ifdef PLATFORM_JETSON_ORIN_NANO
+    RUN_TEST(test_l2_flush_early_ran_before_pmm_init);
+#endif
     RUN_TEST(test_slm_gpu_run_mnist_returns_negative_off_jetson);
     RUN_TEST(test_slm_gpu_run_mnist_null_buf_fails);
     RUN_TEST(test_slm_gpu_set_mnist_input_returns_negative_off_jetson);

@@ -3822,6 +3822,166 @@ static void test_qmd_set_bits_rejects_inverted_range(void)
 }
 
 /* ======================================================================
+ * #1207: GPU L2 write-back and invalidate before pmm_init
+ * ====================================================================== */
+
+/* Mock BAR0 for ga10b_kexec_l2_flush_early_with: FECS_CURRENT_CTX reads
+ * g_l2m_fecs; after the k-th UFLUSH write the written register reads busy
+ * (PENDING|OUTSTANDING) for g_l2m_busy[k] reads, then 0. */
+#define L2M_NEVER 0xFFFFFFFFu
+static uint32_t g_l2m_fecs;
+static uint32_t g_l2m_busy[8];
+static uint32_t g_l2m_w_off[8], g_l2m_w_val[8];
+static unsigned g_l2m_nw, g_l2m_delays, g_l2m_left, g_l2m_cur_off;
+
+static uint32_t l2m_r32(uint32_t off)
+{
+    if (off == 0x00409b00u) {
+        return g_l2m_fecs;
+    }
+    if (g_l2m_nw > 0 && off == g_l2m_cur_off && g_l2m_left > 0) {
+        if (g_l2m_left != L2M_NEVER) {
+            g_l2m_left--;
+        }
+        return 0x3u;
+    }
+    return 0u;
+}
+
+static void l2m_w32(uint32_t off, uint32_t val)
+{
+    if (g_l2m_nw < 8) {
+        g_l2m_w_off[g_l2m_nw] = off;
+        g_l2m_w_val[g_l2m_nw] = val;
+        g_l2m_left = g_l2m_busy[g_l2m_nw];
+    }
+    g_l2m_cur_off = off;
+    g_l2m_nw++;
+}
+
+static void l2m_delay(void)
+{
+    g_l2m_delays++;
+}
+
+static const struct ga10b_early_mmio g_l2m_io = { l2m_r32, l2m_w32, l2m_delay };
+
+static void l2m_reset(uint32_t fecs, uint32_t b0, uint32_t b1, uint32_t b2,
+                      uint32_t b3)
+{
+    g_l2m_fecs = fecs;
+    g_l2m_busy[0] = b0;
+    g_l2m_busy[1] = b1;
+    g_l2m_busy[2] = b2;
+    g_l2m_busy[3] = b3;
+    g_l2m_nw = g_l2m_delays = g_l2m_left = g_l2m_cur_off = 0;
+    memset(g_l2m_w_off, 0, sizeof(g_l2m_w_off));
+    memset(g_l2m_w_val, 0, sizeof(g_l2m_w_val));
+}
+
+/* An inherited context: FB_FLUSH, L2_FLUSH_DIRTY, L2_SYSMEM_INVALIDATE,
+ * FB_FLUSH, each written 1, each polled until busy clears, 5 us apart. */
+static void test_l2_flush_early_issues_ops_in_order_and_polls(void)
+{
+    l2m_reset(0x2013b6a7u, 0, 3, 1, 0);
+    int rc = ga10b_kexec_l2_flush_early_with(&g_l2m_io);
+    const struct ga10b_l2_flush_early_status *st = ga10b_kexec_l2_flush_early_status();
+    REQUIRE_EQ(rc, GA10B_L2_FLUSH_EARLY_DONE);
+    REQUIRE_EQ(g_l2m_nw, 4);
+    REQUIRE_EQ(g_l2m_w_off[0], 0x00070000u);
+    REQUIRE_EQ(g_l2m_w_off[1], 0x00070010u);
+    REQUIRE_EQ(g_l2m_w_off[2], 0x00070004u);
+    REQUIRE_EQ(g_l2m_w_off[3], 0x00070000u);
+    for (int i = 0; i < 4; i++) {
+        REQUIRE_EQ(g_l2m_w_val[i], 1u);
+    }
+    REQUIRE_EQ(st->polls[0], 1);
+    REQUIRE_EQ(st->polls[1], 4);
+    REQUIRE_EQ(st->polls[2], 2);
+    REQUIRE_EQ(st->polls[3], 1);
+    REQUIRE_EQ(g_l2m_delays, 4);
+    REQUIRE_EQ(st->timed_out_mask, 0);
+    REQUIRE(st->ran);
+    REQUIRE_EQ(st->fecs_current_ctx, 0x2013b6a7u);
+}
+
+/* L2_FLUSH_DIRTY never completes: nvgpu's 2000-poll budget, reported as
+ * a timeout, and the remaining two ops still issued. */
+static void test_l2_flush_early_reports_timeout_and_continues(void)
+{
+    l2m_reset(0x2013b6a7u, 0, L2M_NEVER, 0, 0);
+    int rc = ga10b_kexec_l2_flush_early_with(&g_l2m_io);
+    const struct ga10b_l2_flush_early_status *st = ga10b_kexec_l2_flush_early_status();
+    REQUIRE_EQ(rc, GA10B_L2_FLUSH_EARLY_TIMEOUT);
+    REQUIRE_EQ(st->polls[1], 2000);
+    REQUIRE_EQ(st->timed_out_mask, 0x2u);
+    REQUIRE_EQ(g_l2m_nw, 4);
+    REQUIRE_EQ(g_l2m_w_off[2], 0x00070004u);
+
+    /* FB_FLUSH's budget is 100, L2_SYSMEM_INVALIDATE's 200. */
+    l2m_reset(0x2013b6a7u, L2M_NEVER, 0, 0, 0);
+    (void)ga10b_kexec_l2_flush_early_with(&g_l2m_io);
+    REQUIRE_EQ(st->polls[0], 100);
+    l2m_reset(0x2013b6a7u, 0, 0, L2M_NEVER, 0);
+    (void)ga10b_kexec_l2_flush_early_with(&g_l2m_io);
+    REQUIRE_EQ(st->polls[2], 200);
+    REQUIRE_EQ(st->timed_out_mask, 0x4u);
+}
+
+/* No inherited context: a PRI error (cold / power-gated GPU) or zero
+ * skips without writing any UFLUSH register. */
+static void test_l2_flush_early_skips_on_poison_and_zero(void)
+{
+    l2m_reset(0xbadf1100u, 0, 0, 0, 0);
+    REQUIRE_EQ(ga10b_kexec_l2_flush_early_with(&g_l2m_io),
+               GA10B_L2_FLUSH_EARLY_SKIP_POISON);
+    REQUIRE_EQ(g_l2m_nw, 0);
+    l2m_reset(0x00000000u, 0, 0, 0, 0);
+    REQUIRE_EQ(ga10b_kexec_l2_flush_early_with(&g_l2m_io),
+               GA10B_L2_FLUSH_EARLY_SKIP_NO_CTX);
+    REQUIRE_EQ(g_l2m_nw, 0);
+}
+
+/* main.c (ARM64 path: x86-64 has its own vmm_init/pmm_init pair earlier
+ * in the file) runs the flush after vmm_init and before both the hand-off
+ * reserves and pmm_init: no pmm_init() between the vmm_init() before the
+ * flush and the flush, and both the reserves call and a pmm_init() after
+ * it. Statement lines only (comments skipped). */
+static int code_line_starts(const char *line, const char *needle)
+{
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p[0] == '*' || (p[0] == '/' && (p[1] == '*' || p[1] == '/'))) return 0;
+    return strncmp(p, needle, strlen(needle)) == 0;
+}
+
+static void test_l2_flush_early_called_before_pmm_init(void)
+{
+    FILE *f = fopen("kernel/src/main.c", "r");
+    REQUIRE(f != NULL);
+    if (!f) return;
+    char line[512];
+    int n = 0, vmm = -1, pmm_since_vmm = 0, flush = -1, rsv_after = -1, pmm_after = -1;
+    while (fgets(line, sizeof(line), f)) {
+        n++;
+        if (flush < 0) {
+            if (code_line_starts(line, "vmm_init();")) { vmm = n; pmm_since_vmm = 0; }
+            if (code_line_starts(line, "pmm_init();")) pmm_since_vmm = 1;
+            if (code_line_starts(line, "(void)ga10b_kexec_l2_flush_early();")) flush = n;
+        } else {
+            if (rsv_after < 0 && code_line_starts(line, "ga10b_kexec_handoff_register_reserves();")) rsv_after = n;
+            if (pmm_after < 0 && code_line_starts(line, "pmm_init();")) pmm_after = n;
+        }
+    }
+    fclose(f);
+    REQUIRE(flush > 0);
+    REQUIRE(vmm > 0 && vmm < flush);
+    REQUIRE(pmm_since_vmm == 0);
+    REQUIRE(rsv_after > flush);
+    REQUIRE(pmm_after > flush);
+}
+
+/* ======================================================================
  * Cross-dispatch L2 evict — call-site count pin (#723 / PR #727)
  * ====================================================================== */
 
@@ -4095,6 +4255,10 @@ int main(void)
     test_qmd_set_bits_rejects_inverted_range();
 
     test_l2_evict_call_sites_pinned_to_minimal();
+    test_l2_flush_early_issues_ops_in_order_and_polls();
+    test_l2_flush_early_reports_timeout_and_continues();
+    test_l2_flush_early_skips_on_poison_and_zero();
+    test_l2_flush_early_called_before_pmm_init();
     test_v7_dispatch_trace_lines_are_gated();
 
     if (failures) {

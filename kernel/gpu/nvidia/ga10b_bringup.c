@@ -959,13 +959,23 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
     return -1;
 }
 
-/* Evict the GPU L2 of any clean lines inherited from Linux's nvgpu.
+/* Write back the GPU L2's dirty lines and evict its lines inherited
+ * from Linux's nvgpu.
  *
  * After kexec, GA10B's L2 cache may still hold lines tagged for
  * physical addresses that nvgpu's MNIST helper wrote pre-handoff.
  * The first GPU dispatch in SLM-OS can read those stale lines
  * instead of fetching fresh data we wrote at the same GPU VA, which
  * surfaces as the iter-1 "got nvgpu's helper output" race (#596).
+ *
+ * Not only clean lines (#1207): the inherited L2 also holds DIRTY
+ * lines for buffers nvgpu freed before the kexec. L2_FLUSH_DIRTY
+ * below writes them back to DRAM, and when this ran first, after
+ * pmm_init, those pages were already PMM free pages: the write-back
+ * zeroed free-list heads (MNIST pushbuf + 0x100000 / + 0x120000 on
+ * jetson-nano-2). ga10b_kexec_l2_flush_early (ga10b_handoff_reserve.c)
+ * now runs the same sequence before pmm_init, so by the time this
+ * runs the inherited dirty lines are gone.
  *
  * Also called between dispatches via the post-launch coherency
  * site in `ga10b_bringup_read_pipeline_output` (#722 originally
