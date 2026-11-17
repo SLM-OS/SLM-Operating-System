@@ -3531,3 +3531,82 @@ The PR decision waits on what this writer is.
 the cleanup frees each ctx page when its task exits, so the next
 `pmm_alloc_page()` can legitimately return the same page; a test defect,
 more likely when allocation is slower. Filed **#1290** (P3, Backlog).
+
+## Entry 66 (written 08:30 UTC on 2026-11-17, from date): critic verdict; UEFI path control; the fix booted alone; no PR; board restored and released
+
+Evidence `gauntlet-5-hw-jetson` 693b06a3 and 9505f04f, `run5-hw/1207-gpu/`.
+
+**Critic (Fable, blind), round 1** (`critic-1207-round1.md`): (iv) counts
+**PASS** (every count in CLAIMS.md reproduced from the serial bodies;
+minor: e1b 29418281 boot01 has no MB1 line, C10 omits the unlisted
+`test_l1_block_mapping_detection` of the two poison-only boots, two of
+the orchestrator's diagnostic branches were local, the 46aa3b13 kexec
+boots are missing from the fixsu trigger log, and the fix's doc said
+"3 of 3 (E3)"). (i) mechanism **PASS, qualified**: supported by timing
+and by intervention (0 damaged in 33 early-flush boots against 3/16,
+2/3 and 1/5 without); dirty L2 lines, the inherit's flush being the
+writer, and the buffers being freed by nvgpu are inference; and the
+PMM_UNMAP "no CPU fault" exclusion has no supporting row, because no
+unmap boot had the zero damage. (ii) fix without gap **FAIL**: the
+early flush skipped silently on FECS 0/0xbadf and the test passed on a
+skip; 364bd06d itself never booted; no UEFI-direct boot with the fix;
+the second writer (Entry 65) unaddressed; pre-suite device writes
+(0x104fxxxxx) not in the claims. (iii) bar as stated **FAIL**: 0 halts
+in 27 is met, but the window build is not a full poison-damage measure,
+and with full scans 5 of 5 fix boots show the second writer.
+
+**Actions on the verdict.** The diagnostic branches were pushed
+(`diag/1207-window` c6ef3dfd, `diag/1207-l2early` 89068471,
+`diag/1207-elpg` 29418281, `diag/1207-vmwalk` d4682dc3). The builder put
+b9f2030a on `fix/1207-early-l2-flush` (on 364bd06d): the kernel test
+requires rc DONE on a kexec boot with an inherited GPU (a skip fails it),
+the inherit WARNs when the early flush skipped but a live context is
+found later, host-harness cases for both, and the docs reworded (L2
+mechanism labelled inference, CPU write not excluded, the second writer
+named as not addressed, E3 6 of 6 + 27 of 27). Host harness, `make test`
+ARM64 and check-braces pass at b9f2030a; x86-64 and full /ci not re-run
+there (they pass at 364bd06d; b9f2030a changes Jetson-only code and its
+docs). Filed **#1291** (the second writer, P2) and **#1292** (the
+golden-logits miss below, P3).
+
+**UEFI-direct path control** (46aa3b13 UEFI test PE; the fix is a skip
+on UEFI, so this is the snapshot+unmap diagnostic):
+`uefisu-suite-46aa3b13-boot01..05.txt`: 5 of 5 complete, skip line
+printed, no fault, no halt, no verifier finding, **0 damaged pages in
+every scan** (no zeroed lines, no 0x102c0 record). Against kexec:
+the #1207 halt in 3 of 16 boots and the 0x102c0 record in 10 of 10
+snapshot boots. Both writers are kexec-only on these rows, which points
+at state Linux leaves behind. Unlisted: `test_component_cleanup_ctx_is_per_task`
+in boots 02 and 05 (#1290, a third and fourth sighting, all PMM_POISON
+builds).
+
+**The fix alone, b9f2030a** (no diagnostic code):
+- Integration suite, kexec x3 (`fix-kexec-suite-b9f2030a-boot01..03.txt`):
+  flush done before `pmm_init` (polls 1, 2, 2, 1), test passes under the
+  stricter check, inherit normal, 10 listed failures, no halt.
+- Integration suite, UEFI-direct x3 (`fix-uefi-suite-b9f2030a-boot01..03.txt`):
+  skip line, test passes, 15/16/15 failures; boot01 has one unlisted
+  failure, `test_golden_first_step_logits` (got -4.52435, want -5.283207,
+  tolerance 0.4), which passed in every other capture of the session:
+  #1292.
+- `boot_test --count 10` production, kexec (`prod-kexec-b9f2030a-boot01..10.txt`,
+  calls of 3+3+3+1): 10 of 10 to `slmos>`, flush line in each.
+- `boot_test --count 10` production, UEFI-direct
+  (`prod-uefi-b9f2030a-boot01..10.txt`): 10 of 10 to `slmos>`, skip line
+  in each.
+
+**No PR.** The brief opens a PR only if the bar is met and the critic
+passes. The halt criterion is met (0 in 27, P = 0.004 by chance), but "0
+poison damage" with full-memory scans is not (the second writer, #1291),
+and the critic failed (ii) and (iii). `fix/1207-early-l2-flush` b9f2030a
+is pushed and ready if the user chooses to accept the halt criterion or
+once #1291 is resolved. Not done: a critic round 2 on b9f2030a; a hash
+around the inherit's own `ga10b_l2_evict_sysmem()` call; jetson-nano-1
+or another power mode; identification of the second writer.
+
+**Board as left** (`jetson-as-left.txt`): SD Linux, BootCurrent 0001,
+no BootNext, BootOrder unchanged; NVMe ESP `SLMOS.efi` 789cba62 (fresh
+read-only mount, `fsck.vfat -n` clean), restored from the session's
+verified backup; the 19 `slmos-1207-*.elf` files staged by this session
+removed, 14 `*.elf*` files as found; health online, powered on,
+`recovery_mode` released; claim released at 08:2x UTC.
