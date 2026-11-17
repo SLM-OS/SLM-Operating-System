@@ -73,6 +73,62 @@
 void ga10b_kexec_handoff_register_reserves(void);
 
 /*
+ * #1207: write the GA10B L2's dirty lines back and invalidate it before
+ * pmm_init lists any free page.
+ *
+ * After a kexec from Linux the GPU L2 can still hold dirty lines for
+ * buffers nvgpu freed before the kexec. Those pages are free RAM to
+ * SLM-OS. The first L2 flush SLM-OS issues after pmm_init (the inherit's
+ * UFLUSH sequence, at the first MNIST call in test_suite_gpu) wrote them
+ * back over pages the PMM owned by then: zeroed free-list heads at the
+ * MNIST pushbuf + 0x100000 / + 0x120000 on jetson-nano-2, and the "count
+ * without a list" halt. Flushing here, while those pages hold nothing of
+ * SLM-OS's, lets the write-back land harmlessly; 3 of 3 kexec boots with
+ * the flush this early had no damaged free page (E3, 89068471).
+ *
+ * Sequence (nvgpu gv11b_mm_l2_flush order, by direct BAR0 MMIO: the GSP
+ * platform vtable is not installed this early): FB_FLUSH, L2_FLUSH_DIRTY,
+ * L2_SYSMEM_INVALIDATE, FB_FLUSH, each written 1 and polled until
+ * PENDING_BUSY and OUTSTANDING clear, with nvgpu's retry budgets (100,
+ * 2000, 200, 100 polls, 5 us apart). Skipped, without touching the UFLUSH
+ * registers, on a UEFI-direct boot and when FECS_CURRENT_CTX reads 0 or a
+ * 0xbadfxxxx PRI error (cold or power-gated GPU: no inherited L2, block
+ * possibly unpowered). A timeout is printed loudly and the remaining ops
+ * still run; it does not panic. Prints one line with the result.
+ */
+enum ga10b_l2_flush_early_rc {
+    GA10B_L2_FLUSH_EARLY_TIMEOUT     = -1, /* an op did not complete */
+    GA10B_L2_FLUSH_EARLY_DONE        = 0,  /* all four ops completed */
+    GA10B_L2_FLUSH_EARLY_SKIP_POISON = 1,  /* FECS_CURRENT_CTX = 0xbadfxxxx */
+    GA10B_L2_FLUSH_EARLY_SKIP_NO_CTX = 2,  /* FECS_CURRENT_CTX = 0 */
+    GA10B_L2_FLUSH_EARLY_SKIP_UEFI   = 3,  /* UEFI-direct boot: no inherited GPU */
+};
+
+#define GA10B_L2_FLUSH_EARLY_OPS 4u
+
+/* MMIO accessor (BAR0 offsets), so the sequence is host-testable. */
+struct ga10b_early_mmio {
+    uint32_t (*r32)(uint32_t off);
+    void (*w32)(uint32_t off, uint32_t val);
+    void (*delay_5us)(void);
+};
+
+/* What the last call did; `before_pmm_init` is recorded by the kernel
+ * wrapper (pmm_get_total_pages() still 0). */
+struct ga10b_l2_flush_early_status {
+    bool ran;
+    bool before_pmm_init;
+    int rc;
+    uint32_t fecs_current_ctx;
+    uint32_t polls[GA10B_L2_FLUSH_EARLY_OPS];   /* reads until done, per op */
+    uint32_t timed_out_mask;                    /* bit i: op i timed out */
+};
+
+int ga10b_kexec_l2_flush_early_with(const struct ga10b_early_mmio *io);
+int ga10b_kexec_l2_flush_early(void);
+const struct ga10b_l2_flush_early_status *ga10b_kexec_l2_flush_early_status(void);
+
+/*
  * Return the inst-block phys captured by `ga10b_kexec_handoff_-
  * register_reserves` at boot from FECS_CURRENT_CTX.
  *

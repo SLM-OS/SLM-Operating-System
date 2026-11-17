@@ -406,7 +406,16 @@ void kernel_main(void *dtb)
      * SLM-OS kernel code or model bytes — see PR #797 diagnostic)
      * doesn't fire. Safe to call on non-kexec boots: the function
      * early-returns when FECS_CURRENT_CTX is zero / target=0 / a
-     * poisoned-MMIO pattern. */
+     * poisoned-MMIO pattern.
+     *
+     * #1207: first write back and invalidate the GPU L2. Dirty lines
+     * nvgpu left for buffers it freed before the kexec would otherwise
+     * be written back by SLM-OS's first L2 flush, after pmm_init, over
+     * pages the PMM owns by then (zeroed free-list heads, then the
+     * "free list is empty but its count is N" halt). This must stay
+     * before pmm_init; test_l2_flush_early_called_before_pmm_init in
+     * host-tools/gsp-harness/test_ga10b_bringup.c checks the order. */
+    (void)ga10b_kexec_l2_flush_early();
     ga10b_kexec_handoff_register_reserves();
 #endif
 

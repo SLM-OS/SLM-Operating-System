@@ -828,13 +828,22 @@ this per operation and walks the lists after every test suite.
 `pmm_verify_free_lists()` (every build, no table) walks the lists and
 prints a `[pmm-verify] FINDING` with the damaged block's bytes; test
 kernels call it at each suite boundary and once a second from CPU 0's
-tick. **#1207 is still open on Jetson kexec:** 1 to 2 suite boots in 10
-end with a count without a list. In the one boot captured, a listed
-order-4 block read all zero across its start (both links, 64 bytes each
-side of the block boundary) after `test_suite_gpu`. When DRAM changed is
-not known (a non-snooping device can write under a line the CPU holds).
-A header write lost to DC IVAC is excluded on these cores if the note in
-`kernel/arch/arm64/mmu.S` holds: A76 and A78AE execute it as DC CIVAC.
+tick. **#1207 on Jetson kexec, cause and fix:** 3 of 16 baseline suite
+boots ended with a count without a list. The damaged blocks were listed
+free heads zeroed across their start, always 0x100000 to 0x120000 above
+the MNIST hand-off pushbuf, between the walks after
+`test_suite_oplib_gpu_as` and after `test_suite_gpu`. A line-hash window
+diagnostic placed the write at the first MNIST call, where the inherit
+runs `ga10b_l2_evict_sysmem()`: the GA10B L2 still held dirty lines for
+buffers nvgpu freed before the kexec, and that flush wrote them back over
+pages the PMM owned by then. ELPG, CPU writes (no fault under
+`PMM_UNMAP`) and the inherited channel VMs (no mapping there) were ruled
+out. `ga10b_kexec_l2_flush_early()` (`ga10b_handoff_reserve.c`) now runs
+the same UFLUSH sequence from `kernel_main` before
+`ga10b_kexec_handoff_register_reserves()` and `pmm_init`, so the
+write-back lands before any page is listed (3 of 3 boots clean with the
+diagnostic version, E3). Any new GPU-side cleanup of state Linux left must
+also happen before `pmm_init`.
 
 **`PMM_POISON` / `PMM_UNMAP` (debug options, #1207, `docs/testing.md`):**
 free pages hold `0xF4EE << 48 | pa` and are reached only through a Normal

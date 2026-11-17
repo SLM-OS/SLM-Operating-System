@@ -76,6 +76,7 @@ void uart_puts(const char *s);
 #include "../../include/dtb.h"
 #include "../../include/pmm.h"
 #include "../../include/uart.h"
+#include "../../include/boot_source.h"
 #endif
 
 #include <stdbool.h>
@@ -1154,6 +1155,137 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
     reserve_channel_vm(resident_inst_phys, NULL, &seen);
     return found_mask;
 }
+
+/* ---------------------------------------------------------------
+ * #1207: GPU L2 write-back and invalidate before pmm_init. See the
+ * header for the why. UFLUSH offsets and bits as in ga10b_bringup.c
+ * (nvgpu hw_flush_ga10b.h: flush_fb_flush_r 0x70000,
+ * flush_l2_system_invalidate_r 0x70004, flush_l2_flush_dirty_r 0x70010;
+ * pending bit 0, outstanding bit 1).
+ * --------------------------------------------------------------- */
+
+#define GA10B_EARLY_UFLUSH_FB_FLUSH             0x00070000u
+#define GA10B_EARLY_UFLUSH_L2_SYSMEM_INVALIDATE 0x00070004u
+#define GA10B_EARLY_UFLUSH_L2_FLUSH_DIRTY       0x00070010u
+#define GA10B_EARLY_UFLUSH_PENDING              (1u << 0)
+#define GA10B_EARLY_UFLUSH_BUSY_MASK            0x3u
+
+static const struct {
+    uint32_t off;
+    uint32_t retries;       /* nvgpu: fb 100, l2_inv 200, l2_flush 2000 */
+    const char *name;
+} ga10b_early_ops[GA10B_L2_FLUSH_EARLY_OPS] = {
+    { GA10B_EARLY_UFLUSH_FB_FLUSH,             100u,  "fb_flush" },
+    { GA10B_EARLY_UFLUSH_L2_FLUSH_DIRTY,       2000u, "l2_flush_dirty" },
+    { GA10B_EARLY_UFLUSH_L2_SYSMEM_INVALIDATE, 200u,  "l2_sysmem_invalidate" },
+    { GA10B_EARLY_UFLUSH_FB_FLUSH,             100u,  "fb_flush" },
+};
+
+static struct ga10b_l2_flush_early_status g_l2_flush_early;
+
+const struct ga10b_l2_flush_early_status *ga10b_kexec_l2_flush_early_status(void)
+{
+    return &g_l2_flush_early;
+}
+
+int ga10b_kexec_l2_flush_early_with(const struct ga10b_early_mmio *io)
+{
+    struct ga10b_l2_flush_early_status *st = &g_l2_flush_early;
+    uint32_t ctx = io->r32(GA10B_GR_FECS_CURRENT_CTX_OFFSET);
+
+    st->ran = true;
+    st->fecs_current_ctx = ctx;
+    st->timed_out_mask = 0;
+    for (uint32_t i = 0; i < GA10B_L2_FLUSH_EARLY_OPS; i++) {
+        st->polls[i] = 0;
+    }
+    if ((ctx & 0xFFFF0000u) == 0xbadf0000u || ctx == 0u) {
+        st->rc = ctx == 0u ? GA10B_L2_FLUSH_EARLY_SKIP_NO_CTX
+                           : GA10B_L2_FLUSH_EARLY_SKIP_POISON;
+        uart_printf("[ga10b-l2-early] FECS_CURRENT_CTX=0x%08x: no inherited "
+                    "GPU context, L2 flush before pmm_init skipped (#1207)\n",
+                    (unsigned)ctx);
+        return st->rc;
+    }
+
+    for (uint32_t i = 0; i < GA10B_L2_FLUSH_EARLY_OPS; i++) {
+        io->w32(ga10b_early_ops[i].off, GA10B_EARLY_UFLUSH_PENDING);
+        uint32_t n = 0;
+        bool done = false;
+        while (n < ga10b_early_ops[i].retries) {
+            n++;
+            if ((io->r32(ga10b_early_ops[i].off) & GA10B_EARLY_UFLUSH_BUSY_MASK) == 0u) {
+                done = true;
+                break;
+            }
+            io->delay_5us();
+        }
+        st->polls[i] = n;
+        if (!done) {
+            /* Keep going: the later ops may still write back or drop
+             * the stale lines; the result says it did not complete. */
+            st->timed_out_mask |= 1u << i;
+            uart_printf("[ga10b-l2-early] *** %s (op %u of 4, BAR0+0x%05x) TIMED "
+                        "OUT after %u polls, last 0x%08x: the GPU L2 may still "
+                        "hold Linux's dirty lines, and a later flush can write "
+                        "them over pages the PMM hands out (#1207) ***\n",
+                        ga10b_early_ops[i].name, (unsigned)(i + 1),
+                        (unsigned)ga10b_early_ops[i].off, (unsigned)n,
+                        (unsigned)io->r32(ga10b_early_ops[i].off));
+        }
+    }
+    st->rc = st->timed_out_mask ? GA10B_L2_FLUSH_EARLY_TIMEOUT
+                                : GA10B_L2_FLUSH_EARLY_DONE;
+    uart_printf("[ga10b-l2-early] FECS_CURRENT_CTX=0x%08x: GPU L2 %s before "
+                "pmm_init (polls: fb_flush %u, l2_flush_dirty %u, "
+                "l2_sysmem_invalidate %u, fb_flush %u) (#1207)\n",
+                (unsigned)ctx,
+                st->timed_out_mask ? "flush INCOMPLETE" : "written back and invalidated",
+                (unsigned)st->polls[0], (unsigned)st->polls[1],
+                (unsigned)st->polls[2], (unsigned)st->polls[3]);
+    return st->rc;
+}
+
+#ifndef SLM_HOST_HARNESS
+static uint32_t ga10b_early_r32(uint32_t off)
+{
+    return *(volatile uint32_t *)(uintptr_t)(GA10B_BAR0_BASE + off);
+}
+
+static void ga10b_early_w32(uint32_t off, uint32_t val)
+{
+    *(volatile uint32_t *)(uintptr_t)(GA10B_BAR0_BASE + off) = val;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* ~5 us on Cortex-A78AE, the calibration ga10b_bringup.c's UFLUSH poll
+ * uses (7500 volatile iterations); the timer is not set up yet. */
+static void ga10b_early_delay_5us(void)
+{
+    for (volatile int i = 0; i < 7500; i++) {
+    }
+}
+
+int ga10b_kexec_l2_flush_early(void)
+{
+    static const struct ga10b_early_mmio io = {
+        .r32 = ga10b_early_r32,
+        .w32 = ga10b_early_w32,
+        .delay_5us = ga10b_early_delay_5us,
+    };
+    g_l2_flush_early.before_pmm_init = pmm_get_total_pages() == 0;
+    if (boot_source_is_uefi()) {
+        /* UEFI-direct: Linux never ran, and an unpowered GPU block can
+         * take an SError into EL3 on access. */
+        g_l2_flush_early.ran = true;
+        g_l2_flush_early.rc = GA10B_L2_FLUSH_EARLY_SKIP_UEFI;
+        uart_puts("[ga10b-l2-early] UEFI-direct boot: no inherited GPU L2, "
+                  "flush before pmm_init skipped (#1207)\n");
+        return g_l2_flush_early.rc;
+    }
+    return ga10b_kexec_l2_flush_early_with(&io);
+}
+#endif
 
 /* ---------------------------------------------------------------
  * Orchestrator.
