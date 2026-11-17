@@ -1,0 +1,284 @@
+diff --git a/kernel/gpu/nvidia/ga10b_handoff_reserve.c b/kernel/gpu/nvidia/ga10b_handoff_reserve.c
+index 1808c464..f81ec782 100644
+--- a/kernel/gpu/nvidia/ga10b_handoff_reserve.c
++++ b/kernel/gpu/nvidia/ga10b_handoff_reserve.c
+@@ -337,6 +337,9 @@ static void reserve_handoff_dmabuf(uint64_t handoff_phys)
+  * collectively well under the PMM user-reserve table cap.
+  * Read the (volatile) handoff fields into locals first so the
+  * struct-initializer fits a static helper table cleanly. */
++/* DIAGNOSTIC ONLY (diag/1207-window, #1207): read by test_gpu.c. */
++uint64_t g_diag1207_mnist_pushbuf_phys;
++
+ static void reserve_helper_buffers(const volatile struct ga10b_channel_handoff *h)
+ {
+     uint64_t userd_p   = h->userd_phys;
+@@ -1016,6 +1019,10 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
+             (uintptr_t)handoff_phys;
+ 
+         reserve_handoff_inst_block(h, resident_inst_phys);
++        /* DIAGNOSTIC ONLY (diag/1207-window, #1207, never merged). */
++        if (kind == 0u) {
++            g_diag1207_mnist_pushbuf_phys = h->pushbuf_phys;
++        }
+         reserve_helper_buffers(h);
+         reserve_per_op_shaders(h);
+         reserve_gr_ctx_extents(h);
+diff --git a/kernel/tests/test_gpu.c b/kernel/tests/test_gpu.c
+index 9e4bdc9c..8e508ebd 100644
+--- a/kernel/tests/test_gpu.c
++++ b/kernel/tests/test_gpu.c
+@@ -897,73 +897,210 @@ static void test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson(void)
+  * Test Suite Entry Point
+  * ============================================================================ */
+ 
++/* ============================================================================
++ * DIAGNOSTIC ONLY (diag/1207-window, #1207, never merged).
++ *
++ * Hashes every 64-byte line of a 4 MB window around the MNIST hand-off
++ * pushbuf (pushbuf - 1 MB .. pushbuf + 3 MB) at the start of this suite,
++ * then after each test invalidates the window from the CPU caches (DC
++ * CIVAC) and re-hashes it, printing every run of changed lines with its
++ * offset from the pushbuf, whether its bytes are all zero, whether its
++ * page is a free PMM page, and its first 32 bytes. Nothing is written
++ * to the window, so the inherited GPU state is untouched.
++ * ============================================================================ */
++#if defined(PLATFORM_JETSON_ORIN_NANO)
++#include "pmm_internal.h"
++static void d1207_civac(uint64_t base, uint64_t bytes)
++{
++    for (uint64_t a = base; a < base + bytes; a += 64u) {
++        __asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
++    }
++    __asm__ volatile("dsb sy" ::: "memory");
++}
++extern uint64_t g_diag1207_mnist_pushbuf_phys;
++#define D1207_BEFORE   0x100000ull
++#define D1207_BYTES    0x400000ull
++#define D1207_LINES    (D1207_BYTES / 64u)
++static uint32_t d1207_hash[D1207_LINES];
++static uint64_t d1207_base;
++static unsigned d1207_runs_printed;
++
++static uint32_t d1207_line_hash(const volatile uint64_t *w)
++{
++    uint32_t h = 2166136261u;
++    for (int i = 0; i < 8; i++) {
++        uint64_t v = w[i];
++        h = (h ^ (uint32_t)v) * 16777619u;
++        h = (h ^ (uint32_t)(v >> 32)) * 16777619u;
++    }
++    return h;
++}
++
++static void d1207_snapshot(void)
++{
++    uint64_t pb = g_diag1207_mnist_pushbuf_phys;
++    if (pb == 0u) {
++        uart_puts("[1207-win] no MNIST hand-off pushbuf; window check off\n");
++        d1207_base = 0;
++        return;
++    }
++    d1207_base = (pb - D1207_BEFORE) & ~0xfffull;
++    d1207_civac(d1207_base, D1207_BYTES);
++    for (uint64_t i = 0; i < D1207_LINES; i++) {
++        d1207_hash[i] = d1207_line_hash(
++            (const volatile uint64_t *)(uintptr_t)(d1207_base + i * 64u));
++    }
++    uart_printf("[1207-win] armed: window 0x%lx-0x%lx (pushbuf 0x%lx - 0x%lx .. + 0x%lx)\n",
++                (unsigned long)d1207_base, (unsigned long)(d1207_base + D1207_BYTES),
++                (unsigned long)pb, (unsigned long)D1207_BEFORE,
++                (unsigned long)(D1207_BYTES - D1207_BEFORE));
++}
++
++static void d1207_report_run(const char *test, uint64_t first, uint64_t last,
++                             bool all_zero)
++{
++    uint64_t pb = g_diag1207_mnist_pushbuf_phys;
++    uint64_t a = d1207_base + first * 64u;
++    uint64_t b = d1207_base + (last + 1u) * 64u;
++    bool free_a = pmm_test_dump_readable((uintptr_t)a);
++    bool free_b = pmm_test_dump_readable((uintptr_t)(b - 64u));
++    /* Changes in allocated, non-zeroed lines are live data (task stacks
++     * and the like): count them, print only free-page or all-zero runs. */
++    if (!free_a && !free_b && !all_zero) {
++        return;
++    }
++    if (d1207_runs_printed++ >= 400u) {
++        return;
++    }
++    const volatile uint64_t *w = (const volatile uint64_t *)(uintptr_t)a;
++    uart_printf("[1207-win] after %s: changed 0x%lx-0x%lx (%lu lines, pushbuf %s0x%lx .. +0x%lx) "
++                "%s, first page %s, last page %s; first line %016lx %016lx %016lx %016lx\n",
++                test, (unsigned long)a, (unsigned long)b,
++                (unsigned long)(last - first + 1u),
++                a >= pb ? "+" : "-", (unsigned long)(a >= pb ? a - pb : pb - a),
++                (unsigned long)(b - pb),
++                all_zero ? "all zero" : "NOT all zero",
++                free_a ? "free" : "not free",
++                free_b ? "free" : "not free",
++                (unsigned long)w[0], (unsigned long)w[1],
++                (unsigned long)w[2], (unsigned long)w[3]);
++}
++
++static void d1207_check(const char *test)
++{
++    if (d1207_base == 0u) {
++        return;
++    }
++    d1207_civac(d1207_base, D1207_BYTES);
++    uint64_t run_first = 0;
++    bool in_run = false, run_zero = true;
++    unsigned changed = 0;
++    for (uint64_t i = 0; i < D1207_LINES; i++) {
++        const volatile uint64_t *w =
++            (const volatile uint64_t *)(uintptr_t)(d1207_base + i * 64u);
++        uint32_t h = d1207_line_hash(w);
++        bool ch = h != d1207_hash[i];
++        if (ch) {
++            bool z = true;
++            for (int k = 0; k < 8; k++) {
++                if (w[k] != 0u) {
++                    z = false;
++                }
++            }
++            changed++;
++            d1207_hash[i] = h;
++            if (!in_run) {
++                in_run = true;
++                run_first = i;
++                run_zero = z;
++            } else {
++                run_zero = run_zero && z;
++            }
++        }
++        if (in_run && (!ch || i + 1u == D1207_LINES)) {
++            d1207_report_run(test, run_first, ch ? i : i - 1u, run_zero);
++            in_run = false;
++        }
++    }
++    if (changed != 0u) {
++        uart_printf("[1207-win] after %s: %u changed line(s) in the window\n", test, changed);
++    }
++}
++#define D1207_SNAPSHOT() d1207_snapshot()
++#define RUN_TEST_W(fn) do { RUN_TEST(fn); d1207_check(#fn); } while (0)
++#else
++#define D1207_SNAPSHOT() ((void)0)
++#define RUN_TEST_W(fn) RUN_TEST(fn)
++#endif
++
+ int test_suite_gpu(void)
+ {
+     UnityBegin("GPU Tests");
++    D1207_SNAPSHOT();
+ 
+     /* Regression tests: Jetson CBB firewall */
+-    RUN_TEST(test_gpu_jetson_uses_stub_driver);
+-    RUN_TEST(test_spinlock_safe_on_jetson);
++    RUN_TEST_W(test_gpu_jetson_uses_stub_driver);
++    RUN_TEST_W(test_spinlock_safe_on_jetson);
+ 
+     /* Regression tests: Jetson kexec boot fixes */
+-    RUN_TEST(test_daif_masked_at_boot);
+-    RUN_TEST(test_uart_output_no_hang);
++    RUN_TEST_W(test_daif_masked_at_boot);
++    RUN_TEST_W(test_uart_output_no_hang);
+ 
+     /* Initialization tests */
+-    RUN_TEST(test_gpu_available_after_init);
+-    RUN_TEST(test_gpu_get_info_valid);
+-    RUN_TEST(test_gpu_get_info_null_returns_error);
++    RUN_TEST_W(test_gpu_available_after_init);
++    RUN_TEST_W(test_gpu_get_info_valid);
++    RUN_TEST_W(test_gpu_get_info_null_returns_error);
+ 
+     /* Allocation tests */
+-    RUN_TEST(test_gpu_alloc_returns_valid_buffer);
+-    RUN_TEST(test_gpu_alloc_memory_is_accessible);
+-    RUN_TEST(test_gpu_alloc_multiple_buffers_distinct);
+-    RUN_TEST(test_gpu_alloc_2mb_alignment);
+-    RUN_TEST(test_gpu_alloc_zero_size_returns_error);
+-    RUN_TEST(test_gpu_alloc_null_buffer_returns_error);
++    RUN_TEST_W(test_gpu_alloc_returns_valid_buffer);
++    RUN_TEST_W(test_gpu_alloc_memory_is_accessible);
++    RUN_TEST_W(test_gpu_alloc_multiple_buffers_distinct);
++    RUN_TEST_W(test_gpu_alloc_2mb_alignment);
++    RUN_TEST_W(test_gpu_alloc_zero_size_returns_error);
++    RUN_TEST_W(test_gpu_alloc_null_buffer_returns_error);
+ 
+     /* Deallocation tests */
+-    RUN_TEST(test_gpu_free_releases_memory);
+-    RUN_TEST(test_gpu_free_null_is_safe);
+-    RUN_TEST(test_gpu_free_clears_buffer);
++    RUN_TEST_W(test_gpu_free_releases_memory);
++    RUN_TEST_W(test_gpu_free_null_is_safe);
++    RUN_TEST_W(test_gpu_free_clears_buffer);
+ 
+     /* Cache coherency tests */
+-    RUN_TEST(test_cache_clean_executes);
+-    RUN_TEST(test_cache_invalidate_executes);
+-    RUN_TEST(test_cache_flush_executes);
+-    RUN_TEST(test_gpu_sync_for_gpu_executes);
+-    RUN_TEST(test_gpu_sync_for_cpu_executes);
+-    RUN_TEST(test_cache_ops_null_safe);
+-    RUN_TEST(test_cache_ops_zero_size_safe);
++    RUN_TEST_W(test_cache_clean_executes);
++    RUN_TEST_W(test_cache_invalidate_executes);
++    RUN_TEST_W(test_cache_flush_executes);
++    RUN_TEST_W(test_gpu_sync_for_gpu_executes);
++    RUN_TEST_W(test_gpu_sync_for_cpu_executes);
++    RUN_TEST_W(test_cache_ops_null_safe);
++    RUN_TEST_W(test_cache_ops_zero_size_safe);
+ 
+     /* Integration tests */
+-    RUN_TEST(test_gpu_buffer_workflow);
+-    RUN_TEST(test_gpu_alloc_free_cycle);
+-    RUN_TEST(test_gpu_alloc_large_buffer);
++    RUN_TEST_W(test_gpu_buffer_workflow);
++    RUN_TEST_W(test_gpu_alloc_free_cycle);
++    RUN_TEST_W(test_gpu_alloc_large_buffer);
+ 
+     /* NVIDIA register decode tests (platform-agnostic) */
+-    RUN_TEST(test_nv_boot0_arch_ga10b);
+-    RUN_TEST(test_nv_boot0_impl_ga10b);
+-    RUN_TEST(test_nv_boot42_chip_id_ga10b);
+-    RUN_TEST(test_nv_boot42_arch_ga10b);
+-    RUN_TEST(test_nv_chip_name_lookup);
+-    RUN_TEST(test_nv_gpu_not_present);
+-    RUN_TEST(test_nv_boot42_chip_id_ga106);
+-    RUN_TEST(test_nv_architecture_constants);
++    RUN_TEST_W(test_nv_boot0_arch_ga10b);
++    RUN_TEST_W(test_nv_boot0_impl_ga10b);
++    RUN_TEST_W(test_nv_boot42_chip_id_ga10b);
++    RUN_TEST_W(test_nv_boot42_arch_ga10b);
++    RUN_TEST_W(test_nv_chip_name_lookup);
++    RUN_TEST_W(test_nv_gpu_not_present);
++    RUN_TEST_W(test_nv_boot42_chip_id_ga106);
++    RUN_TEST_W(test_nv_architecture_constants);
+ 
+     /* MNIST GPU inference FFI (M7 + M9) — argmax helper +
+      * cross-platform stub contract for slm_gpu_run_mnist /
+      * slm_gpu_set_mnist_input{,_fill}. */
+-    RUN_TEST(test_slm_fp32_argmax_picks_largest_positive);
+-    RUN_TEST(test_slm_fp32_argmax_handles_negative_values);
+-    RUN_TEST(test_slm_fp32_argmax_handles_mixed_signs);
+-    RUN_TEST(test_slm_fp32_argmax_rejects_null_or_empty);
+-    RUN_TEST(test_slm_fp32_argmax_single_element);
+-    RUN_TEST(test_slm_fp32_argmax_nan_does_not_crash);
+-    RUN_TEST(test_slm_gpu_run_mnist_returns_negative_off_jetson);
+-    RUN_TEST(test_slm_gpu_run_mnist_null_buf_fails);
+-    RUN_TEST(test_slm_gpu_set_mnist_input_returns_negative_off_jetson);
+-    RUN_TEST(test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson);
++    RUN_TEST_W(test_slm_fp32_argmax_picks_largest_positive);
++    RUN_TEST_W(test_slm_fp32_argmax_handles_negative_values);
++    RUN_TEST_W(test_slm_fp32_argmax_handles_mixed_signs);
++    RUN_TEST_W(test_slm_fp32_argmax_rejects_null_or_empty);
++    RUN_TEST_W(test_slm_fp32_argmax_single_element);
++    RUN_TEST_W(test_slm_fp32_argmax_nan_does_not_crash);
++    RUN_TEST_W(test_slm_gpu_run_mnist_returns_negative_off_jetson);
++    RUN_TEST_W(test_slm_gpu_run_mnist_null_buf_fails);
++    RUN_TEST_W(test_slm_gpu_set_mnist_input_returns_negative_off_jetson);
++    RUN_TEST_W(test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson);
+ 
+     return UnityEnd();
+ }

@@ -1,0 +1,6 @@
+23:41:01 start mode=kexec n=3 elfs=[/root/slmos-1207-win-8e3828e8.elf /root/slmos-1207-win-8e3828e8.elf /root/slmos-1207-win-8e3828e8.elf] skip_current_boot_id=eae68ebf-c084-47c5-b040-db46a0afafdc pid=1291230
+23:42:31 trigger 1/3 elf=/root/slmos-1207-win-8e3828e8.elf boot_id=fae2b869-2143-4fe5-92f5-77ab7efcd464 state+uptime=[running 27.70 ] reply=[54ca8ed17bbe69d8 ]
+23:50:40 MANUAL trigger (boot_test o1207-win-0103 run 2; image replaced by c6ef3dfd after run 1's report cap) elf=/root/slmos-1207-win-c6ef3dfd.elf reply=[boot_id=0234735f-d4f9-4bc7-9267-a199d61dbac0 uptime=119.80 7b7aabca8d91ee21 ]
+23:51:03 start mode=kexec n=1 elfs=[/root/slmos-1207-win-c6ef3dfd.elf] skip_current_boot_id=none pid=1351953
+23:58:48 trigger 1/1 elf=/root/slmos-1207-win-c6ef3dfd.elf boot_id=b99c8873-1e53-4e5a-b427-06ed38a530e4 state+uptime=[running 27.37 ] reply=[7b7aabca8d91ee21 ]
+23:58:48 end triggers=1
